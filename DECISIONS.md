@@ -115,7 +115,10 @@ handling.
 **Impact.** `setup-rtce --lightning` and `tests/test_lightning_queries.py` equivalent
 use `/query/v1`.
 
-### D-009 · ASSUMPTION · `PARTITION BY service_name` inside `ML_DETECT_ANOMALIES` OVER works
+### D-009 · CONFIRMED · `PARTITION BY service_name` inside `ML_DETECT_ANOMALIES` OVER works
+**Status.** Confirmed by the user at Break 1: partition per service in one statement,
+not separate statements per service.
+
 **What.** One ARIMA model per service, via `PARTITION BY service_name` in the OVER clause.
 **Options.** (a) Partition in one statement; (b) a separate statement per service.
 **Choice.** (a), per the brief (§5.3).
@@ -125,7 +128,8 @@ car_number ORDER BY window_time RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT RO
 **Impact.** Verify in Phase 3. If unsupported, fall back to per-service statements
 (a significant redesign) and raise it.
 
-### D-010 · ASSUMPTION · Two `ML_DETECT_ANOMALIES` calls in one statement
+### D-010 · CONFIRMED · Two `ML_DETECT_ANOMALIES` calls in one statement
+**Status.** Confirmed by the user at Break 1.
 **What.** Latency and traffic detectors in a single statement (§5.3).
 **Why.** Docs confirm multiple `OVER` aggregates are allowed when their windows are
 identical; both detectors share the exact same `PARTITION BY service_name ORDER BY
@@ -134,7 +138,8 @@ not documented.
 **Impact.** Verify in Phase 3; if rejected, split into two statements feeding
 `service_health` via a join, and raise it.
 
-### D-011 · ASSUMPTION · `LAST_VALUE` for deployment context in the window aggregation
+### D-011 · CONFIRMED · `LAST_VALUE` for deployment context in the window aggregation
+**Status.** Confirmed by the user at Break 1: use `LAST_VALUE`.
 **What.** Carrying `version`, `last_change`, etc. "as of window end" (§5.2).
 **Options.** `LAST_VALUE` (brief) or `MAX` (lexicographically wrong on version strings).
 **Choice.** `LAST_VALUE`, verify in Phase 3; `MAX` fallback with a documented caveat.
@@ -183,16 +188,16 @@ any idle-partition watermark stall, and progressive idleness would protect a
 multi-partition topic only while at least one partition keeps receiving data.
 **Impact.** No throughput concern at this volume.
 
-### D-016 · ASSUMPTION · CC Flink accepts an `upsert` table on a `delete`-cleanup topic
-**What.** Whether `'changelog.mode' = 'upsert'` + `'kafka.cleanup-policy' = 'delete'`
-is accepted together (needed by D-006).
-**Choice.** Assume yes; verify in Phase 2 when the platform module's `CREATE TABLE`
-runs.
-**Why.** Docs document both options independently but don't confirm the combination;
-upsert is normally paired with compaction.
-**Impact.** If rejected, options are `delete-compact` cleanup with a long compaction
-lag, or accepting that temporal-join replay only covers the retention/compaction
-window — either would be raised before proceeding.
+### D-016 · CONFIRMED · CC Flink accepts an `upsert` table on a `delete`-cleanup topic
+**Status.** Confirmed by the user at Break 1 ("of course possible"). I'll still see it
+succeed when the platform module's `CREATE TABLE` runs in Phase 2.
+**What.** `'changelog.mode' = 'upsert'` + `'kafka.cleanup-policy' = 'delete'` together
+(needed by D-006).
+**Note for accuracy.** The reference `race_standings` (the only upsert table in the F1
+repo, in `terraform/modules/topics/main.tf` and `platform-team/.../statements.tf`) sets
+*no* `cleanup-policy`, so it defaults to `compact` — i.e. the reference is not itself an
+example of upsert+delete, which is why this was raised. The combination is supported;
+proceeding with delete retention per D-006.
 
 ---
 
