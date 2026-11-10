@@ -37,18 +37,24 @@ offline-testable generator independent of the Confluent tooling.
 short and unambiguous.
 **Impact.** `ops-sim = opsgen.cli:main`; tests live in `opsgen/tests/`.
 
-### D-003 · ASSUMPTION · Resource naming prefix `RIVER-SHOP-DEMO`
+### D-003 · DECISION · Resource naming prefix `RIVER-OOPS-DEMO` (confirmed at Break 0)
 **What.** The fixed names the platform team gives the cluster and Flink pool, which
 the deploy finds by name (reference: `RIVER-RACING-DEMO-CLUSTER` / `-pool`).
-**Options.** `RIVER-SHOP-DEMO`, `RIVERSHOP-DEMO`, `AIOPS-DEMO`, something else.
-**Choice.** `RIVER-SHOP-DEMO-CLUSTER` and `RIVER-SHOP-DEMO-pool`; environment named
-`<sanitized local part>-<4 hex>_env`; credential-card prefix `DEMO`
-(`runs/pre-provisioned/credentials/DEMO.env`). Attendee-visible (it's the Flink
-database name), so raised as a Break 0 question.
-**Why.** "River Shop" is the brief's story name; this mirrors the reference pattern.
-**Impact.** Appears in the platform module, `lookup.py`, the walkthrough and the card.
+**Options.** `RIVER-SHOP-DEMO`, `RIVERSHOP-DEMO`, `AIOPS-DEMO`, `RIVER-OOPS-DEMO`.
+**Choice (confirmed by the user at Break 0).** `RIVER-OOPS-DEMO-CLUSTER` and
+`RIVER-OOPS-DEMO-pool`; environment named `<sanitized local part>-<4 hex>_env`;
+credential-card prefix `DEMO` (`runs/pre-provisioned/credentials/DEMO.env`).
+**The store/narrative brand stays "River Shop"** (the services, data, dashboard and
+walkthrough copy, per brief §1) — only the Confluent cluster/pool resource names use
+`RIVER-OOPS-DEMO` (a nod to the self-healing-IT "oops" story).
+**Why.** User's choice at Break 0; "River Oops" fits the incident-and-remediation
+narrative while keeping the brief's "River Shop" store.
+**Impact.** `RIVER-OOPS-DEMO` appears in the platform module, `lookup.py`, the deploy
+and the card; "River Shop" appears in the generator data and all attendee-facing
+prose. If you actually want the store renamed to "River Oops" too, say so and I'll
+change the narrative.
 
-### D-004 · ASSUMPTION · CSP Hosted model default `anthropic.claude-sonnet-4-6`
+### D-004 · DECISION · CSP Hosted model default `anthropic.claude-sonnet-4-6` (confirmed at Break 0)
 **What.** Default model behind `llm_textgen_model`.
 **Options.** Keep the reference default `anthropic.claude-sonnet-4-6`, or a newer id.
 **Choice.** Keep `anthropic.claude-sonnet-4-6` as the Terraform default
@@ -147,7 +153,7 @@ seed file, the Postgres/CDC path, `scripts/selfservice/seed.py`, and the deploy'
 `llm_textgen_model` exist" (§7.2). `test_platform_team_sync` loses the seed check and
 gains the two source-table DDL drift checks.
 
-### D-013 · DECISION · Docs site is hand-authored HTML, matching the reference
+### D-013 · DECISION · Docs site is hand-authored HTML, matching the reference (confirmed at Break 0)
 **What.** The GitHub Pages site tooling (delegated to me: "match the reference repo").
 **Options.** (a) Hand-author a single interactive HTML like the reference's
 `pre-provisioned.html`; (b) add a markdown→HTML generator so the `.md` is the single
