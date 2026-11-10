@@ -240,3 +240,19 @@ state and the ground-truth log are written by live mode (Phase 2); `state.py` an
 writing files during an offline run.
 **Impact.** The brief's "persist state / append incidents.jsonl" responsibilities are
 exercised by live mode in Phase 2 and by unit tests now.
+
+## Phase 2b
+
+### D-020 · DECISION · Deploy readiness check uses Schema Registry subjects + SHOW MODELS
+**What.** How `uv run deploy` checks "both source tables and `llm_textgen_model` exist"
+(brief §7.2, replacing the reference's `driver_race_history` row count).
+**Options.** (a) List Kafka topics via the cluster's Kafka REST endpoint; (b) check the
+registered Schema Registry subjects; plus a Flink `SHOW MODELS` for the model.
+**Choice.** (b) for the tables — a `<topic>-value` subject exists iff the `CREATE TABLE`
+ran — and `SHOW MODELS` (one short Flink statement) for the model.
+**Why.** The credential card doesn't carry the cluster's Kafka REST endpoint, and the SR
+subject is a faithful, cheap proof the table's schema was registered. The model isn't a
+REST resource, so a Flink statement is the natural check (as the reference used a Flink
+`COUNT(*)` for its check).
+**Impact.** The deploy needs the SR key (it has it) and one Flink call. Verified against a
+real environment at Break 2b.

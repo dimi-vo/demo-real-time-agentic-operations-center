@@ -80,11 +80,19 @@ def main(argv: list[str] | None = None) -> None:
         run_realtime(sim, DryRunSink(), root=None, write_groundtruth=False)
         return
 
-    sys.exit(
-        "Live mode (producing to Kafka) is implemented in Phase 2. For now use:\n"
-        "  uv run ops-sim --dry-run\n"
-        "  uv run ops-sim --dry-run --simulate 60 --seed 42"
-    )
+    # Live: produce to Kafka, loading the card and continuing from persisted state.
+    from opsgen.kafka_io import KafkaSink
+    from opsgen.state import load_state, state_path
+    from scripts.common.credentials import load_card
+    from scripts.common.paths import get_project_root
+
+    root = get_project_root()
+    path, card = load_card(args.creds, root)
+    print(f"Using credential card: {path}")
+    initial = load_state(state_path(root))
+    sim = Simulation(args.seed, start=time.time(), config=config, initial_state=initial)
+    print("Producing to service_requests and service_deployments. Ctrl-C to stop.")
+    run_realtime(sim, KafkaSink(card), root=root, write_groundtruth=True)
 
 
 if __name__ == "__main__":
