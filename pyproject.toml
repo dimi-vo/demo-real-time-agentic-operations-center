@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "demo-confluent-intelligence-aiops"
+version = "0.1.0"
+description = "Confluent Intelligence Self-Healing IT workshop — real-time AIOps with Flink Streaming Agents on Confluent Cloud"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+# Capped below 3.13 so confluent-kafka[avro]/fastavro resolve to published wheels
+# on every platform; see DECISIONS.md D-017. The generator itself is pure stdlib.
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+    "python-dotenv>=1.0.0,<2.0",
+    "rich>=13.0.0",
+    "requests>=2.31.0",
+    "pyyaml>=6.0",
+    # ops-wall live dashboard (consumes the developer's own Kafka topics)
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    # ops-sim Kafka path + ops-wall consumer (Phase 2): Avro via Schema Registry
+    "confluent-kafka[avro]>=2.4.0",
+    "fastavro>=1.9.0",
+    "httpx>=0.27.0",  # required by confluent-kafka's Schema Registry client
+    # setup-rtce: round-trip edits to ~/.codex/config.toml without reformatting
+    "tomlkit>=0.12.0",
+]
+
+[project.scripts]
+deploy = "deploy:main"
+destroy = "scripts.common.destroy:main"
+reset = "scripts.reset:main"
+setup-rtce = "scripts.setup_rtce:main"
+evaluate = "scripts.evaluate:main"
+ops-sim = "opsgen.cli:main"
+ops-wall = "scripts.opswall.app:main"
+
+[project.urls]
+Repository = "https://github.com/confluentinc/demo-confluent-intelligence-aiops"
+
+[tool.hatch.build.targets.wheel]
+packages = ["opsgen", "scripts"]
+
+[tool.hatch.build.targets.sdist]
+include = ["opsgen/", "scripts/", "sql/", "schemas/", "deploy.py", "README.md", "LICENSE"]
+exclude = ["/.git", "/platform-team", "*.pyc", "__pycache__"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.5.0",
+    "pytest>=8.0.0",
+]
+
+# Whole suite: `uv run pytest`.
+[tool.pytest.ini_options]
+testpaths = ["tests", "opsgen/tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "RUF"]
+ignore = ["B008"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

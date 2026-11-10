@@ -193,3 +193,45 @@ upsert is normally paired with compaction.
 **Impact.** If rejected, options are `delete-compact` cleanup with a long compaction
 lag, or accepting that temporal-join replay only covers the retention/compaction
 window — either would be raised before proceeding.
+
+---
+
+## Phase 1
+
+### D-017 · DECISION · `requires-python = ">=3.10,<3.13"`
+**What.** The Python version range for the project.
+**Options.** Match the reference's `>=3.10` (uncapped), or cap below a version.
+**Choice.** `>=3.10,<3.13`.
+**Why.** `uv` picks the newest allowed interpreter; capping below 3.13 guarantees
+`confluent-kafka[avro]` and `fastavro` resolve to published binary wheels on every
+platform (3.13/3.14 wheels lag). The generator itself is pure stdlib. uv selected
+CPython 3.12.15 locally and the suite passes.
+**Impact.** CI and developers run on 3.10–3.12. Lift the cap once the Kafka wheels
+for newer Pythons are universally available.
+
+### D-018 · DECISION · Separate RNG streams for the scheduler and for traffic
+**What.** How `--seed` maps to randomness in the generator.
+**Options.** (a) One rng shared by the incident/deploy scheduler and request
+generation; (b) two independent streams derived from the seed.
+**Choice.** (b): `sched_rng = Random(seed)`, `traffic_rng = Random(seed + 1)`.
+**Why.** With a shared stream the schedule depended on how many requests were drawn,
+so it shifted whenever traffic volume changed — fragile, and with seed 42 it starved
+`UPSTREAM_DROP` to zero over 60 minutes, which would fail the brief's acceptance
+command (`--simulate 60 --seed 42` must show all three signatures). Independent
+streams make the schedule a pure function of seed + config; seed 42 now yields
+5 BAD_DEPLOY / 2 TRAFFIC_SURGE / 3 UPSTREAM_DROP.
+**Impact.** "The whole schedule is reproducible with `--seed`" (brief §4.5) holds
+independent of traffic. The schedule stream equals `Random(seed)`, so the engine's
+own unit tests (which seed `Engine` directly) match production scheduling.
+
+### D-019 · DECISION · `--dry-run` writes nothing; persistence is a live-mode concern
+**What.** Whether `--dry-run` reads/writes the persisted state and `incidents.jsonl`
+under `runs/`.
+**Choice.** `--dry-run` starts from a fresh in-memory state and writes nothing, so a
+seeded dry run is byte-for-byte reproducible and never pollutes `runs/`. Persisted
+state and the ground-truth log are written by live mode (Phase 2); `state.py` and
+`groundtruth.py` are unit-tested directly now.
+**Why.** Reproducibility of `--dry-run --seed N`, and not surprising a developer by
+writing files during an offline run.
+**Impact.** The brief's "persist state / append incidents.jsonl" responsibilities are
+exercised by live mode in Phase 2 and by unit tests now.

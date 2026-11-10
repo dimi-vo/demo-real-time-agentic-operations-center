@@ -1,0 +1,19 @@
+{
+  "type": "record",
+  "name": "service_deployments_value",
+  "namespace": "io.confluent.aiops",
+  "doc": "Value schema for the service_deployments topic. Repo copy for --dry-run and the schema-vs-DDL drift test; live serialization uses the schema Flink registers from sql/source_service_deployments.sql. service_name is the primary key (non-null); Confluent includes the key column in the value (value.fields-include=all), to be reconfirmed against the registered schema in Phase 2.",
+  "fields": [
+    {"name": "service_name", "type": "string"},
+    {"name": "version", "type": ["null", "string"], "default": null},
+    {"name": "previous_version", "type": ["null", "string"], "default": null},
+    {"name": "deployed_at", "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}], "default": null},
+    {"name": "last_change", "type": ["null", "string"], "default": null},
+    {"name": "desired_replicas", "type": ["null", "int"], "default": null},
+    {"name": "ready_replicas", "type": ["null", "int"], "default": null},
+    {"name": "max_replicas", "type": ["null", "int"], "default": null},
+    {"name": "tier", "type": ["null", "string"], "default": null},
+    {"name": "owner_team", "type": ["null", "string"], "default": null},
+    {"name": "event_time", "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}], "default": null}
+  ]
+}
