@@ -192,3 +192,14 @@ def test_incident_ends_on_a_tick_at_the_logged_ended_at():
     for now, inc in ends:
         assert now == inc.degradation_end
         assert float(inc.degradation_end - inc.degradation_start).is_integer()
+
+
+def test_aligned_start_is_the_next_ten_second_boundary():
+    from opsgen.driver import aligned_start
+
+    assert aligned_start(1_800_000_003.4) == 1_800_000_010.0
+    assert aligned_start(1_800_000_010.0) == 1_800_000_010.0
+    # starting there, the first window is full: every tick of window 0 is produced
+    sim = Simulation(3, start=aligned_start(1_800_000_003.4), config=Config())
+    first_window = {r["event_time"] // 10_000 for k in range(10) for r in sim.tick(sim.start + k)[0]}
+    assert first_window == {180_000_001}

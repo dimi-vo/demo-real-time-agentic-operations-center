@@ -185,3 +185,56 @@ What I need from you:
 
 One heads-up: AR(1) keeps an incident flagged for most of its duration instead of only at
 onset. Each incident will therefore produce several agent calls, one per anomalous window.
+
+---
+
+# Addendum to Break 3: drop detection fixed offline (D-031)
+
+## 1. Summary
+
+You answered §6 question 1. The fix was chosen with an offline tool instead of 60-minute live replays.
+- **`scripts/tuning/`** (developer-only):
+  - `arima.py`: a replica of the AR(1) detector;
+  - `calibrate.py`: checks the replica against a recorded `service_health` dump;
+  - `sweep.py`: runs the real generator through the replica, scored with `evaluate`'s own
+    code.
+- **Generator:**
+  - rates are now web-gateway 10, catalog 8, auth 5, and cart, checkout and payments 6
+    requests/s (~41 msg/s);
+  - `ops-sim` starts on the next 10-second boundary (it waits at most 10 s), so the first
+    window is never half empty.
+- **Detector config unchanged** (D-029).
+- **Tests:** 136 pass, ruff clean.
+
+Commit: this commit.
+
+## 2. ⚠️ Deviations and workarounds
+
+- **DEVIATION D-031** replaces D-030's rates; D-030's softer outliers stay. Volume and replay
+  work are about 1.4× the D-030 rates and still about half the brief's.
+
+## 3. How to test it yourself
+
+**Verified by me (offline):**
+- **Replica against the recorded live run:** statuses agree on 97–100% of windows. On the
+  drop services' traffic, the bands are within 0–12% of Confluent's and statuses agree on
+  99.7–100%.
+- **Sweep, 24 simulated hours:**
+  - drops detected: 61/61 (aligned start) and 60/61 (unaligned);
+  - false positives: about 0.6 per service-hour on average, about 1.0 for the worst service.
+- **Narrower bounds or AR(2) on the old data:** they catch more drops but multiply false
+  positives (full table in D-031).
+- **Seeded schedule:** `--simulate 60 --seed 42` still has its 10 incidents.
+
+**Not verified yet (deferred at your request):** one live run at the new rates. Steps:
+1. `uv run reset`, then `uv run ops-sim`. It prints `Starting on the next 10-second
+   boundary...`.
+2. Create `service_health` right away.
+3. After 45–60 minutes, I run `evaluate` and `calibrate` read-only.
+
+This can run alongside Phase 4.
+
+## 6. Questions for me
+
+- Still open: **D-022**, whether to keep the two per-version count queries in walkthrough
+  2.1.

@@ -16,7 +16,7 @@ import argparse
 import sys
 import time
 
-from opsgen.driver import run_realtime, run_simulate
+from opsgen.driver import aligned_start, run_realtime, run_simulate
 from opsgen.engine import Config
 from opsgen.simulation import Simulation
 from opsgen.sinks import DryRunSink
@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.dry_run:
-        sim = Simulation(args.seed, start=time.time(), config=config)
+        sim = Simulation(args.seed, start=aligned_start(time.time()), config=config)
         run_realtime(sim, DryRunSink(), root=None, write_groundtruth=False)
         return
 
@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> None:
     from opsgen.groundtruth import incidents_path, last_incident_number
 
     initial = load_state(state_path(root))
-    sim = Simulation(args.seed, start=time.time(), config=config, initial_state=initial)
+    sim = Simulation(args.seed, start=aligned_start(time.time()), config=config, initial_state=initial)
     # Continue incident numbering across restarts (ids must stay unique in incidents.jsonl).
     sim.engine.incident_counter = last_incident_number(incidents_path(root))
     print("Producing to service_requests and service_deployments. Ctrl-C to stop.")

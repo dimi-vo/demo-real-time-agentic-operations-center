@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 from pathlib import Path
@@ -20,13 +21,34 @@ def _mmss(seconds: int) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+WINDOW_SECONDS = 10
+
+
+def aligned_start(now: float) -> float:
+    """The next 10-second boundary at or after `now` (D-031). Starting there means the
+    first 10-second window Flink aggregates is a full one: a half-empty first window would
+    look like a traffic drop and widen the detectors' bounds while it stays in training.
+    The F1 race did the same with its 20-second laps."""
+    return float(math.ceil(now / WINDOW_SECONDS) * WINDOW_SECONDS)
+
+
+def wait_until(start: float) -> None:
+    delay = start - time.time()
+    if delay > 0:
+        sys.stderr.write(f"Starting on the next 10-second boundary (in {delay:.0f} s)...\n")
+        sys.stderr.flush()
+        time.sleep(delay)
+
+
 def run_realtime(sim: Simulation, sink, root: Path | None = None, write_groundtruth: bool = False) -> None:
     """Tick once per wall-clock second, emitting through `sink`, until Ctrl-C.
 
     When `root` is given, the generator's deployment state is saved and (if
     `write_groundtruth`) each finished incident is appended to incidents.jsonl.
     `--dry-run` passes root=None, so a dry run writes nothing and stays reproducible.
+    The first tick is at `sim.start`; callers pass an `aligned_start` and this waits for it.
     """
+    wait_until(sim.start)
     sink.emit_deployments(sim.bootstrap())
     sink.flush()
     gt_path = incidents_path(root) if root is not None and write_groundtruth else None

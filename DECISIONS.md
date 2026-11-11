@@ -538,6 +538,8 @@ volume and storage drop by about 3×. Incident signatures are unchanged in relat
 messages per second" becomes ~29 in the walkthrough. Phase 3 validation is re-run on fresh
 data at the new rates (the old history at the old rates would distort the detector's
 first hour).
+**Superseded for the rates by D-031** (the softened outliers stay).
+
 **Status after the live run (Break 3): drop detection on checkout is not good enough.**
 Checkout's two drops were both missed. Its traffic bounds are ±22 around ~30 requests (the
 model's spread is ~25% wider than pure Poisson noise, the same factor as at the old rates),
@@ -550,3 +552,54 @@ original rates gave payments. **Proposed fix (needs the user's decision):** cart
 payments at 6 requests/s, web-gateway 10, catalog 8, auth 5 (~41 msg/s, about half the
 brief's volume, web-gateway still the busiest). Alternatives: the brief's original rates, or
 accept missed drops on low-volume services.
+
+### D-031 · DEVIATION · Drop services at 6 requests/s, aligned generator start, chosen with an offline tuning harness
+**What.** How we fixed drop detection after the live Break 3 run (checkout's drops 0/2 at the
+D-030 rates), and the tool used to choose.
+**The tool (`scripts/tuning/`, developer-only).** Instead of a 60-minute live replay per idea:
+- `arima.py`: a dependency-free replica of the AR(1) detector. It is OLS on a sliding
+  window of up to 360 points, re-fitted on every row (Confluent's spread and forecast change
+  on every row), with the first output after `minTrainingSize + 1` points, bounds at
+  forecast ± z·σ, and forecast and bounds rounded to whole numbers for whole-number series
+  (Confluent does this for `request_count`).
+- `calibrate.py`: feeds the recorded per-window inputs from a `service_health` dump through
+  the replica and compares it with what Confluent stored. On the final run: forecasts
+  within 0.2% (latency) and 0–1.5% (traffic); statuses agree on 97–100% of windows per
+  service and metric; **on the drop services' traffic (cart, checkout, payments) the bands
+  are within 0–12% and statuses agree 99.7–100%.** Documented limitation: after a huge jump
+  on a series (a bad deploy's ×4 latency, a surge's ×3 traffic), Confluent's spread recovers
+  faster than a residual standard deviation does (its estimator isn't documented), so there
+  the replica's bands stay 10–50% wider for a while and it slightly under-predicts
+  post-incident false positives.
+- `sweep.py`: runs the real generator (`opsgen.Simulation`, rates and multipliers overridden)
+  for hours of simulated time per seed, aggregates the requests into Flink's 10-second
+  windows, runs the replica, and scores with `scripts/evaluation/detection.score`, the same
+  code as `evaluate`. 24 simulated hours (8 seeds × 3 h, 61 drops) take ~10 s on 8 cores.
+**Findings (24 simulated hours per row).**
+
+| variant | msg/s | drops detected ≤ 3 windows | false positives per service-hour, avg / worst |
+|---|---|---|---|
+| brief rates | 87 | 61/61 | 0.70 / 0.95 |
+| D-030 rates, live-like start | 29 | 47/61 (payments 10/21) | 0.74 / 0.87 |
+| drop services 5/s, aligned start | 36 | 59/61 | 0.71 / 1.00 |
+| **drop services 6/s, live-like start** | **41** | **60/61** | **0.63 / 0.91** |
+| **drop services 6/s, aligned start** | **41** | **61/61** | **0.58 / 1.04** |
+| D-030 data, confidence 99 | 29 | 49/49* | 3.50 / 4.73 |
+| D-030 data, confidence 99.5 | 29 | 47/49* | 2.13 / 2.60 |
+| D-030 data, maxTrainingSize 180 | 29 | 39/49* | 0.99 / 1.27 |
+| D-030 data, AR(2) | 29 | 41/49* | 1.26 / 1.50 (69 echoes) |
+
+\* first sweep, 18 simulated hours. Detector-side changes either don't help or multiply false
+positives, so the fix is on the data side. A drop is reliably visible only with ~60 requests
+per window on the drop services.
+**Also found.** `ops-sim` started at an arbitrary moment, so its first 10-second window was only
+partly filled (live: 3.5 s of traffic) and looked like a drop. It sits inside warm-up (no
+status) but stays in training for up to an hour and widens the bounds. A few seconds of stray
+data at the head of the live topic made it worse.
+**Choice (user, Break 3).** Rates: web-gateway 10, catalog 8, auth 5, **cart 6, checkout 6,
+payments 6** requests/s (~41 msg/s; web-gateway stays the busiest). `ops-sim` (live and
+`--dry-run`) now starts on the next 10-second boundary (`opsgen.driver.aligned_start`, waits
+at most 10 s), as the F1 race aligned its laps to 20-second boundaries. Outliers stay at
+0.2% × 3 (D-030). The detector config is unchanged (D-029).
+**Impact.** Volume and replay work ~1.4× the D-030 rates, still about half the brief's. To be
+confirmed in one live run (fresh `reset` → `ops-sim` → `service_health`, then `evaluate`).
