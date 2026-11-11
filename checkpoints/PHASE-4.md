@@ -29,7 +29,7 @@ is the run order.
 - **`uv run setup-rtce --lightning remediation_decisions`**: the walkthrough's Lightning
   example (most recent decision for a trigger, with its reasoning), next to the existing
   `service_health` one.
-- **Tests:** 189 pass, ruff clean.
+- **Tests:** 190 pass, ruff clean.
 
 **Cumulative state.**
 - **Phase 0:** plan and decisions log.
@@ -68,7 +68,7 @@ No workarounds in code.
 ## 3. How to test it yourself
 
 **Verified by me (offline only):**
-- `uv run pytest`: 189 passed. `uv run ruff check .`: clean.
+- `uv run pytest`: 190 passed. `uv run ruff check .`: clean.
 - `tests/test_agent_sql.py` pins the contract the four SQL files and the scorer share:
   the six output lines in the brief's order, one example per allowed action, the allowed
   actions equal to the scorer's set, no apostrophe inside a prompt literal, the filter
