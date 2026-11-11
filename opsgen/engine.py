@@ -21,6 +21,7 @@ Rules (brief section 4.5):
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from opsgen.deployments import DeploymentState
@@ -126,7 +127,7 @@ class Engine:
     next_benign_at: float = field(default=0.0, init=False)
     last_incident_end: dict[str, float] = field(default_factory=dict, init=False)
     last_deploy_at: dict[str, float] = field(default_factory=dict, init=False)
-    _counter: int = field(default=0, init=False)
+    incident_counter: int = field(default=0, init=False)  # last incident number used
 
     def __post_init__(self) -> None:
         self.next_incident_at = self.start + self.config.quiet_period
@@ -187,8 +188,10 @@ class Engine:
             self.next_incident_at = now + self._uniform(self.config.spacing_min, self.config.spacing_max)
             return
         itype, svc = chosen
-        duration = self._uniform(self.config.duration_min, self.config.duration_max)
-        self._counter += 1
+        # Whole seconds, so degradation_end falls on a tick: the incident really ends (and a
+        # BAD_DEPLOY's ROLLBACK fires) exactly at the ended_at logged to incidents.jsonl.
+        duration = float(math.ceil(self._uniform(self.config.duration_min, self.config.duration_max)))
+        self.incident_counter += 1
         if itype == BAD_DEPLOY:
             t0 = now
             degradation_start = now + BAD_DEPLOY_ONSET_DELAY
@@ -196,7 +199,7 @@ class Engine:
             t0 = now
             degradation_start = now
         inc = Incident(
-            incident_id=f"INC{self._counter:04d}",
+            incident_id=f"INC{self.incident_counter:04d}",
             type=itype,
             service_name=svc,
             t0=t0,

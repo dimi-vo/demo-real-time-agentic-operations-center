@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "service_deployments_key",
+  "namespace": "org.apache.flink.avro.generated.record",
+  "doc": "Key schema for the service_deployments topic (the primary key), as Flink registers it. Repo copy for tests.",
+  "fields": [
+    {
+      "name": "service_name",
+      "type": "string",
+      "doc": "Service identifier (primary key)"
+    }
+  ]
+}

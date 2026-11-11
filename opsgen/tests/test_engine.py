@@ -150,3 +150,30 @@ def test_incident_candidates_match_spec():
     assert set(CANDIDATES[TRAFFIC_SURGE]) == {"web-gateway", "catalog", "auth"}
     assert set(CANDIDATES[UPSTREAM_DROP]) == {"cart", "checkout", "payments"}
     assert set(CANDIDATES[BAD_DEPLOY]) == set(service_names())
+
+
+def test_incident_numbering_continues_after_a_restart(tmp_path):
+    from opsgen.engine import Config, Engine
+    from opsgen.groundtruth import append_incident, incidents_path, last_incident_number
+
+    path = incidents_path(tmp_path)
+    assert last_incident_number(path) == 0
+    first = Engine(rng=random.Random(1), start=0.0, config=Config(quiet_period=0, spacing_min=1, spacing_max=2))
+    deps = _deployments()
+    ended = []
+    for now in range(0, 400):
+        for ev in first.tick(float(now), deps):
+            if ev.kind == "incident_end":
+                ended.append(ev.incident)
+                append_incident(path, ev.incident)
+    assert len(ended) >= 2
+    n = last_incident_number(path)
+    assert n == len(ended)
+    # a restarted generator picks up after the last logged id
+    second = Engine(rng=random.Random(2), start=1000.0, config=Config(quiet_period=0))
+    second.incident_counter = n
+    ids = []
+    for now in range(1000, 1300):
+        events = second.tick(float(now), _deployments(1000.0))
+        ids += [ev.incident.incident_id for ev in events if ev.kind == "incident_start"]
+    assert ids and ids[0] == f"INC{n + 1:04d}"

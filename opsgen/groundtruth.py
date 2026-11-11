@@ -42,6 +42,23 @@ def incident_record(inc: Incident) -> dict:
     return rec
 
 
+def last_incident_number(path: Path) -> int:
+    """The highest `INC<n>` number already logged, or 0. A restarted generator continues
+    numbering after it, so incident ids stay unique within one ground-truth file."""
+    path = Path(path)
+    if not path.is_file():
+        return 0
+    highest = 0
+    for line in path.read_text().splitlines():
+        try:
+            iid = json.loads(line).get("incident_id", "")
+        except ValueError:
+            continue
+        if isinstance(iid, str) and iid.startswith("INC") and iid[3:].isdigit():
+            highest = max(highest, int(iid[3:]))
+    return highest
+
+
 def append_incident(path: Path, inc: Incident) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -60,8 +60,12 @@ def test_deployment_record_fields_match_schema():
     sim = _sim()
     rec = sim._dep_record("checkout", 0.0)
     assert set(rec) == DEPLOYMENT_FIELDS
-    avsc = json.loads((AVSC_DIR / "service_deployments.avsc").read_text())
-    assert {f["name"] for f in avsc["fields"]} == DEPLOYMENT_FIELDS
+    # The record carries the key column too; Flink registers service_name in the key
+    # subject only, so the value schema has every other field.
+    value = json.loads((AVSC_DIR / "service_deployments.avsc").read_text())
+    key = json.loads((AVSC_DIR / "service_deployments_key.avsc").read_text())
+    assert {f["name"] for f in value["fields"]} == DEPLOYMENT_FIELDS - {"service_name"}
+    assert {f["name"] for f in key["fields"]} == {"service_name"}
 
 
 def test_route_field_combines_method_and_path():
@@ -143,3 +147,48 @@ def test_bad_deploy_window_raises_latency_and_errors():
                     errors += 1
     assert sum(lat) / len(lat) > 300  # baseline checkout median is 140ms; x4 under bad deploy
     assert errors / count > 0.05  # ~12% server errors
+
+
+def test_tick_timestamps_never_collide_with_the_next_tick():
+    # D-028: a request of tick k must never carry tick k+1's millisecond, where a deploy
+    # record for the next version may sit. The fractional start reproduces the live case
+    # (start * 1000 had a .599 ms fraction when the collision was observed).
+    sim = Simulation(7, start=1_794_390_513.319599, config=Config())
+    for k in range(600):
+        now = sim.start + k
+        reqs, deps, _ = sim.tick(now)
+        tick_ms = sim.start_ms + 1000 * k
+        assert all(tick_ms <= r["event_time"] <= tick_ms + 999 for r in reqs)
+        assert all(d["event_time"] == tick_ms for d in deps)
+
+
+def test_deploy_record_and_its_requests_share_the_new_version():
+    from opsgen.instances import version_hash
+
+    sim = Simulation(42, start=1_794_390_513.319599, config=Config())
+    seen_deploy = False
+    for k in range(400):
+        reqs, deps, events = sim.tick(sim.start + k)
+        for ev in events:
+            if ev.new_version is None:
+                continue
+            seen_deploy = True
+            dep = next(d for d in deps if d["service_name"] == ev.service_name)
+            mine = [r for r in reqs if r["service_name"] == ev.service_name]
+            h = version_hash(ev.service_name, ev.new_version)
+            assert all(r["event_time"] >= dep["event_time"] and f"-{h}-" in r["instance_id"] for r in mine)
+    assert seen_deploy
+
+
+def test_incident_ends_on_a_tick_at_the_logged_ended_at():
+    # Whole-second durations: the ROLLBACK/end fires exactly at degradation_end, so the
+    # ended_at in incidents.jsonl is when traffic really returned to normal.
+    sim = Simulation(42, start=1_794_390_513.319599, config=Config())
+    ends = []
+    for k in range(3600):
+        _, _, events = sim.tick(sim.start + k)
+        ends += [(ev.now, ev.incident) for ev in events if ev.kind == "incident_end"]
+    assert ends
+    for now, inc in ends:
+        assert now == inc.degradation_end
+        assert float(inc.degradation_end - inc.degradation_start).is_integer()

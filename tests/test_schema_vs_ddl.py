@@ -4,6 +4,10 @@ The DDL files (sql/source_*.sql) are the single source of truth for the schemas.
 This test fails if a column is added/removed/retyped in the DDL without the matching
 change to the .avsc copy used by --dry-run and tests. It compares field names and
 base types (ignoring nullability, which the DDL leaves implicit).
+
+As registered by Confluent Cloud (checked in Phase 3): TIMESTAMP(3) maps to
+`local-timestamp-millis`, and an upsert table's PRIMARY KEY columns are in the key
+subject only, not in the value.
 """
 
 import json
@@ -14,10 +18,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# (DDL, value .avsc, key .avsc or None)
 PAIRS = [
-    ("sql/source_service_requests.sql", "schemas/service_requests.avsc"),
-    ("sql/source_service_deployments.sql", "schemas/service_deployments.avsc"),
+    ("sql/source_service_requests.sql", "schemas/service_requests.avsc", None),
+    ("sql/source_service_deployments.sql", "schemas/service_deployments.avsc", "schemas/service_deployments_key.avsc"),
 ]
+_PRIMARY_KEY = re.compile(r"PRIMARY KEY \(([^)]*)\)")
 
 # A column line looks like:  `name` TYPE COMMENT '...'   (TYPE may be TIMESTAMP(3))
 _COLUMN = re.compile(r"^\s*`(\w+)`\s+([A-Za-z]+(?:\(\d+\))?)")
@@ -33,7 +39,7 @@ def _flink_base_type(flink_type: str) -> str:
     if t == "DOUBLE":
         return "double"
     if t.startswith("TIMESTAMP"):
-        return "timestamp-millis"
+        return "local-timestamp-millis"
     raise AssertionError(f"unmapped Flink type {flink_type!r}; extend _flink_base_type")
 
 
@@ -62,21 +68,30 @@ def _avsc_columns(avsc: dict) -> dict[str, str]:
     return {f["name"]: _avsc_base_type(f["type"]) for f in avsc["fields"]}
 
 
-@pytest.mark.parametrize(("sql_path", "avsc_path"), PAIRS, ids=[p[1] for p in PAIRS])
-def test_avsc_matches_ddl(sql_path, avsc_path):
-    ddl = _ddl_columns((ROOT / sql_path).read_text())
-    avsc = _avsc_columns(json.loads((ROOT / avsc_path).read_text()))
+def _primary_key(sql: str) -> list[str]:
+    m = _PRIMARY_KEY.search(sql)
+    return [c.strip().strip("`") for c in m.group(1).split(",")] if m else []
+
+
+@pytest.mark.parametrize(("sql_path", "avsc_path", "key_path"), PAIRS, ids=[p[1] for p in PAIRS])
+def test_avsc_matches_ddl(sql_path, avsc_path, key_path):
+    sql = (ROOT / sql_path).read_text()
+    ddl = _ddl_columns(sql)
     assert ddl, f"no columns parsed from {sql_path}"
-    assert ddl == avsc, (
-        f"{avsc_path} has drifted from {sql_path}.\n"
-        f"  DDL:  {ddl}\n"
-        f"  AVSC: {avsc}"
-    )
+    pk = _primary_key(sql)
+    value_cols = {k: v for k, v in ddl.items() if k not in pk}
+    avsc = _avsc_columns(json.loads((ROOT / avsc_path).read_text()))
+    assert value_cols == avsc, f"{avsc_path} has drifted from {sql_path}.\n  DDL:  {value_cols}\n  AVSC: {avsc}"
+    if key_path:
+        key = _avsc_columns(json.loads((ROOT / key_path).read_text()))
+        assert key == {k: ddl[k] for k in pk}, f"{key_path} has drifted from the PRIMARY KEY in {sql_path}"
+    else:
+        assert not pk, f"{sql_path} has a PRIMARY KEY but no key .avsc is listed"
 
 
 def test_ddl_parsed_expected_columns():
     reqs = _ddl_columns((ROOT / "sql/source_service_requests.sql").read_text())
-    assert reqs["event_time"] == "timestamp-millis"
+    assert reqs["event_time"] == "local-timestamp-millis"
     assert reqs["latency_ms"] == "double"
     assert reqs["status_code"] == "int"
     assert len(reqs) == 9

@@ -89,8 +89,12 @@ def main(argv: list[str] | None = None) -> None:
     root = get_project_root()
     path, card = load_card(args.creds, root)
     print(f"Using credential card: {path}")
+    from opsgen.groundtruth import incidents_path, last_incident_number
+
     initial = load_state(state_path(root))
     sim = Simulation(args.seed, start=time.time(), config=config, initial_state=initial)
+    # Continue incident numbering across restarts (ids must stay unique in incidents.jsonl).
+    sim.engine.incident_counter = last_incident_number(incidents_path(root))
     print("Producing to service_requests and service_deployments. Ctrl-C to stop.")
     run_realtime(sim, KafkaSink(card), root=root, write_groundtruth=True)
 

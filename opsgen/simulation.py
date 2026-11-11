@@ -39,6 +39,7 @@ class Simulation:
         initial_state: dict[str, dict] | None = None,
     ) -> None:
         self.start = start
+        self.start_ms = round(start * 1000)
         self.config = config or Config()
         self.sched_rng = random.Random(seed)
         self.traffic_rng = random.Random(None if seed is None else seed + 1)
@@ -62,14 +63,14 @@ class Simulation:
             "service_name": d.service_name,
             "version": d.version,
             "previous_version": d.previous_version,
-            "deployed_at": to_millis(d.deployed_at),
+            "deployed_at": self.tick_ms(d.deployed_at),
             "last_change": d.last_change,
             "desired_replicas": d.desired_replicas,
             "ready_replicas": d.ready_replicas,
             "max_replicas": d.max_replicas,
             "tier": d.tier,
             "owner_team": d.owner_team,
-            "event_time": to_millis(now),
+            "event_time": self.tick_ms(now),
         }
 
     def bootstrap(self, now: float | None = None) -> list[dict]:
@@ -77,7 +78,21 @@ class Simulation:
         now = self.start if now is None else now
         return [self._dep_record(name, now) for name in self.deployments]
 
+    def tick_ms(self, t: float) -> int:
+        """Epoch milliseconds for a tick time, on this run's integer grid
+        (`start_ms + 1000 * k`), so consecutive ticks are exactly 1000 ms apart. Times
+        that aren't ticks of this run (a deployed_at restored from an earlier run) are
+        rounded instead."""
+        k = round(t - self.start)
+        if abs((t - self.start) - k) < 1e-6:
+            return self.start_ms + 1000 * k
+        return round(t * 1000)
+
     def _gen_requests(self, now: float) -> list[dict]:
+        # Every request of this tick gets a timestamp in [tick_ms, tick_ms + 999]: never
+        # the next tick's millisecond, where a deploy record for the next version may sit
+        # (truncating float seconds could produce exactly that collision; see D-028).
+        tick_ms = self.tick_ms(now)
         out: list[dict] = []
         for svc in SERVICES:
             dep = self.deployments[svc.name]
@@ -95,10 +110,10 @@ class Simulation:
                 rbytes = response_bytes(route.base_bytes, is_err, self.traffic_rng)
                 tid = trace_id(self.traffic_rng)
                 inst = self.traffic_rng.choice(insts)
-                event_time = now + self.traffic_rng.uniform(0, TICK_DURATION)
+                offset_ms = min(999, int(self.traffic_rng.uniform(0, TICK_DURATION) * 1000))
                 out.append(
                     {
-                        "event_time": to_millis(event_time),
+                        "event_time": tick_ms + offset_ms,
                         "service_name": svc.name,
                         "instance_id": inst,
                         "http_method": route.method,

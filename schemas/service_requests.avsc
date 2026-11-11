@@ -4,7 +4,7 @@
   "namespace": "io.confluent.aiops",
   "doc": "Value schema for the service_requests topic. Repo copy for --dry-run and the schema-vs-DDL drift test (tests/test_schema_vs_ddl.py); live serialization uses the schema Flink registers from sql/source_service_requests.sql.",
   "fields": [
-    {"name": "event_time", "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}], "default": null},
+    {"name": "event_time", "type": ["null", {"type": "long", "logicalType": "local-timestamp-millis"}], "default": null},
     {"name": "service_name", "type": ["null", "string"], "default": null},
     {"name": "instance_id", "type": ["null", "string"], "default": null},
     {"name": "http_method", "type": ["null", "string"], "default": null},

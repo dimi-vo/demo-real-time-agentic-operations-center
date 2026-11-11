@@ -117,7 +117,9 @@ use `/query/v1`.
 
 ### D-009 · CONFIRMED · `PARTITION BY service_name` inside `ML_DETECT_ANOMALIES` OVER works
 **Status.** Confirmed by the user at Break 1: partition per service in one statement,
-not separate statements per service.
+not separate statements per service. **Verified live in Phase 3:** the `service_health`
+CTAS runs, and each service gets its own model (separate warm-up, expected values and
+bounds per service).
 
 **What.** One ARIMA model per service, via `PARTITION BY service_name` in the OVER clause.
 **Options.** (a) Partition in one statement; (b) a separate statement per service.
@@ -129,7 +131,8 @@ car_number ORDER BY window_time RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT RO
 (a significant redesign) and raise it.
 
 ### D-010 · CONFIRMED · Two `ML_DETECT_ANOMALIES` calls in one statement
-**Status.** Confirmed by the user at Break 1.
+**Status.** Confirmed by the user at Break 1. **Verified live in Phase 3:** accepted by
+Confluent Cloud; both result structs are populated in every row after warm-up.
 **What.** Latency and traffic detectors in a single statement (§5.3).
 **Why.** Docs confirm multiple `OVER` aggregates are allowed when their windows are
 identical; both detectors share the exact same `PARTITION BY service_name ORDER BY
@@ -139,7 +142,13 @@ not documented.
 `service_health` via a join, and raise it.
 
 ### D-011 · CONFIRMED · `LAST_VALUE` for deployment context in the window aggregation
-**Status.** Confirmed by the user at Break 1: use `LAST_VALUE`.
+**Status.** Confirmed by the user at Break 1: use `LAST_VALUE`. **Verified live in Phase 3:**
+accepted inside the window-TVF aggregation, and correct around deploys: auth's
+`2.1.9 → 2.1.10` deploy at 09:48:29.32 shows `2.1.10`, `ssd = 0` in the window ending
+09:48:30, and the window holding the rollback shows `2.1.9 ROLLBACK`. `evaluate` checks
+this for every `BAD_DEPLOY` against the logged bad and good versions. Edge case by
+construction: the version is that of the last request in the window, so a deploy in a
+window with no later request for that service would not show (vanishingly rare).
 **What.** Carrying `version`, `last_change`, etc. "as of window end" (§5.2).
 **Options.** `LAST_VALUE` (brief) or `MAX` (lexicographically wrong on version strings).
 **Choice.** `LAST_VALUE`, verify in Phase 3; `MAX` fallback with a documented caveat.
@@ -178,8 +187,8 @@ Flagged for the user in PLAN.md §5.
 `enableStl` false, for both detectors; auto-ARIMA (no fixed p/d/q) initially.
 **Why.** Brief §5.3. All values pass the documented validation (minTrainingSize > 1
 and < maxTrainingSize; maxTrainingSize < 10000; 0 < confidence ≤ 100).
-**Impact.** Tuned in Phase 3 with `uv run evaluate`; raise `minTrainingSize` to 12 or
-fix p/d/q if the acceptance criteria (§11) aren't met. Tuning history recorded here.
+**Impact.** Tuned in Phase 3 with `uv run evaluate`. **Superseded by D-029:** final config
+is AR(1) (p=1, d=0, q=0), minTrainingSize 12, maxTrainingSize 360, confidence 99.9.
 
 ### D-015 · DECISION · Single partition for both source tables
 **What.** `DISTRIBUTED ... INTO 1 BUCKETS` on `service_requests` and `service_deployments`.
@@ -260,3 +269,284 @@ REST resource, so a Flink statement is the natural check (as the reference used 
 `COUNT(*)` for its check).
 **Impact.** The deploy needs the SR key (it has it) and one Flink call. Verified against a
 real environment at Break 2b.
+
+## Phase 3
+
+### D-021 · DECISION · How `uv run evaluate` reads and scores `service_health`
+**What.** The data path and the scoring definitions for the detection half (brief §7.2).
+**Options.** (a) Read `service_health` with a Flink `SELECT` over the statement API;
+(b) consume the topic directly over Kafka with the card's Kafka key and the registered
+Avro schema.
+**Choice.** (b). The reader is `scripts/common/topic_reader.py`: manual assignment from
+the beginning, no committed offsets, `read_committed`, stop at end of every partition. It
+reads the whole topic (about 2,200 rows an hour), which also gives the topic's head for
+the fresh-start measurement. `--dump`/`--rows` save and re-score a run offline;
+`--topic` scores a tuning variant. Scoring definitions (in
+`scripts/evaluation/detection.py`):
+- *signal*: `LATENCY_HIGH` / `TRAFFIC_HIGH` / `TRAFFIC_LOW` from the status columns
+  (the incidents' `expected_trigger` names); `WARMING_UP` rows carry none;
+- *incident span*: the service's windows overlapping `[started_at, ended_at)`; the window
+  containing `started_at` is window 1; *detected in time* = expected trigger in window
+  1–3, *late* after that, else *missed*; an opposite traffic signal is flagged as wrong
+  direction; for `BAD_DEPLOY`, rows are also checked to carry `bad_version` (and the
+  rollback window `good_version`);
+- *false positive*: any signal outside every incident span of its service, tagged *echo*
+  (within 60 s after an incident ended) or *after deploy* (deploy < 60 s earlier);
+- *fresh start*: signals in the first 5 minutes after each service's first window, outside
+  incident spans, counted separately from the FP rate;
+- false positives are counted per *signal* (a row with two anomalous statuses counts
+  twice); rows with two signals outside incidents were rare in practice;
+- the default range ends 100 s before the newest row, because `ops-sim` logs an incident
+  only when it ends, so the newest rows may belong to one not yet in `incidents.jsonl`.
+- *restart artifacts* (added during tuning): signals in the last window before a gap in the
+  data and in the minute after it are counted as `restart`, not as false positives. A
+  stopped `ops-sim` really does drop every service's traffic in those windows;
+- incident timing uses the *effective end*, `started_at + ceil(ended_at − started_at)`
+  (D-028).
+**Why.** Reading Kafka is read-only, starts no statement and costs nothing; the dashboard
+(Phase 5) reuses the reader. Explicit definitions make the acceptance numbers reproducible.
+**Impact.** `evaluate` needs the Kafka + SR keys from the card (it has them). Rows lag
+by up to one Flink checkpoint because of `read_committed`; the 100 s tail covers that.
+
+### D-022 · DECISION (raise at Break 3) · 2.1 adds per-version count queries; the anti-pattern reads new requests only
+**What.** How the walkthrough makes the regular join's re-attribution visible (brief §5.1).
+**Options.** (a) Only the plain per-request regular join, as in F1; (b) additionally a
+`COUNT(*) … GROUP BY service_name, version` over each join
+(`sql/2.1_regular_join_by_version.sql`, `sql/2.1_temporal_join_by_version.sql`).
+**Choice.** (b). With the regular join, a deploy makes the service's old-version row
+vanish and the new version take over every request counted so far (its
+`first_request` predates the deploy). With the temporal join, the old row freezes with
+`last_request` just before the deploy and a new row starts at the deploy time. Both
+anti-pattern queries read `service_requests` from the **latest** offset.
+**Why.** In a per-request result panel the re-attribution is hard to spot; one row per
+version shows it at a glance and compares directly with the `ops-sim` console. The
+latest offset matters because a regular join keeps every request in state, and every
+5-second re-emit of `service_deployments` is an update that makes it retract and re-emit
+all of that service's joined rows. From the earliest offset, with hours of history,
+that's millions of rows per re-emit on the attendee's pool.
+**Impact.** Two more short queries in 2.1 (user-visible flow; confirm at Break 3).
+
+### D-023 · DECISION · Step structure and shared CTEs for 2.2–2.4
+**What.** How the 2.x solution files are cut.
+**Choice.** As in F1, each step has two parts: 2.2 = metrics only, then with deployment
+context (`2.2_window_metrics.sql`, `2.2_window_aggregation.sql`); 2.3 = the two raw
+detector results, then the status columns (`2.3_anomaly_detection.sql`,
+`2.3_anomaly_status.sql`); 2.4 = the 2.3 status query wrapped in the CTAS. The `enriched`
+CTE (the temporal join) is the same text in every file and hints **both** sources to the
+earliest offset, including the 2.1 solution (F1 hinted only the versioned side; the brief
+asks for explicit hints on both from 2.3 on, and one identical CTE is easier to copy).
+`tests/test_sql_pipeline.py` enforces that the CTEs, the detector config and window, and
+the CTAS body stay identical across files.
+**Why.** F1 pedagogy; attendees grow one statement step by step.
+**Impact.** `reset --with-labs` submits only `2.4_service_health.sql` (from Phase 2).
+
+### D-024 · DECISION · Metric expressions and types in the window aggregation
+**What.** Expressions the brief left open.
+**Choice.** `error_count = SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END)` (INT);
+`error_rate = CAST(error_count AS DOUBLE) / COUNT(*)`; `avg_response_bytes =
+AVG(CAST(response_bytes AS DOUBLE))` (DOUBLE; `AVG` of an INT would truncate to INT);
+`request_count = COUNT(*)` (BIGINT), cast to DOUBLE only inside the traffic detector.
+`window_time` is kept in the `windowed` CTE (the detectors' `ORDER BY`) but not written
+to `service_health`. `owner_team` is not carried (not in the brief's column list).
+**Why.** Plain SQL attendees can read; no integer-division surprises.
+**Impact.** Column types of `service_health` follow from these.
+
+### D-025 · CONFIRMED · Warm-up is detected as `is_anomaly IS NULL`; status columns come out as STRING
+**Status (Phase 3, live).** `DESCRIBE service_health` shows `latency_status` as
+`VARCHAR(10)` (variable length, no blank padding). `WARMING_UP` appears in each service's
+first **7** windows (the first is a partial window at the generator's start), never later.
+**What.** Two details of the status `CASE` expressions.
+**Choice.** `WARMING_UP` when `<result>.is_anomaly IS NULL` (the docs and the F1 notes say
+the result fields are NULL before `minTrainingSize` rows; a NULL ROW also yields NULL
+fields). The `CASE` returns string literals of different lengths; I expect Flink to type
+it as `STRING`, not a blank-padded `CHAR(10)`.
+**Why.** Docs/F1 for the first; Flink's type system converts ragged CHAR unions to
+VARCHAR for the second, but I haven't seen it in Confluent Cloud.
+**Impact.** Verify with `sql/checks/service_health_describe.sql` and by `WARMING_UP`
+appearing exactly in each service's first 6 windows. `evaluate` trims statuses anyway.
+If they come out as `CHAR(10)`, wrap each `CASE` in `CAST(... AS STRING)`.
+
+### D-026 · DECISION · Developer check queries live in `sql/checks/`
+**What.** Where verification-only SQL lives.
+**Choice.** `sql/checks/` with a README: an exact temporal-join attribution check (the
+version hash in `instance_id` vs `SHA1` of the joined version; `SHA1` and `LEFT` temporal
+joins are both in the current Confluent docs), deploy windows (`LAST_VALUE`), anomalous
+rows, and `DESCRIBE service_health`.
+**Why.** They prove acceptance criteria but aren't walkthrough steps; the drift test (Phase
+6) and `reset --with-labs` read only top-level `sql/*.sql`.
+**Impact.** None for attendees.
+
+### D-027 · DECISION · `.avsc` copies aligned with the schemas Confluent registered
+**What.** Two Phase 1 assumptions about the registered schemas were wrong; checked
+read-only against the live Schema Registry at Break 3.
+**Found.** (1) `TIMESTAMP(3)` is registered as `local-timestamp-millis`, not
+`timestamp-millis`. (2) `service_deployments-value` does **not** contain `service_name`;
+the primary key is only in `service_deployments-key` (record
+`org.apache.flink.avro.generated.record.service_deployments_key`).
+**Choice.** `schemas/*.avsc` now match: `local-timestamp-millis`, `service_name` removed
+from the deployments value, new `schemas/service_deployments_key.avsc`. The drift test
+splits the DDL into PRIMARY KEY columns (key `.avsc`) and the rest (value `.avsc`).
+**Why.** The copies exist to mirror what's registered.
+**Impact.** None at runtime: live serialization always used the registered schemas
+(fastavro ignores the extra `service_name` in the value dict, and epoch-millis ints
+encode the same for both logical types). `evaluate` treats naive timestamps as UTC,
+which is what `local-timestamp-millis` decodes to.
+
+### D-028 · DECISION · Generator timestamps on an integer-millisecond tick grid; whole-second incident durations
+**What.** Two timing defects in `ops-sim`, found in the live Phase 3 run.
+**Found.** (1) The attribution check (`sql/checks/temporal_join_attribution.sql`) found 1
+mismatch in ~530,000 requests. A read-only replay over Kafka pinpointed it: a checkout
+request served by the *old* instance (`checkout-8aa51a-…`, 4.2.2) carried exactly the
+millisecond of the 4.2.3 deploy record (delta 0 ms). Request times were `to_millis(now +
+uniform(0, 1))`, a truncation of float seconds, so a request in the last ~0.6 ms of a tick
+could land on the next tick's millisecond, where a deploy record may sit. Flink was right;
+the data was wrong. (2) Incident durations were fractional seconds, but the generator acts
+on whole-second ticks, so an incident actually ended (and a `BAD_DEPLOY`'s `ROLLBACK`
+fired) at the first tick after the logged `ended_at`, up to 1 s later.
+**Choice.** Ticks are `start_ms + 1000·k` (integer arithmetic). Each request gets
+`tick_ms + offset` with `offset` in 0–999 ms, and deploy records carry `tick_ms`, so a tick's
+requests can never share the next tick's millisecond. Durations are rounded up to whole
+seconds, so `ended_at` is the tick where the incident really ends. Same RNG draws, so `--seed`
+schedules are unchanged apart from durations rounding up. `evaluate` computes the effective
+end (`started_at + ceil(ended_at − started_at)`) so logs written before this fix score correctly.
+(3) After a restart, incident ids started again at `INC0001`, so `incidents.jsonl` had
+duplicate ids. Live mode now continues numbering after the highest id in the file
+(`groundtruth.last_incident_number`). The duplicates already in the 2026-11-11 run's file
+stay; `evaluate` doesn't key on ids.
+**Why.** The attribution check should be exactly zero, and the ground truth should be exact
+for "closing the loop".
+**Impact.** Takes effect when `ops-sim` restarts (state persists, no reset needed). Tests:
+`test_tick_timestamps_never_collide_with_the_next_tick`,
+`test_deploy_record_and_its_requests_share_the_new_version`,
+`test_incident_ends_on_a_tick_at_the_logged_ended_at`.
+
+### D-029 · DECISION · ARIMA tuning history and final config (AR(1), minTrainingSize 12)
+**What.** Tuning `ML_DETECT_ANOMALIES` against the acceptance criteria (brief §5.3, §11),
+measured with `uv run evaluate` on the live run that started from a clean reset at
+2026-11-11 09:08:33 UTC.
+
+**Round 1 — baseline (D-014): auto-ARIMA, minTrainingSize 6, maxTrainingSize 360,
+confidence 99.9.** CTAS created at 10:39 UTC over ~90 minutes of history; caught up to
+live within 7 minutes. Last hour (09:44–10:44, 9 incidents):
+- Detection: **9/9 within 3 windows** (BAD_DEPLOY 5/5, TRAFFIC_SURGE 2/2, UPSTREAM_DROP
+  2/2), all on the right service and in the right direction. Bad deploys flag in window 1,
+  drops in window 2, surges in window 1–2.
+- Fresh start: **at most 1 per service** in the first 5 minutes (cart, checkout and
+  web-gateway 1 each) → **meets target; minTrainingSize stays 6.**
+- False positives: **8 in 6 service-hours, worst service 2/hour → misses the target (≤ 1).**
+  Two sources:
+  1. *Echoes* (3 of 8, plus the end windows of both surges): auto-ARIMA follows a level
+     change within 2–3 windows (on auth's surge the forecast went 153 → 319 → 376 → 461
+     while traffic sat at ~460). When the surge ends, the return to baseline is flagged
+     `TRAFFIC_LOW` (138 vs lower bound 347), then the forecast overshoots downward (78) and
+     baseline is flagged `TRAFFIC_HIGH`. After a rollback, the latency forecast
+     extrapolated the drop to 1 ms and flagged normal latency as `HIGH`. In Phase 4 these
+     would send `INVESTIGATE_UPSTREAM`/`ROLLBACK` recommendations for incidents that
+     already ended.
+  2. *Marginal latency exceedances* (5 of 8): normal windows just over the upper bound
+     (for example payments 271 ms vs upper 270). The window mean is right-skewed (0.5% of
+     requests are 4× outliers, and payments has only ~60 requests per window), so the
+     upper tail is heavier than the bound assumes.
+- Diagnosis matches the brief's hint: auto-ARIMA "follows level changes too quickly".
+
+**Round 2 — wider bounds and a mean model (side by side on the same history).**
+- `service_health_c9999` (auto-ARIMA, 99.99): barely helps. Echoes sit far outside any
+  reasonable bound (auth: 138 requests vs lower bound 347), and one drop became late. Live
+  comparison showed the bounds are symmetric, forecast ± z·σ: the 99.99/99.9 half-widths
+  differ by about z(99.99)/z(99.9) = 1.18, so other confidence levels can be re-derived
+  offline (`evaluate --rescale FROM:TO`).
+- `service_health_mean`, `service_health_mean9999` (fixed **p=0, d=0, q=0**): **don't work
+  in Confluent Cloud.** Both stalled at the first model fit (each service's 7th window):
+  committed output stopped after the first window, and a `read_uncommitted` read showed the
+  warm-up rows replayed again and again (246 rows for 42 windows). The statements kept
+  reporting `RUNNING` with no exceptions. The docs allow p, d, q ≥ 0, so this is a
+  **docs-vs-behavior gap**.
+- Unrelated noise found while scoring: an `ops-sim` restart (10:58) makes every service's
+  traffic drop in the windows around the gap, which the detectors rightly flag. `evaluate`
+  now labels signals next to a data gap as `restart` and leaves them out of the rate.
+
+**Round 3 — AR(1) (p=1, d=0, q=0, 99.9).** Works (caught up within ~5 minutes). Over
+the full 2.1 hours since the clean start (19 incidents; restart artifacts excluded):
+
+| config | detected ≤ 3 windows | false positives | per service-hour, avg / worst | echoes | fresh start, worst |
+|---|---|---|---|---|---|
+| auto-ARIMA, 99.9 (baseline) | 19/19 | 22 | 1.7 / 2.8 | 12 | 1 |
+| AR(1), 99.9 (live) | 19/19 | 13 | 1.0 / 1.4 | 3 | 2 |
+| AR(1), 99.95 (offline) | 19/19 | 8 | 0.6 / 1.4 | 2 | 2 |
+| AR(1), 99.97 (offline) | 19/19 | 6 | 0.5 / 1.4 | 2 | 1 |
+| AR(1), 99.99 (offline) | 18/19 | 4 | 0.3 / 1.4 | 1 | 1 |
+
+Without differencing, the forecast stays at the service's normal level instead of chasing
+the incident, so the return to normal is no longer an anomaly. Checkout stays at 1.4/h in
+every config: its remaining false positives are mostly latency windows pushed up by the
+generator's 4× outliers (0.5% of requests) at only ~80 requests per window, which suggests
+a distribution question for the generator rather than a detector question.
+
+**Final (chosen by the user at Break 3): AR(1), confidencePercentage 99.9,
+minTrainingSize 12, maxTrainingSize 360, enableStl false**, in `sql/2.3_*.sql` and
+`sql/2.4_service_health.sql`. Only brief-sanctioned changes: fixed p/d/q because
+auto-ARIMA "follows level changes too quickly" (§5.3), and `minTrainingSize` 12 because
+AR(1)'s fresh start gave checkout 2 spurious anomalies (> ~1; §5.3 says raise to 12). With
+12 the detector's output starts after about 2 minutes, still before the first incident at
+~3:10. ARMA(1,1) was skipped to save cost (user's call).
+**Impact.** Incidents stay flagged for most of their duration instead of only at onset.
+That means more agent calls per incident in Phase 4 (still proportional to incidents). Final
+acceptance numbers come from re-creating `service_health` with this config (it replays
+the history from the earliest offset).
+
+**Round 4: final config on fresh data at the D-030 rates (~29 msg/s).** Clean `reset`, then
+`ops-sim` from 16:07:46 UTC, `service_health` created right away. Scored at 16:47 (39
+minutes, 6 incidents), from the real start (a few seconds of stray 14:04 data at the
+topic head excluded):
+- Pipeline: 236 rows per service, no duplicates, no gaps; `WARMING_UP` only in the first
+  windows (until 16:09:20), never later.
+- Fresh start: **0** spurious anomalies in every service's first 5 minutes (meets ≤ 1).
+- Detection: BAD_DEPLOY 2/2 and TRAFFIC_SURGE 1/1 in window 1; **UPSTREAM_DROP 1/3**: cart
+  caught in window 1, **checkout missed twice** (see D-030).
+- False positives: 3 in 3.2 service-hours (payments 2, cart 1), **no echoes**. Too short a
+  run to judge the per-hour rate (payments' 2 in 0.54 h read as 3.7/h).
+- Surges now flag `LATENCY_HIGH` in every window too (latency ×1.5 is sustained and AR(1)
+  doesn't absorb it). Routing (Phase 4) sends those rows to the capacity agent anyway.
+
+### D-030 · DEVIATION · Request rates divided by ~3; slow outliers softened (chosen by the user at Break 3)
+**What.** `ops-sim` request rates and the latency outlier rule (brief §4.1, §4.2).
+**Why it came up.** The user saw the `service_health` statement hold the pool at 10 CFU
+"for quite some time". The pool's CFU history (Metrics API, read-only) showed steady state
+at about **1 CFU** (11:12–11:16, `service_health` alone). Every 10-CFU period was a newly
+created statement **replaying history** from the earliest offset (~500–730k requests after
+1.5–2.2 hours at ~86 msg/s), followed by several minutes of autoscaler scale-down. Replay
+work scales with message rate × time since `ops-sim` started, so a later drop-and-recreate
+costs more.
+**Options (simulated offline with the generator's distributions and a mean ± z·σ detector
+approximation that reproduces the live false-positive rates).**
+- ÷10 (as first asked, ~9 msg/s): drops on cart/checkout/payments become undetectable (0–9%
+  of windows), up to 29% of drop windows are empty (no row at all: "absence of data is
+  invisible"), and latency false positives roughly triple (2.7–3.9 per service-hour).
+- ÷10 with rebalanced services: drop services would need more traffic than web-gateway,
+  which breaks the story's ranking.
+- ÷4: payments drops caught within 3 windows only ~67% of the time.
+- ÷3 + softer outliers: drops 95–100% within 3 windows; worst latency false positives
+  ~0.9 per service-hour (better than the brief's rates with 0.5% × 4 outliers, ~1.5).
+- ÷2 + softer outliers: more margin, only 2× cheaper replays.
+**Choice (user).** ÷3, rounded: web-gateway 8, auth 5, catalog 7, cart 4, checkout 3,
+payments 2 requests/s (~29 msg/s; the ranking is unchanged). Slow outliers 0.2% of requests
+at 3× (was 0.5% at 4×).
+**Impact.** About 3× less replay work on every CTAS creation and drop-and-recreate. Topic
+volume and storage drop by about 3×. Incident signatures are unchanged in relative terms
+(seeded `--simulate 60`: drops 19–20 → 3–4 per window, surges ~50 → ~150, bad deploys
+~46 → ~180 ms with 8–15% errors). The schedule logic is untouched. The brief's "roughly 90
+messages per second" becomes ~29 in the walkthrough. Phase 3 validation is re-run on fresh
+data at the new rates (the old history at the old rates would distort the detector's
+first hour).
+**Status after the live run (Break 3): drop detection on checkout is not good enough.**
+Checkout's two drops were both missed. Its traffic bounds are ±22 around ~30 requests (the
+model's spread is ~25% wider than pure Poisson noise, the same factor as at the old rates),
+and AR(1)'s forecast moves ~20% toward a drop after its first window, so a drop to ~6
+requests sits right at the lower bound (INC0005: 9, 4, 7, 6 against lower bounds 8, 4, 2, 2).
+My offline simulation assumed ideal Poisson bounds and was too optimistic. Calibrated with
+the live factors, a drop is caught reliably only with about 60 requests per window
+(≈ 6 requests/s) on the drop candidates (cart, checkout, payments), which is what the brief's
+original rates gave payments. **Proposed fix (needs the user's decision):** cart, checkout and
+payments at 6 requests/s, web-gateway 10, catalog 8, auth 5 (~41 msg/s, about half the
+brief's volume, web-gateway still the busiest). Alternatives: the brief's original rates, or
+accept missed drops on low-volume services.

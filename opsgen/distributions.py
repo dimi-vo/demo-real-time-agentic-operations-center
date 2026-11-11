@@ -10,8 +10,10 @@ import math
 import random
 
 LATENCY_SIGMA = 0.3
-SLOW_OUTLIER_PROB = 0.005
-SLOW_OUTLIER_MULT = 4.0
+# D-030: softened from the brief's 0.5% at 4x. With the lower rates (D-030), a single 4x
+# outlier in a ~20-request window pushed the window average over the detector's bound.
+SLOW_OUTLIER_PROB = 0.002
+SLOW_OUTLIER_MULT = 3.0
 
 # Normal-operation status mix.
 CLIENT_ERROR_RATE = 0.02
@@ -39,8 +41,8 @@ def poisson(lam: float, rng: random.Random) -> int:
 
 
 def latency_ms(median: float, rng: random.Random) -> float:
-    """Log-normal latency with the given median and sigma=0.3; 0.5% of requests are
-    slow outliers at 4x the sampled value."""
+    """Log-normal latency with the given median and sigma=0.3; SLOW_OUTLIER_PROB (0.2%) of requests are
+    slow outliers at SLOW_OUTLIER_MULT x the sampled value."""
     value = math.exp(rng.gauss(math.log(median), LATENCY_SIGMA))
     if rng.random() < SLOW_OUTLIER_PROB:
         value *= SLOW_OUTLIER_MULT
