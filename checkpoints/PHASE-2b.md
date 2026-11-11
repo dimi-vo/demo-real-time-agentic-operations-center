@@ -100,6 +100,22 @@ Please paste back: the deploy's `✓`/`✗` lines, a few `service_requests` rows
 New: **D-020** (readiness check uses SR subjects + `SHOW MODELS`). D-006 (delete retention)
 is exercised once `ops-sim` produces to `service_deployments`.
 
+## Results of your live run (2026-11-11)
+
+- **Terraform apply (2a):** succeeded; topics and model present.
+- **`service_deployments-key`** is registered as a **record**
+  (`service_deployments_key { service_name: string }`, namespace
+  `org.apache.flink.avro.generated.record`). `opsgen/kafka_io.key_payload` takes the
+  record path for this, and `ops-sim` produced to the topic fine.
+- **Deploy:** keys minted and card written; `✓ model llm_textgen_model`, but
+  **`✗` for both source tables although they exist.** Known issue, not investigated by
+  request: `.scratch/deploy-readiness-check/issues/01-source-tables-reported-missing.md`
+  (local, gitignored). It makes `deploy` exit 1 and skip the start-ops-sim offer; fix
+  before Phase 6.
+- **Still open:** whether the `service_deployments` **value** schema includes
+  `service_name`. Doesn't block anything (fastavro ignores extra dict keys); I'll read
+  it from the registered schema in Phase 3 and align the `.avsc` copy if needed.
+
 ## 6. Questions for me
 
 - When you deploy, does the readiness check pass (all three `✓`)? If `service_deployments`'

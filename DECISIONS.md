@@ -244,6 +244,10 @@ exercised by live mode in Phase 2 and by unit tests now.
 ## Phase 2b
 
 ### D-020 · DECISION · Deploy readiness check uses Schema Registry subjects + SHOW MODELS
+**Status (Break 2b, live run).** The model check works; the table check does **not**: it
+reported both source tables missing although they exist. Logged as a local issue,
+`.scratch/deploy-readiness-check/issues/01-source-tables-reported-missing.md` (status
+`ready-for-agent`, fix before Phase 6). Not investigated yet, at the user's request.
 **What.** How `uv run deploy` checks "both source tables and `llm_textgen_model` exist"
 (brief §7.2, replacing the reference's `driver_race_history` row count).
 **Options.** (a) List Kafka topics via the cluster's Kafka REST endpoint; (b) check the
