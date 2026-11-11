@@ -172,19 +172,23 @@ class Incident:
         written before D-028 have such fractional durations; newer ones are whole seconds)."""
         return self.started_at + math.ceil(self.ended_at - self.started_at - 1e-6)
 
+    def in_span_at(self, window_end: float) -> bool:
+        """Whether the 10-second window ending here overlaps the degradation. Takes a
+        timestamp rather than a row, so decisions (D-032) can use it too."""
+        return window_end > self.started_at and window_end - WINDOW_SECONDS < self.effective_end
+
     def in_span(self, row: HealthRow) -> bool:
-        return (
-            row.service_name == self.service_name
-            and row.window_end > self.started_at
-            and row.window_start < self.effective_end
-        )
+        return row.service_name == self.service_name and self.in_span_at(row.window_end)
 
     def at_end(self, row: HealthRow) -> bool:
         """The span window that contains the return to normal."""
         return row.window_end > self.effective_end
 
+    def window_number_at(self, window_end: float) -> int:
+        return round((window_end - WINDOW_SECONDS - self.onset_window_start) / WINDOW_SECONDS) + 1
+
     def window_number(self, row: HealthRow) -> int:
-        return round((row.window_start - self.onset_window_start) / WINDOW_SECONDS) + 1
+        return self.window_number_at(row.window_end)
 
 
 def load_incidents(path: Path) -> list[Incident]:

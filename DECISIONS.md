@@ -89,6 +89,11 @@ this continuous workshop does replay them.
 Flink accepting an `upsert` changelog table on a `delete`-cleanup topic — see D-016.
 
 ### D-007 · DECISION · `AI_RUN_AGENT` consumed as `ROW<status, response>`; agents continue on failure
+**Status.** Confirmed against the docs in Phase 4: `handle_exception` exists, takes
+`CONTINUE` or `FAIL`, defaults to `FAIL`, and is set in the `WITH` clause of
+`CREATE AGENT`. Not on the `CREATE AGENT` reference page; documented in the Agent
+Runtime Guide. See D-033 for what else that page corrected.
+
 **What.** How to call `AI_RUN_AGENT` and handle model failures over a day-long run.
 **Options.** (a) Copy the reference, which reads only `response` and leaves the
 agent at the default `handle_exception = FAIL`; (b) alias the full
@@ -603,3 +608,70 @@ at most 10 s), as the F1 race aligned its laps to 20-second boundaries. Outliers
 0.2% × 3 (D-030). The detector config is unchanged (D-029).
 **Impact.** Volume and replay work ~1.4× the D-030 rates, still about half the brief's. To be
 confirmed in one live run (fresh `reset` → `ops-sim` → `service_health`, then `evaluate`).
+
+---
+
+### D-032 · DECISION · What `uv run evaluate` counts as a good decision
+**What.** How the decision half of `evaluate` scores `remediation_decisions` (brief §7.2
+and §11). The detection half is D-021.
+**Options.** (a) Count matching actions per decision row; (b) score each incident by the
+decision on its first anomalous window, and report the rest as context.
+**Choice.** (b), plus four checks the brief asks for by name:
+- **Valid action**: the parsed `action` is one the agent is allowed to take. The SQL maps
+  a failed call or an out-of-set answer to `INVALID` (D-007), so everything else is valid.
+  Target ≥ 95%.
+- **Routing**: `LATENCY_HIGH` belongs to the release agent, `TRAFFIC_HIGH`/`TRAFFIC_LOW`
+  to the capacity agent; and no (service, window) may appear under both agents.
+- **Coverage**: every anomalous `service_health` row in range should have exactly one
+  decision and no other row any, which is the brief's "agent calls track anomalies, not
+  windows" check. Rows in the last minute of the range are counted as in flight, not
+  missing, because the model call takes a few seconds.
+- **Per incident**: the **headline** decision is the one on the earliest window of the
+  span — the first recommendation the on-call team would see — and it matches when its
+  action equals the incident's `expected_action`. A `ROLLBACK` must name the incident's
+  `good_version`; a `SCALE_OUT` must carry the replica count the SQL computed (recomputed
+  in Python from the row's stored context). Later windows are reported as an action mix,
+  and a late match is marked, not counted.
+**Why.** An incident spans several windows and AR(1) keeps it flagged for most of them
+(D-029), so counting rows would weight long incidents more heavily and hide what matters:
+what the team is told first. Scoring the headline keeps one number per incident.
+**Impact.** `scripts/evaluation/decisions.py`, rendered by `evaluate`; new flags
+`--decision-rows`, `--dump-decisions`, `--decisions-topic`, `--no-decisions`. The decision
+half is skipped silently when `remediation_decisions` doesn't exist yet.
+
+### D-033 · DEVIATION · Agent SQL follows the docs, not the reference, on three points
+**What.** Three places where the live F1 reference and the current Confluent docs
+(checked 2026-11-11) disagree about `CREATE AGENT` / `AI_RUN_AGENT`.
+**Findings and choices.**
+1. **Agent name in `AI_RUN_AGENT`**: the reference passes a backticked identifier
+   (`` AI_RUN_AGENT(`pit_strategy_agent`, …) ``); the docs type the first argument as
+   `STRING` and quote it in all 16 examples. → **Quoted string**, `'release_agent'`. The
+   name stays an identifier in `CREATE AGENT`, as the docs show.
+2. **Failure handling**: the reference sets only `max_iterations` and takes the default
+   `handle_exception = FAIL`, which ends the statement on one bad model call. → Both
+   agents set `'handle_exception' = 'continue'` (D-007). `max_consecutive_failures` is
+   set explicitly to 3 because the two doc pages contradict each other on its default
+   (1 in the Agent Runtime Guide, 3 in the `CREATE AGENT` reference), and
+   `'request_timeout' = '60'` so a hung call fails fast rather than after the default
+   600 s.
+3. **`max_iterations` is not set**: it bounds tool-calling iterations, and these agents
+   have no tools, so it has no effect (documented for reflection sub-agents, and it
+   follows from its definition).
+**Also decided here** (the brief delegates the prompt wording):
+- The prompts contain **no apostrophe**. No escaping rule for a literal `'` inside
+  `USING PROMPT '…'` is documented, and not one of the ~37 example prompts in the docs
+  contains one. A test enforces this.
+- Nullable context (`previous_version`, `last_change`) is wrapped in `COALESCE(…, 'N/A')`
+  before `CONCAT`, so one null cannot blank the whole agent input.
+- `TRY_CAST` parses `Target Replicas`: a non-numeric answer yields null instead of
+  failing the statement.
+- `target_version` is kept only for `ROLLBACK` and `target_replicas` only for
+  `SCALE_OUT`, so the enum and its targets stay consistent for "closing the loop"
+  (brief §9). The unparsed answer is always in `raw_response`.
+- Each call passes a **request_id** (`service@window_end`), which the docs use to
+  correlate a call with its row in the agent logs.
+**Why.** The brief (§10) says to follow the current docs where they disagree and to say
+so. The reference is live-proven on point 1, so the identifier form probably also works;
+the string form is what is documented.
+**Impact.** `sql/4.2_*.sql`, `sql/4.3_*.sql`, guarded by `tests/test_agent_sql.py`. To be
+confirmed in your environment when the statements run.

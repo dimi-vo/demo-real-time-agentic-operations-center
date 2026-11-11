@@ -5,7 +5,7 @@ import json
 import pytest
 
 from opsgen.kafka_io import key_payload
-from scripts.setup_rtce import LIGHTNING_QUERY, basic_token, lightning_command
+from scripts.setup_rtce import LIGHTNING_QUERIES, LIGHTNING_QUERY, basic_token, lightning_command
 
 
 def test_key_payload_primitive_schema():
@@ -52,3 +52,24 @@ def test_lightning_query_has_no_aggregate_or_join():
 def test_lightning_rejects_bad_endpoint():
     with pytest.raises(ValueError):
         lightning_command({"AIOPS_RTCE_MCP_ENDPOINT": "https://example.com/not-rtce"})
+
+
+def test_every_lightning_example_stays_within_the_supported_subset():
+    """Lightning SQL has no aggregates, GROUP BY or joins (D-008)."""
+    for table, query in LIGHTNING_QUERIES.items():
+        lowered = query.lower()
+        assert f"from {table}" in lowered
+        assert " join " not in lowered and "group by" not in lowered
+        assert "count(" not in lowered and "max(" not in lowered
+
+
+def test_the_decisions_example_answers_the_walkthrough_question():
+    """Brief section 8, step 7: the most recent decision for a trigger, with reasoning."""
+    query = LIGHTNING_QUERIES["remediation_decisions"]
+    assert "where trigger =" in query.lower()
+    assert "reasoning" in query and "order by window_end desc limit 1" in query.lower()
+
+
+def test_lightning_command_can_target_the_decisions_table():
+    cmd = lightning_command(_card(), "remediation_decisions")
+    assert "remediation_decisions" in cmd and "/query/v1" in cmd

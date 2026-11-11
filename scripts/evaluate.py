@@ -10,17 +10,24 @@ cost), compares it with `runs/pre-provisioned/incidents.jsonl`, and prints:
 - per service: false positives per hour outside incidents, and the fresh-start noise
   in the first 5 minutes.
 
-The decision half (reading `remediation_decisions`) lands in Phase 4.
+Decision half (Phase 4): if `remediation_decisions` exists, it also reads that and prints:
+
+- per agent: how many decisions, how many carry a valid action, routing errors;
+- per incident: the recommended action against the expected one, with the target;
+- routing and coverage: mutual exclusivity, and agent calls against anomalous rows.
 
 Offline: `--dump FILE` saves the rows it read as JSONL; `--rows FILE` evaluates such a
 file without connecting (so a run can be shared and re-scored without credentials).
-Definitions are in `scripts/evaluation/detection.py` (D-021).
+`--dump-decisions` / `--decision-rows` do the same for `remediation_decisions`.
+Definitions are in `scripts/evaluation/detection.py` (D-021) and
+`scripts/evaluation/decisions.py` (D-032).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,6 +36,12 @@ from rich.table import Table
 
 from scripts.common.paths import get_project_root
 from scripts.common.topic_reader import epoch_seconds, jsonable
+from scripts.evaluation.decisions import (
+    VALID_ACTION_TARGET,
+    DecisionReport,
+    DecisionRow,
+    score_decisions,
+)
 from scripts.evaluation.detection import (
     DETECT_WITHIN_WINDOWS,
     DETECTED,
@@ -46,6 +59,7 @@ from scripts.evaluation.detection import (
 )
 
 SERVICE_HEALTH = "service_health"
+REMEDIATION_DECISIONS = "remediation_decisions"
 FP_TARGET_PER_HOUR = 1.0
 FRESH_START_TARGET = 1
 
@@ -72,6 +86,14 @@ def _parse_args(argv):
     p.add_argument("--incidents", help="ground-truth file (default: runs/pre-provisioned/incidents.jsonl)")
     p.add_argument("--dump", help="also write the rows read to this JSONL file")
     p.add_argument("--rows", help="evaluate this JSONL dump instead of reading Kafka")
+    p.add_argument(
+        "--decisions-topic",
+        default=REMEDIATION_DECISIONS,
+        help=f"table of decisions (default: {REMEDIATION_DECISIONS})",
+    )
+    p.add_argument("--decision-rows", help="score this JSONL dump of decisions instead of reading Kafka")
+    p.add_argument("--dump-decisions", help="also write the decisions read to this JSONL file")
+    p.add_argument("--no-decisions", action="store_true", help="skip the decision half")
     p.add_argument("--details", action="store_true", help="list every false positive and fresh-start anomaly")
     p.add_argument(
         "--rescale",
@@ -81,25 +103,54 @@ def _parse_args(argv):
     return p.parse_args(argv)
 
 
-def _load_rows(args, root: Path) -> list[dict]:
-    if args.rows:
-        return [json.loads(line) for line in Path(args.rows).read_text().splitlines() if line.strip()]
+def _read_jsonl(path: str) -> list[dict]:
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def _dump(records: list[dict], path: str) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with Path(path).open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    console.print(f"Wrote {len(records)} rows to {path}")
+
+
+def _read_table(topic: str, creds, root: Path) -> list[dict] | None:
+    """Read a table over Kafka. None when it doesn't exist yet."""
     from scripts.common.credentials import load_card
     from scripts.common.topic_reader import TopicNotFound, read_topic
 
-    _, card = load_card(args.creds, root)
-    with console.status(f"Reading {args.topic} …"):
+    _, card = load_card(creds, root)
+    with console.status(f"Reading {topic} …"):
         try:
-            records = read_topic(card, args.topic)
+            records = read_topic(card, topic)
         except TopicNotFound:
-            raise SystemExit(f"`{args.topic}` doesn't exist yet. Create it with sql/2.4_service_health.sql.") from None
-    records = [jsonable(r) for r in records]
+            return None
+    return [jsonable(r) for r in records]
+
+
+def _load_rows(args, root: Path) -> list[dict]:
+    if args.rows:
+        return _read_jsonl(args.rows)
+    records = _read_table(args.topic, args.creds, root)
+    if records is None:
+        raise SystemExit(f"`{args.topic}` doesn't exist yet. Create it with sql/2.4_service_health.sql.")
     if args.dump:
-        Path(args.dump).parent.mkdir(parents=True, exist_ok=True)
-        with Path(args.dump).open("w", encoding="utf-8") as fh:
-            for r in records:
-                fh.write(json.dumps(r) + "\n")
-        console.print(f"Wrote {len(records)} rows to {args.dump}")
+        _dump(records, args.dump)
+    return records
+
+
+def _load_decisions(args, root: Path) -> list[dict] | None:
+    """The decision rows, or None when the decision half doesn't apply."""
+    if args.no_decisions:
+        return None
+    if args.decision_rows:
+        return _read_jsonl(args.decision_rows)
+    if args.rows:  # offline health dump, no credentials in play
+        return None
+    records = _read_table(args.decisions_topic, args.creds, root)
+    if records is not None and args.dump_decisions:
+        _dump(records, args.dump_decisions)
     return records
 
 
@@ -126,6 +177,21 @@ def main(argv: list[str] | None = None) -> None:
     incidents = load_incidents(gt_path)
     report = score(rows, incidents, range_from, range_to)
     _render(report, args.rows or args.topic, gt_path, len(incidents), args.details)
+
+    records = _load_decisions(args, root)
+    if records is None:
+        console.print(
+            f"\n[dim]No `{args.decisions_topic}` yet — the decision half is skipped. "
+            f"Create it with sql/4.3_remediation_decisions.sql and the two INSERT statements.[/dim]"
+        )
+        return
+    decisions = [DecisionRow.from_record(r) for r in records]
+    _render_decisions(
+        score_decisions(decisions, rows, incidents, range_from, range_to),
+        args.decision_rows or args.decisions_topic,
+        len(decisions),
+        args.details,
+    )
 
 
 def _render(rep: DetectionReport, source: str, gt_path: Path, n_incidents: int, details: bool) -> None:
@@ -232,6 +298,130 @@ def _render(rep: DetectionReport, source: str, gt_path: Path, n_incidents: int, 
     console.print(f"  Detected within {DETECT_WITHIN_WINDOWS} windows: {in_time}/{len(scored)} incidents")
     console.print(f"  False positives: worst service {worst_fp:.1f}/hour (target ≤ {FP_TARGET_PER_HOUR:.0f})")
     console.print(f"  Fresh-start noise: worst service {worst_fresh} in 5 min (target ≤ {FRESH_START_TARGET})")
+
+
+def _render_decisions(rep: DecisionReport, source: str, total_read: int, details: bool) -> None:
+    console.print(
+        f"\n[bold]{source}[/bold]: {rep.total_decisions} decisions in the scored range "
+        f"({total_read} read in total)\n"
+    )
+    if not rep.total_decisions:
+        console.print("[yellow]No decisions in range. Are both INSERT statements running?[/yellow]")
+        return
+
+    t = Table(title="Agents", title_justify="left")
+    for col in ("agent", "decisions", "valid action", "routing errors", "actions", "confidence"):
+        t.add_column(col, justify="right" if col != "agent" else "left")
+    for a in sorted(rep.agents.values(), key=lambda a: a.agent_name):
+        share = a.valid_share or 0.0
+        t.add_row(
+            a.agent_name or "[red](none)[/red]", str(a.decisions),
+            _target_low(share, VALID_ACTION_TARGET, "{:.0%}"), _flag(a.routing_errors),
+            ", ".join(f"{k} {v}" for k, v in a.actions.most_common()),
+            ", ".join(f"{k} {v}" for k, v in a.confidences.most_common()),
+        )  # fmt: skip
+    console.print(t)
+    console.print(
+        "[dim]valid action = the parsed action is one the agent is allowed to take "
+        "(INVALID covers a failed call or an answer outside the set). routing errors = "
+        "the trigger belongs to the other agent.[/dim]\n"
+    )
+
+    t = Table(title="Incidents (decisions)", title_justify="left")
+    for col in ("id", "type", "service", "expected", "recommended", "target", "calls", "later windows"):
+        t.add_column(col)
+    scored = [i for i in rep.incidents if i.decisions]
+    for item in scored:
+        inc = item.incident
+        d = item.headline
+        rec = f"[green]{d.action}[/green]" if item.matched else f"[red]{d.action}[/red]"
+        if not item.matched and item.any_matched:
+            rec += " [yellow](later)[/yellow]"
+        target = {True: "[green]ok[/green]", False: "[red]wrong[/red]", None: "-"}[item.target_ok]
+        if item.target_ok is not None:
+            target += f" {d.target_version or d.target_replicas}"
+        later = ", ".join(f"{k} {v}" for k, v in item.actions.most_common() if k != d.action)
+        t.add_row(
+            inc.incident_id, inc.type, inc.service_name, inc.expected_action, rec, target,
+            str(len(item.decisions)), later,
+        )  # fmt: skip
+    console.print(t)
+    console.print(
+        "[dim]recommended = the decision on the first window of the incident, the one the "
+        "on-call team would act on. (later) = a later window did recommend the expected "
+        "action. target = the version for ROLLBACK or the replica count for SCALE_OUT, "
+        "against what the SQL computed.[/dim]"
+    )
+    no_decision = [i for i in rep.incidents if not i.decisions]
+    if no_decision:
+        console.print(
+            f"[dim]{len(no_decision)} incidents in range produced no decision "
+            f"({', '.join(i.incident.incident_id for i in no_decision)}): "
+            f"not detected, or the agents were not running.[/dim]"
+        )
+
+    mismatches = [i for i in scored if not i.matched]
+    if mismatches:
+        console.print("\n[bold]Mismatches[/bold] (expected vs recommended, with the agent's own words)")
+        for item in mismatches:
+            d = item.headline
+            console.print(
+                f"  [red]{item.incident.incident_id}[/red] {item.incident.service_name} "
+                f"{item.incident.type}: expected {item.incident.expected_action}, got {d.action} "
+                f"({d.confidence or 'no confidence'}) — {d.describe()}"
+            )
+            console.print(f"    summary: {d.summary or '-'}")
+            if details:
+                console.print(f"    raw: {(d.raw_response or '').strip()}")
+        if not details:
+            console.print("  [dim]--details prints each raw_response in full.[/dim]")
+
+    cov = rep.coverage
+    console.print("\n[bold]Routing and coverage[/bold]")
+    console.print(
+        f"  Mutually exclusive: {_ok(not rep.both_agents)} "
+        f"({len(rep.both_agents)} windows went to both agents)"
+    )
+    console.print(
+        f"  Agent calls track anomalies: {cov.decided}/{cov.expected} anomalous rows have a decision, "
+        f"out of {cov.total_rows} rows in range"
+    )
+    if cov.in_flight:
+        console.print(f"    [dim]{cov.in_flight} anomalous rows are too recent to have a decision yet.[/dim]")
+    if cov.missing:
+        console.print(f"  [red]Missing decisions: {len(cov.missing)}[/red]")
+        for svc, we, agent in cov.missing[:10] if not details else cov.missing:
+            console.print(f"    {svc:12} {_t(we)} {agent}")
+    if cov.unexpected:
+        console.print(f"  [red]Decisions on rows that were not anomalous: {len(cov.unexpected)}[/red]")
+    if cov.duplicates:
+        console.print(f"  [yellow]Duplicate decisions (same window and agent): {len(cov.duplicates)}[/yellow]")
+
+    if rep.outside:
+        actions = Counter(d.action for d in rep.outside)
+        console.print(
+            f"\n  Outside any incident: {len(rep.outside)} decision{'s' if len(rep.outside) != 1 else ''} "
+            f"({', '.join(f'{k} {v}' for k, v in actions.most_common())}) — these follow the "
+            f"detector's false positives; WATCH is the appropriate answer."
+        )
+
+    console.print("\n[bold]Acceptance (brief section 11)[/bold]")
+    console.print(
+        f"  Valid actions: {_target_low(rep.valid_share or 0.0, VALID_ACTION_TARGET, '{:.0%}')} "
+        f"(target ≥ {VALID_ACTION_TARGET:.0%})"
+    )
+    console.print(f"  Action matches ground truth: {sum(i.matched for i in scored)}/{len(scored)} incidents")
+    console.print(f"  Routing mutually exclusive: {_ok(not rep.both_agents)}")
+
+
+def _ok(passed: bool) -> str:
+    return "[green]yes[/green]" if passed else "[red]no[/red]"
+
+
+def _target_low(value: float, target: float, fmt: str) -> str:
+    """Colour a value that should be at or above `target`."""
+    text = fmt.format(value)
+    return f"[green]{text}[/green]" if value >= target else f"[red]{text}[/red]"
 
 
 def _flag(n: int) -> str:

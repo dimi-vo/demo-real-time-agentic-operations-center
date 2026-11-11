@@ -21,10 +21,20 @@ from scripts.common.credentials import load_card
 
 SERVER_NAME = "real-time-context-engine"
 _EXPECTED = ("AIOPS_RTCE_MCP_ENDPOINT", "AIOPS_RTCE_API_KEY", "AIOPS_RTCE_API_SECRET")
-LIGHTNING_QUERY = (
-    "SELECT service_name, window_end, latency_status, traffic_status, avg_latency_ms "
-    "FROM service_health ORDER BY window_end DESC LIMIT 10"
-)
+# Lightning SQL supports only SELECT / WHERE / ORDER BY / LIMIT (D-008): no aggregates,
+# no GROUP BY, no joins. One example per served table.
+LIGHTNING_QUERIES = {
+    "service_health": (
+        "SELECT service_name, window_end, latency_status, traffic_status, avg_latency_ms "
+        "FROM service_health ORDER BY window_end DESC LIMIT 10"
+    ),
+    "remediation_decisions": (
+        "SELECT window_end, service_name, agent_name, action, confidence, reasoning "
+        "FROM remediation_decisions WHERE trigger = 'LATENCY_HIGH' "
+        "ORDER BY window_end DESC LIMIT 1"
+    ),
+}
+LIGHTNING_QUERY = LIGHTNING_QUERIES["service_health"]
 
 
 def basic_token(key: str, secret: str) -> str:
@@ -34,7 +44,7 @@ def basic_token(key: str, secret: str) -> str:
 # --- Lightning ----------------------------------------------------------------------
 
 
-def _lightning_request(card: dict[str, str]) -> tuple[str, str, str]:
+def _lightning_request(card: dict[str, str], table: str = "service_health") -> tuple[str, str, str]:
     endpoint = card.get("AIOPS_RTCE_MCP_ENDPOINT", "")
     match = re.fullmatch(
         r"https://mcp\.([a-z0-9-]+)\.aws\.confluent\.cloud/"
@@ -53,15 +63,15 @@ def _lightning_request(card: dict[str, str]) -> tuple[str, str, str]:
         {
             "catalog_name": card["AIOPS_ENVIRONMENT_ID"],
             "database_name": card["AIOPS_CLUSTER_ID"],
-            "query": LIGHTNING_QUERY,
+            "query": LIGHTNING_QUERIES[table],
         },
         indent=2,
     )
     return url, payload, basic_token(card["AIOPS_RTCE_API_KEY"], card["AIOPS_RTCE_API_SECRET"])
 
 
-def lightning_command(card: dict[str, str]) -> str:
-    url, payload, token = _lightning_request(card)
+def lightning_command(card: dict[str, str], table: str = "service_health") -> str:
+    url, payload, token = _lightning_request(card, table)
     return " \\\n  ".join(
         (
             "curl -sS -X POST " + shlex.quote(url),
@@ -121,7 +131,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Register RTCE as an MCP server, or print a Lightning Query curl")
     p.add_argument("--creds", help="Path to the credential card (default: resolved from credentials.env)")
     p.add_argument("--client", choices=["claude", "codex", "vscode", "copilot", "all"], help="Which coding agent")
-    p.add_argument("--lightning", action="store_true", help="Print a ready-to-run Lightning Query curl and exit")
+    p.add_argument(
+        "--lightning",
+        nargs="?",
+        const="service_health",
+        choices=sorted(LIGHTNING_QUERIES),
+        help="Print a ready-to-run Lightning Query curl for this table and exit (default: service_health)",
+    )
     return p
 
 
@@ -131,8 +147,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.lightning:
         try:
-            print("\n# Lightning Query against service_health — copy and run:\n")
-            print(lightning_command(card))
+            print(f"\n# Lightning Query against {args.lightning} — copy and run:\n")
+            print(lightning_command(card, args.lightning))
         except ValueError as e:
             sys.exit(f"Error: {e}")
         return
