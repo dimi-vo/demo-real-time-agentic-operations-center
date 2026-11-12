@@ -109,15 +109,32 @@ def test_calls_track_anomalous_rows_not_windows():
         _dec("cart", 20, agent=CAPACITY_AGENT, trigger="TRAFFIC_LOW", action=INVESTIGATE_UPSTREAM),
     ]
     cov = _score(decisions, rows, []).coverage
-    assert (cov.total_rows, cov.expected, cov.decided) == (100, 2, 0 + 2)
+    assert (cov.expected, cov.decided) == (2, 2)
+    assert cov.total_rows == 90  # counted from the first decision, at window 10
     assert cov.missing == [] and cov.unexpected == []
 
 
 def test_an_anomalous_row_without_a_decision_is_missing_unless_it_is_recent():
-    rows = _series("cart", 100, {10: {"lat": "HIGH"}, 98: {"lat": "HIGH"}})
-    cov = _score([], rows, [], to=T0 + 1000).coverage
+    rows = _series("cart", 100, {5: {"lat": "HIGH"}, 10: {"lat": "HIGH"}, 98: {"lat": "HIGH"}})
+    cov = _score([_dec("cart", 5)], rows, [], to=T0 + 1000).coverage
     assert cov.missing == [("cart", T0 + 110, RELEASE_AGENT)]
     assert cov.in_flight == 1  # window 98 closes inside the in-flight tail
+
+
+def test_anomalies_from_before_the_agents_started_are_not_missing():
+    """The INSERTs read service_health from the latest offset, so windows older than the
+    first decision were never offered to an agent."""
+    rows = _series("cart", 100, {10: {"lat": "HIGH"}, 60: {"lat": "HIGH"}})
+    cov = _score([_dec("cart", 60)], rows, []).coverage
+    assert cov.counted_from == T0 + 610
+    assert (cov.expected, cov.decided) == (1, 1)
+    assert cov.missing == []
+
+
+def test_coverage_is_empty_when_no_agent_ever_answered():
+    rows = _series("cart", 100, {10: {"lat": "HIGH"}})
+    cov = _score([], rows, []).coverage
+    assert cov.counted_from is None and cov.expected == 0 and cov.missing == []
 
 
 def test_a_decision_on_a_normal_row_is_unexpected():

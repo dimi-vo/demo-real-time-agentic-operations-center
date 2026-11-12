@@ -11,11 +11,16 @@ are:
   `TRAFFIC_LOW` to the capacity agent. A decision whose agent doesn't match its trigger
   is a routing error. **Mutual exclusivity**: no (service, window) may appear under both
   agents.
-- **Coverage.** Every anomalous `service_health` row in range should produce exactly one
-  decision, and no other row should produce any: agent calls track anomalies, not
-  windows. A row is *expected to call* the capacity agent when `traffic_status` is HIGH
-  or LOW, and the release agent when `latency_status` is HIGH and traffic is normal.
-  Missing decisions at the very end of the range are usually just in flight.
+- **Coverage.** Every anomalous `service_health` row should produce exactly one decision,
+  and no other row should produce any: agent calls track anomalies, not windows. A row is
+  *expected to call* the capacity agent when `traffic_status` is HIGH or LOW, and the
+  release agent when `latency_status` is HIGH and traffic is normal.
+  Coverage is counted **from the first decision in range, not from the start of the
+  range**: the INSERT statements read `service_health` from the latest offset, so
+  anomalies from before they were created have no decision by design and are not
+  missing. The first decision is the best available proxy for when the agents started,
+  which means an anomaly the agents missed at the very start of their life is not
+  counted either. Missing decisions at the very end of the range are usually in flight.
 - **Per incident.** The decisions on that service's windows inside the incident span.
   The **headline** decision is the one on the earliest such window: the first
   recommendation the on-call team would see. It matches when its action equals the
@@ -213,6 +218,7 @@ class AgentSummary:
 class Coverage:
     """Anomalous `service_health` rows against the decisions they should have produced."""
 
+    counted_from: float | None = None  # when the agents first answered; see the module docstring
     expected: int = 0
     decided: int = 0
     missing: list[tuple[str, float, str]] = field(default_factory=list)  # service, window_end, agent
@@ -291,7 +297,7 @@ def score_decisions(
         d for d in scoped if check_target(d, incident_of.get(id(d)), health.get(d.key)) is False
     ]
 
-    coverage = _coverage(scoped, health_rows, by_window, range_from, range_to)
+    coverage = _coverage(scoped, health_rows, by_window, range_to)
     return DecisionReport(
         range_from=range_from,
         range_to=range_to,
@@ -310,10 +316,14 @@ def _coverage(
     scoped: list[DecisionRow],
     health_rows: list[HealthRow],
     by_window: dict[Key, list[DecisionRow]],
-    range_from: float,
     range_to: float,
 ) -> Coverage:
     cov = Coverage()
+    if not scoped:
+        return cov
+    # The agents read service_health from the latest offset, so they can only answer for
+    # windows from their own creation onward.
+    cov.counted_from = min(d.window_end for d in scoped)
     seen: set[tuple[str, float, str]] = set()
     for key, ds in by_window.items():
         for d in ds:
@@ -324,7 +334,7 @@ def _coverage(
 
     wanted: set[tuple[str, float, str]] = set()
     for row in health_rows:
-        if not (range_from <= row.window_end < range_to):
+        if not (cov.counted_from <= row.window_end < range_to):
             continue
         cov.total_rows += 1
         agent = expected_agent(row)

@@ -390,7 +390,12 @@ def _render_decisions(rep: DecisionReport, source: str, total_read: int, details
     )
     console.print(
         f"  Agent calls track anomalies: {cov.decided}/{cov.expected} anomalous rows have a decision, "
-        f"out of {cov.total_rows} rows in range"
+        f"out of {cov.total_rows} rows"
+    )
+    console.print(
+        f"    [dim]counted from {_t(cov.counted_from)}, the first decision: the INSERTs read "
+        f"service_health from the latest offset, so anomalies from before the agents were "
+        f"created have no decision by design.[/dim]"
     )
     if cov.in_flight:
         console.print(f"    [dim]{cov.in_flight} anomalous rows are too recent to have a decision yet.[/dim]")
