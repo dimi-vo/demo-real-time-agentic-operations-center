@@ -6,7 +6,7 @@ Troubleshooting only; the continuous workshop never needs it in the normal flow.
 2. stops the developer's running Flink statements;
 3. drops the lab objects — `service_health`, `remediation_decisions`, and the two
    agents — and their Schema Registry subjects;
-4. clears the records from the source topics (both are delete-cleanup, so this works);
+4. clears the records from the source topics (all delete-cleanup, so this works);
 5. deletes the generator's persisted state and `incidents.jsonl`.
 
 `--with-labs` then rebuilds the lab statements from `sql/`. `--keep-source` skips step 4.
@@ -31,7 +31,7 @@ from scripts.common.paths import get_project_root
 
 LAB_TABLES = ("remediation_decisions", "service_health")  # drop downstream first
 LAB_AGENTS = ("release_agent", "capacity_agent")
-SOURCE_TOPICS = ("service_requests", "service_deployments")
+SOURCE_TOPICS = ("service_requests", "service_deployments", "service_incidents")
 LAB_SUBJECT_TOPICS = ("service_health", "remediation_decisions")
 OPS_SIM_TOKENS = ("ops-sim", "opsgen.cli", "opsgen")
 TERMINAL = {"COMPLETED", "FAILED", "STOPPED"}
