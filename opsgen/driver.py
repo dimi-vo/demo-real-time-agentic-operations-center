@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from opsgen.groundtruth import append_incident, incidents_path
+from opsgen.groundtruth import append_incident, end_record, incidents_path, start_record
 from opsgen.instances import version_hash
 from opsgen.services import service_names
 from opsgen.simulation import Simulation
@@ -65,8 +65,16 @@ def run_realtime(sim: Simulation, sink, root: Path | None = None, write_groundtr
                 sink.emit_requests(requests)
             for ev in events:
                 sink.emit_event(ev)
-                if ev.kind == "incident_end" and gt_path is not None and ev.incident is not None:
-                    append_incident(gt_path, ev.incident)
+                if ev.incident is not None:
+                    # Two records per incident on the Kafka side: one at start
+                    # (ended_at null) and one at end (both timestamps). The
+                    # incidents.jsonl file still gets one record, only on end.
+                    if ev.kind == "incident_start":
+                        sink.emit_incident(start_record(ev.incident, ev.now))
+                    elif ev.kind == "incident_end":
+                        sink.emit_incident(end_record(ev.incident, ev.now))
+                        if gt_path is not None:
+                            append_incident(gt_path, ev.incident)
             if st_path is not None and (events or k % 5 == 0):
                 save_state(st_path, sim.state_snapshot())
             sink.flush()

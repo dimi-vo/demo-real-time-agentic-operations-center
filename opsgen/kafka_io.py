@@ -30,6 +30,7 @@ from opsgen.sinks import format_event
 
 REQUESTS_TOPIC = "service_requests"
 DEPLOYMENTS_TOPIC = "service_deployments"
+INCIDENTS_TOPIC = "service_incidents"
 
 
 def key_payload(key_schema_str: str, service_name: str):
@@ -73,6 +74,7 @@ class KafkaSink:
         )
         self._req_value_ctx = SerializationContext(REQUESTS_TOPIC, MessageField.VALUE)
         self._dep_value_ctx = SerializationContext(DEPLOYMENTS_TOPIC, MessageField.VALUE)
+        self._inc_value_ctx = SerializationContext(INCIDENTS_TOPIC, MessageField.VALUE)
         self._dep_key_fn = self._build_deployments_key_fn()
 
     def _build_deployments_key_fn(self):
@@ -104,6 +106,18 @@ class KafkaSink:
                 value=self._serializer(r, self._dep_value_ctx),
                 timestamp=int(r["event_time"]),
             )
+        self._producer.poll(0)
+
+    def emit_incident(self, record: dict) -> None:
+        """One ground-truth incident record. service_incidents has no registered key
+        subject — the message key is the raw service_name string, same shape as
+        service_requests. The Kafka record timestamp is event_time (ms)."""
+        self._producer.produce(
+            INCIDENTS_TOPIC,
+            key=record["service_name"].encode("utf-8"),
+            value=self._serializer(record, self._inc_value_ctx),
+            timestamp=int(record["event_time"]),
+        )
         self._producer.poll(0)
 
     def emit_event(self, ev) -> None:

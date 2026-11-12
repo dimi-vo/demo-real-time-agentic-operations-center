@@ -42,6 +42,44 @@ def incident_record(inc: Incident) -> dict:
     return rec
 
 
+def _epoch_millis(seconds: float) -> int:
+    return int(seconds * 1000)
+
+
+def start_record(inc: Incident, now: float) -> dict:
+    """The first record for an incident, written when degradation starts. ended_at is
+    null — a consumer reading it knows "something has started, don't know when it ends".
+    The second record (end_record) carries the close. Field names and types match
+    schemas/service_incidents.avsc and sql/source_service_incidents.sql."""
+    return {
+        "event_time": _epoch_millis(now),
+        "incident_id": inc.incident_id,
+        "service_name": inc.service_name,
+        "incident_type": inc.type,
+        "started_at": _epoch_millis(inc.degradation_start),
+        "ended_at": None,
+        "expected_trigger": inc.expected_trigger,
+        "expected_action": inc.expected_action,
+        "good_version": inc.good_version if inc.type == BAD_DEPLOY else None,
+    }
+
+
+def end_record(inc: Incident, now: float) -> dict:
+    """The second record for an incident, written when degradation ends. Carries both
+    timestamps so a consumer that missed the start record can still render the span."""
+    return {
+        "event_time": _epoch_millis(now),
+        "incident_id": inc.incident_id,
+        "service_name": inc.service_name,
+        "incident_type": inc.type,
+        "started_at": _epoch_millis(inc.degradation_start),
+        "ended_at": _epoch_millis(inc.degradation_end),
+        "expected_trigger": inc.expected_trigger,
+        "expected_action": inc.expected_action,
+        "good_version": inc.good_version if inc.type == BAD_DEPLOY else None,
+    }
+
+
 def last_incident_number(path: Path) -> int:
     """The highest `INC<n>` number already logged, or 0. A restarted generator continues
     numbering after it, so incident ids stay unique within one ground-truth file."""

@@ -69,6 +69,9 @@ class DryRunSink:
         for r in records:
             self.out.write(json.dumps({"_stream": "service_deployments", **r}) + "\n")
 
+    def emit_incident(self, record: dict) -> None:
+        self.out.write(json.dumps({"_stream": "service_incidents", **record}) + "\n")
+
     def emit_event(self, ev: Event) -> None:
         self.out.write(json.dumps(event_json(ev)) + "\n")
         self.log.write(format_event(ev) + "\n")
