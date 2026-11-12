@@ -129,6 +129,27 @@ def model_exists(session: FlinkSession, model_name: str) -> bool:
     return found
 
 
+def list_tables(session: FlinkSession) -> set[str]:
+    """Every table name `SHOW TABLES` returns in the session's catalog.database.
+
+    Raises RuntimeError if the statement submit fails or never reaches RUNNING/COMPLETED
+    — the caller is expected to catch and surface the error rather than treat it as
+    "no tables exist" (D-020).
+    """
+    name = session.submit("SHOW TABLES;", label="aiops-check")
+    status = session.wait(name, timeout=60)
+    phase = status.get("status", {}).get("phase")
+    if phase not in {RUNNING, "COMPLETED"}:
+        session.stop(name)
+        raise RuntimeError(f"SHOW TABLES did not reach RUNNING/COMPLETED (phase={phase}).")
+    tables: set[str] = set()
+    for row in session.results(name, max_rows=500, timeout=30):
+        if row:
+            tables.add(str(row[0]))
+    session.stop(name)
+    return tables
+
+
 def create_lab_objects(card: dict[str, str], root: Path) -> bool:
     """Submit the canonical lab SQL from sql/, in order, waiting for each to come up.
 

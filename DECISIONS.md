@@ -257,23 +257,30 @@ exercised by live mode in Phase 2 and by unit tests now.
 
 ## Phase 2b
 
-### D-020 · DECISION · Deploy readiness check uses Schema Registry subjects + SHOW MODELS
-**Status (Break 2b, live run).** The model check works; the table check does **not**: it
-reported both source tables missing although they exist. Logged as a local issue,
-`.scratch/deploy-readiness-check/issues/01-source-tables-reported-missing.md` (status
-`ready-for-agent`, fix before Phase 6). Not investigated yet, at the user's request.
-**What.** How `uv run deploy` checks "both source tables and `llm_textgen_model` exist"
+### D-020 · DECISION · Deploy readiness check uses Flink `SHOW TABLES` + `SHOW MODELS`
+**Status (post-Phase-5 cleanup).** Live-reported false negative fixed; three source
+tables (including `service_incidents` added in Phase 5) and the model are checked
+through one Flink session.
+**What.** How `uv run deploy` checks "all source tables and `llm_textgen_model` exist"
 (brief §7.2, replacing the reference's `driver_race_history` row count).
-**Options.** (a) List Kafka topics via the cluster's Kafka REST endpoint; (b) check the
-registered Schema Registry subjects; plus a Flink `SHOW MODELS` for the model.
-**Choice.** (b) for the tables — a `<topic>-value` subject exists iff the `CREATE TABLE`
-ran — and `SHOW MODELS` (one short Flink statement) for the model.
-**Why.** The credential card doesn't carry the cluster's Kafka REST endpoint, and the SR
-subject is a faithful, cheap proof the table's schema was registered. The model isn't a
-REST resource, so a Flink statement is the natural check (as the reference used a Flink
-`COUNT(*)` for its check).
-**Impact.** The deploy needs the SR key (it has it) and one Flink call. Verified against a
-real environment at Break 2b.
+**Options.** (a) List Kafka topics via the cluster's Kafka REST endpoint; (b) check
+the registered Schema Registry subjects; (c) one Flink `SHOW TABLES` + `SHOW MODELS`
+through the same `FlinkSession` the model check already used.
+**Choice.** (c). One `SHOW TABLES` returns the set of table names in the developer's
+catalog.database; `SHOW MODELS` returns the model name.
+**Why.** The first attempt (b, SR subjects) was live-reported as broken at Break 2b:
+`/subjects` returned an empty list and the whole call was caught, so the check printed
+"both tables missing" for an environment that was fine
+(`.scratch/deploy-readiness-check/issues/01-source-tables-reported-missing.md`). The
+underlying cause was unclear (SR subject contexts, RBAC propagation, or a filter) but
+Flink `SHOW TABLES` sidesteps all of it: one mechanism for tables and model, the same
+auth path, and real errors surface as `?` with the HTTP status instead of being
+silently reshaped into a false "missing".
+**Impact.** The deploy's SR key is still used for Avro I/O; the readiness check no
+longer touches it. One extra Flink statement per `deploy` run (negligible, same
+pool/catalog as the existing model check). Six new tests
+(`tests/test_preprovisioned_readiness.py`) cover the four shapes: all present, one
+missing, table-check error (`?` not `✗`), model-check error.
 
 ## Phase 3
 

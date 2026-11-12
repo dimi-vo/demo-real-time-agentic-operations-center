@@ -22,7 +22,7 @@ from dotenv import dotenv_values
 from scripts.common import card as card_mod
 from scripts.common import deployment_meta as meta
 from scripts.common.credentials import set_active_card
-from scripts.common.flink import FlinkSession, model_exists
+from scripts.common.flink import FlinkSession, list_tables, model_exists
 from scripts.common.login_checks import confluent_logged_in
 from scripts.common.ui import confirm
 from scripts.preprovisioned import keys, lookup
@@ -30,7 +30,7 @@ from scripts.preprovisioned import keys, lookup
 PREFIX = "DEMO"
 KEY_LOCATION = "Console → API keys → My account"
 MODEL_NAME = "llm_textgen_model"
-SOURCE_TOPICS = ("service_requests", "service_deployments")
+SOURCE_TABLES = ("service_requests", "service_deployments", "service_incidents")
 
 CARD_FIELDS = {
     meta.KEY_GLOBAL_KEY_ID: ("AIOPS_FLINK_API_KEY", "AIOPS_FLINK_API_SECRET"),
@@ -220,16 +220,10 @@ def _pick(candidates: tuple[lookup.Environment, ...]) -> lookup.Environment:
 def _verify_ready(root: Path, card_path: Path) -> bool:
     card = {k: v or "" for k, v in dotenv_values(card_path).items()}
     print("\n=== Checking your environment is ready ===")
-    ok = True
-    topics = _list_topics(card)
-    for topic in SOURCE_TOPICS:
-        if topic in topics:
-            print(f"  ✓ table {topic}")
-        else:
-            ok = False
-            print(f"  ✗ table {topic} is missing — ask your platform team to re-run their apply.")
+    session = FlinkSession(card)
+    ok = _check_tables(session)
     try:
-        if model_exists(FlinkSession(card), MODEL_NAME):
+        if model_exists(session, MODEL_NAME):
             print(f"  ✓ model {MODEL_NAME}")
         else:
             ok = False
@@ -240,20 +234,23 @@ def _verify_ready(root: Path, card_path: Path) -> bool:
     return ok
 
 
-def _list_topics(card: dict) -> set[str]:
-    # The card doesn't carry the cluster's Kafka REST endpoint, so prove the tables
-    # exist via their registered Schema Registry subjects instead (a <topic>-value
-    # subject exists iff the CREATE TABLE ran).
-    sr_url = card.get("AIOPS_SCHEMA_REGISTRY_URL", "")
-    auth = (card.get("AIOPS_SR_API_KEY", ""), card.get("AIOPS_SR_API_SECRET", ""))
+def _check_tables(session: FlinkSession) -> bool:
+    # One `SHOW TABLES` through the same Flink session the model check uses; a genuine
+    # RBAC or network error surfaces as `?` rather than a bogus "missing" (D-020).
     try:
-        resp = requests.get(f"{sr_url.rstrip('/')}/subjects", auth=auth, timeout=30)
-        resp.raise_for_status()
-        subjects = resp.json()
-    except (requests.RequestException, ValueError):
-        return set()
-    # A registered <topic>-value subject proves the CREATE TABLE ran.
-    return {s[: -len("-value")] for s in subjects if isinstance(s, str) and s.endswith("-value")}
+        tables = list_tables(session)
+    except (requests.RequestException, RuntimeError) as e:
+        for table in SOURCE_TABLES:
+            print(f"  ? could not check table {table}: {e}")
+        return False
+    ok = True
+    for table in SOURCE_TABLES:
+        if table in tables:
+            print(f"  ✓ table {table}")
+        else:
+            ok = False
+            print(f"  ✗ table {table} is missing — ask your platform team to re-run their apply.")
+    return ok
 
 
 # --- entry ---------------------------------------------------------------------------
