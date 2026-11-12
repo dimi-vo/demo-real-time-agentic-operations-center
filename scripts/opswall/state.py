@@ -268,7 +268,8 @@ class OpsWallState:
         if health and health[-1].request_count and health[-1].error_count is not None:
             err = 100.0 * health[-1].error_count / max(1, health[-1].request_count)
         seconds_since_deploy = (now - s.deployed_at) if s.deployed_at else None
-        return {
+        warmup = _warmup_span(health, rel)
+        snap = {
             "name": s.name,
             "tier": s.tier,
             "version": s.version,
@@ -286,6 +287,9 @@ class OpsWallState:
             "detectedTraffic": detected_traffic,
             "decisions": dec_json,
         }
+        if warmup is not None:
+            snap["warmup"] = warmup
+        return snap
 
 
 # ---- helpers ------------------------------------------------------------------
@@ -340,6 +344,20 @@ def _consolidate(health, match, actionable, trigger, now) -> list[tuple[float, f
             b = min(b, now)  # still open at the right edge
         closed.append((a, b))
     return closed
+
+
+def _warmup_span(health, rel) -> list[float] | None:
+    """Earliest and latest axis-relative seconds where a WARMING_UP row sits in the
+    visible health, as a [start, end] pair the frontend's warm-up band expects.
+    Returns None if nothing in the visible window was warming up — once the
+    warm-up has scrolled off the left of the axis it should not be drawn."""
+    warming = [h for h in health
+               if h.latency_status == "WARMING_UP" or h.traffic_status == "WARMING_UP"]
+    if not warming:
+        return None
+    start = rel(min(h.window_end - 10.0 for h in warming))
+    end = rel(max(h.window_end for h in warming))
+    return [start, end]
 
 
 def _status(s: ServiceState, health, actionable, now) -> tuple[str, str]:

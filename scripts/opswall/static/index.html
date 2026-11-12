@@ -1,4 +1,48 @@
 <!doctype html>
-<meta charset="utf-8" />
-<title>ops-wall (placeholder)</title>
-<p>Frontend is layer 7. The websocket at <code>/ws</code> and the state at <code>/healthz</code> work.</p>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Ops wall — Self-Healing IT</title>
+  <link rel="stylesheet" href="/static/opswall.css" />
+</head>
+<body>
+  <!-- Shared SVG defs: the warm-up hatch is referenced by every chart. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect width="6" height="6" fill="rgba(163,174,198,0.04)" />
+        <line x1="0" y1="0" x2="0" y2="6" stroke="rgba(163,174,198,0.16)" stroke-width="2" />
+      </pattern>
+    </defs>
+  </svg>
+
+  <header class="top">
+    <div>
+      <h1>Ops wall</h1>
+      <p class="sub">What the simulator injected, against what <code>service_health</code> detected and what the agent did about it. Last 10 minutes.</p>
+    </div>
+    <div class="clock">Updated <time id="updated">—</time><span id="conn" class="conn">connecting…</span></div>
+  </header>
+
+  <p class="summary" id="summary">Waiting for the first snapshot…</p>
+  <div class="legend" id="legend"></div>
+
+  <main class="wall">
+    <div class="axis-row" aria-hidden="true">
+      <div class="rail-spacer"></div>
+      <div class="axis-gutter"></div>
+      <div class="axis" id="axis"></div>
+    </div>
+    <div id="rows"></div>
+  </main>
+
+  <footer id="footer">
+    Hover or tab to any bar or marker for its times. When the live pipeline is quiet this reads as empty charts — that's fine, nothing is wrong.
+  </footer>
+
+  <div class="tip" id="tip" role="tooltip"></div>
+
+  <script src="/static/opswall.js"></script>
+</body>
+</html>
