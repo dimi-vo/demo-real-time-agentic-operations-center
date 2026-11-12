@@ -721,3 +721,100 @@ an explicit target — untyped rather than typed.
 `HealthRow` gained `ready_replicas` and `max_replicas`, which the decision half needs to
 recompute the replica suggestion. The walkthrough (Phase 6) must describe the three-line
 format, not the brief's six.
+
+### D-035 · DEVIATION · Ops wall is dark-only
+**What.** Brief §7.3 asks for "readable in light and dark mode"; the dashboard ships
+dark-only.
+**Options.** (a) Dual-theme: re-step every surface (truth purple, detect cyan, crit/warn/
+serious/good, hatch, chart bed, pulse) against the light surface and validate each pair
+against the light-mode gates; (b) dark-only now, light later if an attendee asks.
+**Choice.** (b), explicit at Break 5 planning (Q35).
+**Why.** The design the user picked (`.scratch/mockups/variant-e-ops-wall-dark.html`) is
+a dark-first wall — cool `#0A1120` surface, pulsing crit stripe, hatched purple/cyan on
+near-black — that trades its coherence for the dual-theme flex. Dual-theme is ~half a
+day of design-system work; the method supports it, so reinstating it later is a pure
+colour swap.
+**Impact.** `scripts/opswall/static/opswall.css` carries no light-mode block. Record kept
+so future me / the next contributor doesn't quietly add a `prefers-color-scheme: light`
+and think they've finished the job.
+
+### D-036 · DECISION · Ops wall chart is a per-metric truth-vs-detection mirror
+**What.** Each service row has two inline charts, Latency and Traffic. In each chart:
+up = the simulator-injected incident (purple, from `service_incidents`); down = the
+pipeline detection span (cyan, from `service_health`); zero line = agent decisions as
+shape-coded pins; detection-lag bracket in the down lane.
+**Options.** (a) Brief §7.3's six tiles with a latency sparkline each, plus two separate
+anomaly / AI panels; (b) one chart per service with the mirror by metric (my initial
+Variant A–C sketches); (c) per-metric mirror by source (Variant D → E), one row per
+service with two charts.
+**Choice.** (c), locked at the end of grilling (Q31 + Variant E file supplied by the user).
+**Why.** The brief's sparkline encodes the same thing the detection bar does, so the
+tile keeps text only. The mirror by metric collapses "did we catch this" into a single
+chart per service, losing the per-metric comparison the user asked for in Q27. The mirror
+by source (truth up, detection down) makes the detection lag a *visible horizontal
+offset* in a single chart per metric, which is the thing the dashboard exists to show.
+**Impact.** `scripts/opswall/static/{opswall.css,opswall.js}` implement this shape;
+`scripts/opswall/state.py` emits axis-relative seconds for every span so the renderer
+doesn't do arithmetic with absolute timestamps.
+
+### D-037 · DECISION · New `service_incidents` topic, two records per incident
+**What.** Simulator ground truth is published to a Kafka topic (`service_incidents`),
+not just the `incidents.jsonl` file. One record at `degradation_start` (`ended_at` null)
+and one at `degradation_end` (both timestamps set), tied by `incident_id`. Append-only,
+keyed by `service_name`, 9 columns: `event_time`, `incident_id`, `service_name`,
+`incident_type`, `started_at`, `ended_at`, `expected_trigger`, `expected_action`,
+`good_version`.
+**Options.** (a) Platform-team Terraform resource, same shape as `service_requests` /
+`service_deployments`; (b) attendee creates the topic in the workshop; (c) generator
+creates the topic over the admin API.
+**Choice.** (a), decided at Break 5 planning (Q2, Q14). Two records (not one) per
+incident, decided at Q3 so the dashboard can draw an "in progress" bar as soon as the
+incident starts, not only after it ends.
+**Why.** (a) keeps the schema story identical to the other two source tables. Two records
+unlock live rendering; one record would make the dashboard an archaeologist, not a wall.
+**Impact.** `sql/source_service_incidents.sql` (source of truth), `schemas/
+service_incidents.avsc`, `platform-team/modules/developer/statements.tf` (third
+CREATE TABLE heredoc, model statement's `depends_on` moves to it so the chain stays
+linear). Generator emits via `opsgen/kafka_io.py::emit_incident`. `reset.py` purges it on
+every reset. **Pending: `terraform apply` on your environment to register the subject.**
+
+### D-038 · DECISION · `evaluate` keeps reading `incidents.jsonl`
+**What.** The decision scorer in `scripts/evaluate.py` stays on the file, not the topic.
+**Why.** The generator writes both from the same `Incident` object so they can't disagree;
+`evaluate` was live-validated on 2026-11-12 against the file; rewriting a working loader
+buys nothing this phase. If and when the dashboard becomes the canonical source, flipping
+`evaluate` to the topic is a one-function loader swap.
+**Impact.** None to the evaluator. The ground-truth file keeps being deleted on
+`uv run reset` step 5.
+
+### D-039 · DECISION · Dashboard reads 10 min on start, not 15
+**What.** Brief §7.3 says "15 minutes ago by timestamp". The dashboard reads 10 min.
+**Why.** The chart is 10 min wide; a 15-min startup read fills five minutes of history
+that will never be shown, for a quarter more Kafka reads per launch. One constant
+(`STARTUP_BACKREAD_SECONDS` in `consumer.py`) used by every topic consumer.
+**Impact.** `scripts/opswall/consumer.py`. The Phase 6 walkthrough must say "last 10 min".
+
+### D-040 · DECISION · IBM Plex Sans vendored, no CDN
+**What.** Three WOFF2 files (latin subset, weights 400/500/600, ~60 KB total) sit under
+`scripts/opswall/static/fonts/` and are declared via local `@font-face` rules.
+**Options.** (a) Load from Google Fonts at render time; (b) fall back to `system-ui`
+everywhere; (c) vendor the files locally and serve them from the dashboard itself.
+**Choice.** (c), decided at Q36.
+**Why.** Conference wifi blocks CDNs regularly; `system-ui` is a different metric than
+Plex (proportions shift, numeral tables land differently). Vendoring means every
+attendee's screen matches the mockups and the dashboard has no third-party dependency at
+render time.
+**Impact.** `scripts/opswall/static/fonts/` carries the WOFF2s and a `LICENSE.md` (OFL).
+`opswall.css` starts with three `@font-face` blocks pointing at `/static/fonts/*.woff2`.
+
+### D-041 · DECISION · No separate "progressive unlock" panels
+**What.** Brief §7.3 describes an anomaly panel that unlocks when `service_health` has
+rows and an AI panel that unlocks when `remediation_decisions` has rows.
+**Choice.** The chart is drawn from the first render; empty topics just leave empty
+lanes. No separate panels, no reveal pattern.
+**Why.** Decided during grilling (Q29). In a design where every chart is a per-metric
+mirror, the "unlock" happens inside the chart (the detection lane fills in) rather than
+by revealing whole panels. One fewer piece of state and one fewer thing the walkthrough
+has to explain.
+**Impact.** `scripts/opswall/static/` has no unlock logic. The Phase 6 walkthrough must
+describe the chart's lane-by-lane fill-in, not the brief's progressive-reveal pattern.
