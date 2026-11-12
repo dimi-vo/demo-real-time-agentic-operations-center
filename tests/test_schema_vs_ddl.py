@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PAIRS = [
     ("sql/source_service_requests.sql", "schemas/service_requests.avsc", None),
     ("sql/source_service_deployments.sql", "schemas/service_deployments.avsc", "schemas/service_deployments_key.avsc"),
+    ("sql/source_service_incidents.sql", "schemas/service_incidents.avsc", None),
 ]
 _PRIMARY_KEY = re.compile(r"PRIMARY KEY \(([^)]*)\)")
 

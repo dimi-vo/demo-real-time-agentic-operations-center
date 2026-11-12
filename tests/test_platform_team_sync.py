@@ -15,6 +15,7 @@ STATEMENTS_TF = ROOT / "platform-team/modules/developer/statements.tf"
 COPIED_TABLES = (
     ("service_requests", "sql/source_service_requests.sql"),
     ("service_deployments", "sql/source_service_deployments.sql"),
+    ("service_incidents", "sql/source_service_incidents.sql"),
 )
 
 _HEREDOC = re.compile(r"<<-(\w+)\n(.*?)\n\s*\1$", re.DOTALL | re.MULTILINE)
@@ -53,8 +54,8 @@ def test_statements_tf_matches_sql_source(table, sql_path):
     )
 
 
-def test_both_source_tables_are_present():
-    assert set(_heredoc_tables()) == {"service_requests", "service_deployments"}
+def test_all_source_tables_are_present():
+    assert set(_heredoc_tables()) == {"service_requests", "service_deployments", "service_incidents"}
 
 
 def test_model_statement_present():

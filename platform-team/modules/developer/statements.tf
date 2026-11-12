@@ -102,6 +102,51 @@ resource "confluent_flink_statement" "create_service_deployments_table" {
   depends_on = [confluent_flink_statement.create_service_requests_table]
 }
 
+resource "confluent_flink_statement" "create_service_incidents_table" {
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE TABLE IF NOT EXISTS `service_incidents` (
+      `event_time` TIMESTAMP(3) COMMENT 'When this record was emitted; also the Kafka record timestamp',
+      `incident_id` STRING COMMENT 'Stable id for this incident across its start and end records',
+      `service_name` STRING COMMENT 'Service the incident affects (foreign key to service_deployments)',
+      `incident_type` STRING COMMENT 'BAD_DEPLOY, TRAFFIC_SURGE or UPSTREAM_DROP',
+      `started_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation actually began (not the deploy or trigger moment)',
+      `ended_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation ended; NULL on the start record, set on the end record',
+      `expected_trigger` STRING COMMENT 'What service_health should flag: LATENCY_HIGH, TRAFFIC_HIGH or TRAFFIC_LOW',
+      `expected_action` STRING COMMENT 'What the agent should pick: ROLLBACK, SCALE_OUT or INVESTIGATE_UPSTREAM',
+      `good_version` STRING COMMENT 'For BAD_DEPLOY, the version a ROLLBACK should target; NULL otherwise',
+      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
+    )
+    DISTRIBUTED BY HASH(`service_name`) INTO 1 BUCKETS
+    WITH (
+      'changelog.mode' = 'append',
+      'connector' = 'confluent',
+      'kafka.cleanup-policy' = 'delete',
+      'kafka.consumer.isolation-level' = 'read-uncommitted',
+      'kafka.message-timestamp-type' = 'create-time',
+      'kafka.retention.time' = '24 h',
+      'scan.startup.mode' = 'earliest-offset',
+      'value.format' = 'avro-registry'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_service_deployments_table]
+}
+
 # CSP Hosted Flink Model Inference only: Confluent runs the model, so there is no
 # connection and no cloud key. The name llm_textgen_model is what the agent SQL
 # (section 4 of the walkthrough) references.
@@ -132,5 +177,5 @@ resource "confluent_flink_statement" "llm_textgen_model" {
     "sql.current-database" = confluent_kafka_cluster.main.display_name
   }
 
-  depends_on = [confluent_flink_statement.create_service_deployments_table]
+  depends_on = [confluent_flink_statement.create_service_incidents_table]
 }
