@@ -93,7 +93,37 @@ No workarounds in code.
 - The decision half of `evaluate` rendered end to end against a synthetic run
   (a matched incident, a mismatch, a failed call and a decision outside every incident).
 
-**Not verified — needs you.** Nothing here has touched Confluent Cloud.
+**Verified live in your environment on 2026-11-12** (fresh `reset` at 09:31; scored
+08:47-09:47, so 18 minutes of data and 3 incidents). I ran `uv run evaluate` read-only;
+the rows are dumped under `.scratch/eval/*-phase4.jsonl` for re-scoring.
+
+| check (brief section 11) | result |
+|---|---|
+| Valid actions | **100%** (8 of 8), target ≥ 95% |
+| Routing mutually exclusive | **yes**, 0 windows under both agents |
+| Agent calls track anomalies | **8/8** anomalous rows decided, against 252 rows in the same span |
+| Action matches ground truth | **2/2** incidents |
+| Target | `ROLLBACK` named **2.9.4**, the incident's `good_version` |
+| Detection | **3/3** incidents within 3 windows, **0** false positives |
+| Fresh-start noise | `payments` **2** in 5 minutes (target ≈ 1); the other five services 0 |
+
+- **Decisions seen:** `INVESTIGATE_UPSTREAM` ×3 for the checkout drop, `ROLLBACK` ×5 for
+  the payments bad deploy. Every reason quoted the real numbers, none invented.
+- **D-033 confirmed**: the quoted agent name and the three `WITH` options were accepted.
+- **D-031 confirmed**: the checkout drop was detected in window 2 — the case that failed
+  0/2 at the Break 3 rates.
+- **INC0001 (a surge on `auth`) produced no decision**: it fired six minutes before the
+  agents were created, and the INSERTs read from the latest offset. `evaluate` now counts
+  coverage from the first decision, so this is not reported as a missing decision.
+
+**Still not exercised — needs a traffic surge while the agents run:**
+- **`SCALE_OUT`**, which is the path with the most machinery: the SQL replica
+  arithmetic, the agent copying that number, and the target check against it.
+- **`ESCALATE`** on `auth` (it runs at its replica ceiling).
+Surges are a quarter of incidents, so leaving everything running covers this; the
+remaining steps below are unchanged.
+
+**Not verified — needs you:** RTCE in the Console, and the Lightning `curl`.
 
 **Run order.** `ops-sim` keeps running throughout; `service_health` must already exist.
 
@@ -187,8 +217,7 @@ The statements in section 3 are all that's needed.
    attendee-visible text in the workshop. Two things I decided as delegated wording:
    `Reason` is capped at two sentences, and "never `OBSERVE` when the error rate has
    breached" stays in both frameworks.
-2. **D-031's live confirmation.** Do you want it as a separate run, or should I score the
-   same run that validates this phase? One run can do both.
+2. **D-031's live confirmation.** Answered by the same run: confirmed.
 
 ## 7. Next phase
 

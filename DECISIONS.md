@@ -559,6 +559,10 @@ brief's volume, web-gateway still the busiest). Alternatives: the brief's origin
 accept missed drops on low-volume services.
 
 ### D-031 · DEVIATION · Drop services at 6 requests/s, aligned generator start, chosen with an offline tuning harness
+**Status.** **Confirmed live on 2026-11-12.** After a fresh `reset` at 09:31, the
+`UPSTREAM_DROP` on `checkout` was detected in window 2 (13 requests against an expected
+59, lower bound 30). That is the same service and incident type that was missed 0/2 at
+the D-030 rates.
 **What.** How we fixed drop detection after the live Break 3 run (checkout's drops 0/2 at the
 D-030 rates), and the tool used to choose.
 **The tool (`scripts/tuning/`, developer-only).** Instead of a 60-minute live replay per idea:
@@ -640,7 +644,9 @@ what the team is told first. Scoring the headline keeps one number per incident.
 half is skipped silently when `remediation_decisions` doesn't exist yet.
 
 ### D-033 · DEVIATION · Agent SQL follows the docs, not the reference, on three points
-**Status.** Points 1-3 stand. The prompt-level choices below were partly undone by
+**Status.** **Confirmed live on 2026-11-12**: both agents and both INSERT statements were
+accepted and ran, so the quoted agent name and the three `WITH` options are right.
+Points 1-3 stand. The prompt-level choices below were partly undone by
 D-034: no `request_id`, no `TRY_CAST`, and targets are stored as the agent wrote them.
 
 **What.** Three places where the live F1 reference and the current Confluent docs
