@@ -640,6 +640,9 @@ what the team is told first. Scoring the headline keeps one number per incident.
 half is skipped silently when `remediation_decisions` doesn't exist yet.
 
 ### D-033 · DEVIATION · Agent SQL follows the docs, not the reference, on three points
+**Status.** Points 1-3 stand. The prompt-level choices below were partly undone by
+D-034: no `request_id`, no `TRY_CAST`, and targets are stored as the agent wrote them.
+
 **What.** Three places where the live F1 reference and the current Confluent docs
 (checked 2026-11-11) disagree about `CREATE AGENT` / `AI_RUN_AGENT`.
 **Findings and choices.**
@@ -675,3 +678,40 @@ so. The reference is live-proven on point 1, so the identifier form probably als
 the string form is what is documented.
 **Impact.** `sql/4.2_*.sql`, `sql/4.3_*.sql`, guarded by `tests/test_agent_sql.py`. To be
 confirmed in your environment when the statements run.
+
+### D-034 · DEVIATION · `remediation_decisions` cut to 8 columns and the agent answer to 3 lines
+**What.** The brief (§5.5) fixes a 20-column `remediation_decisions` and a six-line agent
+answer. Both are cut down.
+**Options.** (a) Build the brief's shape; (b) keep only what a decision *is* — what
+happened, who answered, what to do — and read everything else from `service_health`.
+**Choice.** (b), decided with the user in a design review at Break 4. Specifically:
+- **Table: 8 columns.** `window_end`, `service_name`, `agent_name`, `trigger`, `action`,
+  `target`, `reason`, `raw_response`. The nine context columns (`version`,
+  `avg_latency_ms`, `request_count`, replicas, …) are gone: `evaluate` and the dashboard
+  both already read `service_health` and join on `(service_name, window_end)`.
+- **Answer: 3 lines.** `Action`, `Target`, `Reason`. `Target Version` and
+  `Target Replicas` collapse into one free-text `target`; `Summary` and `Reasoning`
+  collapse into one or two sentences; `Confidence` is dropped.
+- **One shared action vocabulary**: `ROLLBACK`, `SCALE_OUT`, `INVESTIGATE_UPSTREAM`,
+  `ESCALATE`, `OBSERVE` (`OBSERVE` replaces the brief's `WATCH`), plus `INVALID`. Each
+  prompt still offers only its own agent's subset, and each INSERT validates against that
+  subset, so the two statements differ only in the agent, the filter and the list.
+- **The target is stored as the agent wrote it** (with `N/A` mapped to null). The SQL no
+  longer blanks a target that doesn't match the action; `evaluate` flags the
+  contradiction instead, so a misbehaving model is visible rather than tidied away.
+- **Dropped from the INSERTs**: the `request_id` argument, `TRY_CAST` (the target is a
+  string now), the two-level parse, the nulling `CASE`s, and the explicit column list in
+  the capacity leg. **Kept**: the filter below the `LATERAL` join, the latest-offset
+  hint, `handle_exception = continue` with the `INVALID` mapping, `COALESCE` on nullable
+  prompt context, and `suggested_replicas` computed in SQL and handed to the agent.
+- **Prompt inputs trimmed** to the fields the frameworks actually read.
+**Why.** This is workshop code, and the brief's table stored the same numbers twice. Each
+INSERT drops from about 100 lines to about 50, which matters because attendees read them.
+The §11 acceptance checks survive: the action enum is still validated (so "≥95% valid" is
+measurable), and §9's "closing the loop" still has a stable schema, a validated enum and
+an explicit target — untyped rather than typed.
+**Impact.** `sql/4.2_*.sql`, `sql/4.3_*.sql`, `scripts/evaluation/decisions.py`,
+`scripts/evaluate.py`, the Lightning example in `scripts/setup_rtce.py`, and the tests.
+`HealthRow` gained `ready_replicas` and `max_replicas`, which the decision half needs to
+recompute the replica suggestion. The walkthrough (Phase 6) must describe the three-line
+format, not the brief's six.

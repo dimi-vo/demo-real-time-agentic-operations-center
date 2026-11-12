@@ -5,10 +5,10 @@ from scripts.evaluation.decisions import (
     ESCALATE,
     INVALID,
     INVESTIGATE_UPSTREAM,
+    OBSERVE,
     RELEASE_AGENT,
     ROLLBACK,
     SCALE_OUT,
-    WATCH,
     DecisionRow,
     expected_agent,
     score_decisions,
@@ -24,6 +24,7 @@ def _row(service, k, lat="NORMAL", trf="NORMAL", version="1.0.0", ssd=600):
         latency_status=lat, traffic_status=trf, avg_latency_ms=100.0, expected_latency_ms=50.0,
         latency_upper_bound=70.0, request_count=30, expected_request_count=10.0,
         traffic_lower_bound=5.0, traffic_upper_bound=15.0, version=version, seconds_since_deploy=ssd,
+        last_change="DEPLOY", ready_replicas=3, max_replicas=10,
     )  # fmt: skip
 
 
@@ -33,10 +34,6 @@ def _series(service, n, overrides=None):
 
 
 def _dec(service, k, agent=RELEASE_AGENT, trigger="LATENCY_HIGH", action=ROLLBACK, **kw):
-    kw.setdefault("ready_replicas", 3)
-    kw.setdefault("max_replicas", 10)
-    kw.setdefault("request_count", 600)
-    kw.setdefault("expected_request_count", 200.0)
     return DecisionRow(
         window_end=T0 + 10 * k + 10, service_name=service, agent_name=agent,
         trigger=trigger, action=action, **kw,
@@ -137,7 +134,7 @@ def test_the_headline_decision_is_the_one_on_the_first_window_of_the_span():
     inc = _inc("cart", 40, duration=50, good_version="1.0.0", bad_version="1.0.1")
     decisions = [
         _dec("cart", 41, action=ESCALATE),  # later window, listed first
-        _dec("cart", 40, action=ROLLBACK, target_version="1.0.0"),
+        _dec("cart", 40, action=ROLLBACK, target="1.0.0"),
     ]
     item = _score(decisions, rows, [inc]).incidents[0]
     assert item.headline.action == ROLLBACK
@@ -148,15 +145,15 @@ def test_the_headline_decision_is_the_one_on_the_first_window_of_the_span():
 def test_a_rollback_naming_the_wrong_version_fails_the_target_check():
     rows = _series("cart", 60, {40: {"lat": "HIGH"}})
     inc = _inc("cart", 40, good_version="1.0.0", bad_version="1.0.1")
-    item = _score([_dec("cart", 40, target_version="9.9.9")], rows, [inc]).incidents[0]
+    item = _score([_dec("cart", 40, target="9.9.9")], rows, [inc]).incidents[0]
     assert item.matched and item.target_ok is False
 
 
 def test_a_scale_out_must_carry_the_replica_count_the_sql_computed():
     rows = _series("cart", 60, {40: {"trf": "HIGH"}})
     inc = _inc("cart", 40, trigger="TRAFFIC_HIGH", typ="TRAFFIC_SURGE", action=SCALE_OUT)
-    good = _dec("cart", 40, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=SCALE_OUT, target_replicas=9)
-    bad = _dec("cart", 40, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=SCALE_OUT, target_replicas=4)
+    good = _dec("cart", 40, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=SCALE_OUT, target="9")
+    bad = _dec("cart", 40, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=SCALE_OUT, target="4")
     assert _score([good], rows, [inc]).incidents[0].target_ok is True
     assert _score([bad], rows, [inc]).incidents[0].target_ok is False
 
@@ -172,7 +169,7 @@ def test_an_action_that_needs_no_target_is_not_target_checked():
 def test_a_wrong_headline_still_reports_a_later_matching_window():
     rows = _series("cart", 60, {40: {"lat": "HIGH"}, 41: {"lat": "HIGH"}})
     inc = _inc("cart", 40, duration=50)
-    decisions = [_dec("cart", 40, action=WATCH), _dec("cart", 41, action=ROLLBACK)]
+    decisions = [_dec("cart", 40, action=OBSERVE), _dec("cart", 41, action=ROLLBACK)]
     item = _score(decisions, rows, [inc]).incidents[0]
     assert not item.matched and item.any_matched
 
@@ -180,9 +177,9 @@ def test_a_wrong_headline_still_reports_a_later_matching_window():
 def test_decisions_outside_every_span_are_listed_separately():
     rows = _series("cart", 60, {10: {"lat": "HIGH"}, 40: {"lat": "HIGH"}})
     inc = _inc("cart", 40, duration=50)
-    rep = _score([_dec("cart", 10, action=WATCH), _dec("cart", 40)], rows, [inc])
+    rep = _score([_dec("cart", 10, action=OBSERVE), _dec("cart", 40)], rows, [inc])
     assert len(rep.incidents[0].decisions) == 1
-    assert [d.action for d in rep.outside] == [WATCH]
+    assert [d.action for d in rep.outside] == [OBSERVE]
 
 
 def test_an_incident_on_another_service_claims_nothing():
@@ -206,14 +203,31 @@ def test_from_record_parses_a_remediation_decisions_row():
             "agent_name": RELEASE_AGENT,
             "trigger": "LATENCY_HIGH",
             "action": " rollback ",
-            "target_version": "4.2.1",
-            "target_replicas": None,
-            "confidence": "HIGH",
-            "avg_latency_ms": 580.4,
-            "request_count": 61,
-            "seconds_since_deploy": 38,
+            "target": " 4.2.1 ",
+            "reason": "The deploy is the prime suspect.",
+            "raw_response": "Action: ROLLBACK\nTarget: 4.2.1\nReason: ...",
         }
     )
     assert d.action == ROLLBACK and d.valid and d.routed_correctly
-    assert d.target_replicas is None and d.request_count == 61
-    assert "580ms" in d.describe()
+    assert d.target == "4.2.1"
+    assert d.key == ("checkout", d.window_end)
+
+
+def test_a_target_on_an_action_that_needs_none_is_flagged():
+    """D-034: the SQL stores whatever the agent wrote, so a contradiction is visible."""
+    rows = _series("cart", 60, {40: {"lat": "HIGH"}})
+    inc = _inc("cart", 40, good_version="1.0.0")
+    rep = _score([_dec("cart", 40, action=ESCALATE, target="1.0.0")], rows, [inc])
+    assert len(rep.bad_targets) == 1
+    assert rep.incidents[0].target_ok is False
+
+
+def test_context_comes_from_the_matching_health_row():
+    rows = _series("cart", 60, {40: {"lat": "HIGH"}})
+    rep = _score([_dec("cart", 40)], rows, [])
+    assert "100ms vs 50ms expected" in rep.context(rep.outside[0])
+
+
+def test_a_decision_without_its_health_row_says_so():
+    rep = _score([_dec("cart", 40)], [], [])
+    assert "no matching service_health row" in rep.context(rep.outside[0])

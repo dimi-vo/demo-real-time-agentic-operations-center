@@ -310,15 +310,13 @@ def _render_decisions(rep: DecisionReport, source: str, total_read: int, details
         return
 
     t = Table(title="Agents", title_justify="left")
-    for col in ("agent", "decisions", "valid action", "routing errors", "actions", "confidence"):
+    for col in ("agent", "decisions", "valid action", "routing errors", "actions"):
         t.add_column(col, justify="right" if col != "agent" else "left")
     for a in sorted(rep.agents.values(), key=lambda a: a.agent_name):
-        share = a.valid_share or 0.0
         t.add_row(
             a.agent_name or "[red](none)[/red]", str(a.decisions),
-            _target_low(share, VALID_ACTION_TARGET, "{:.0%}"), _flag(a.routing_errors),
+            _target_low(a.valid_share or 0.0, VALID_ACTION_TARGET, "{:.0%}"), _flag(a.routing_errors),
             ", ".join(f"{k} {v}" for k, v in a.actions.most_common()),
-            ", ".join(f"{k} {v}" for k, v in a.confidences.most_common()),
         )  # fmt: skip
     console.print(t)
     console.print(
@@ -338,8 +336,8 @@ def _render_decisions(rep: DecisionReport, source: str, total_read: int, details
         if not item.matched and item.any_matched:
             rec += " [yellow](later)[/yellow]"
         target = {True: "[green]ok[/green]", False: "[red]wrong[/red]", None: "-"}[item.target_ok]
-        if item.target_ok is not None:
-            target += f" {d.target_version or d.target_replicas}"
+        if d.target:
+            target += f" {d.target}"
         later = ", ".join(f"{k} {v}" for k, v in item.actions.most_common() if k != d.action)
         t.add_row(
             inc.incident_id, inc.type, inc.service_name, inc.expected_action, rec, target,
@@ -368,13 +366,21 @@ def _render_decisions(rep: DecisionReport, source: str, total_read: int, details
             console.print(
                 f"  [red]{item.incident.incident_id}[/red] {item.incident.service_name} "
                 f"{item.incident.type}: expected {item.incident.expected_action}, got {d.action} "
-                f"({d.confidence or 'no confidence'}) — {d.describe()}"
+                f"— {rep.context(d)}"
             )
-            console.print(f"    summary: {d.summary or '-'}")
+            console.print(f"    reason: {d.reason or '-'}")
             if details:
                 console.print(f"    raw: {(d.raw_response or '').strip()}")
         if not details:
             console.print("  [dim]--details prints each raw_response in full.[/dim]")
+
+    if rep.bad_targets:
+        console.print(f"\n[bold]Targets[/bold]: [red]{len(rep.bad_targets)} wrong[/red]")
+        for d in rep.bad_targets[: None if details else 10]:
+            console.print(
+                f"  {d.service_name:12} {_t(d.window_end)} {d.action:20} target={d.target!r} "
+                f"— {rep.context(d)}"
+            )
 
     cov = rep.coverage
     console.print("\n[bold]Routing and coverage[/bold]")
@@ -390,7 +396,7 @@ def _render_decisions(rep: DecisionReport, source: str, total_read: int, details
         console.print(f"    [dim]{cov.in_flight} anomalous rows are too recent to have a decision yet.[/dim]")
     if cov.missing:
         console.print(f"  [red]Missing decisions: {len(cov.missing)}[/red]")
-        for svc, we, agent in cov.missing[:10] if not details else cov.missing:
+        for svc, we, agent in cov.missing if details else cov.missing[:10]:
             console.print(f"    {svc:12} {_t(we)} {agent}")
     if cov.unexpected:
         console.print(f"  [red]Decisions on rows that were not anomalous: {len(cov.unexpected)}[/red]")
@@ -402,7 +408,7 @@ def _render_decisions(rep: DecisionReport, source: str, total_read: int, details
         console.print(
             f"\n  Outside any incident: {len(rep.outside)} decision{'s' if len(rep.outside) != 1 else ''} "
             f"({', '.join(f'{k} {v}' for k, v in actions.most_common())}) — these follow the "
-            f"detector's false positives; WATCH is the appropriate answer."
+            f"detector's false positives; OBSERVE is the appropriate answer."
         )
 
     console.print("\n[bold]Acceptance (brief section 11)[/bold]")

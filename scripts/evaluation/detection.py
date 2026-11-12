@@ -78,6 +78,10 @@ class HealthRow:
     version: str | None = None
     last_change: str | None = None
     seconds_since_deploy: int | None = None
+    # Read by the decision half (D-034): the agent's context lives here, not on the
+    # decision row.
+    ready_replicas: int | None = None
+    max_replicas: int | None = None
 
     @classmethod
     def from_record(cls, rec: dict) -> HealthRow:
@@ -102,6 +106,8 @@ class HealthRow:
             version=rec.get("version"),
             last_change=rec.get("last_change"),
             seconds_since_deploy=rec.get("seconds_since_deploy"),
+            ready_replicas=rec.get("ready_replicas"),
+            max_replicas=rec.get("max_replicas"),
         )
 
     @property

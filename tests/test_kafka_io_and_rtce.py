@@ -67,7 +67,7 @@ def test_the_decisions_example_answers_the_walkthrough_question():
     """Brief section 8, step 7: the most recent decision for a trigger, with reasoning."""
     query = LIGHTNING_QUERIES["remediation_decisions"]
     assert "where trigger =" in query.lower()
-    assert "reasoning" in query and "order by window_end desc limit 1" in query.lower()
+    assert "reason" in query and "order by window_end desc limit 1" in query.lower()
 
 
 def test_lightning_command_can_target_the_decisions_table():

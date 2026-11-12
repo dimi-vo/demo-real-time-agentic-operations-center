@@ -29,7 +29,7 @@ LIGHTNING_QUERIES = {
         "FROM service_health ORDER BY window_end DESC LIMIT 10"
     ),
     "remediation_decisions": (
-        "SELECT window_end, service_name, agent_name, action, confidence, reasoning "
+        "SELECT window_end, service_name, agent_name, action, target, reason "
         "FROM remediation_decisions WHERE trigger = 'LATENCY_HIGH' "
         "ORDER BY window_end DESC LIMIT 1"
     ),

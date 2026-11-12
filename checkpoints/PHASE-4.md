@@ -7,12 +7,14 @@ Built the agent layer on top of `service_health`, and the decision half of
 is the run order.
 
 - **`sql/4.2_release_agent.sql`, `sql/4.2_capacity_agent.sql`**: the two `CREATE AGENT`
-  statements. Each prompt carries the output format, the decision framework and one
-  worked example per allowed action. Release: `ROLLBACK`, `WATCH`, `ESCALATE`. Capacity:
-  `SCALE_OUT`, `INVESTIGATE_UPSTREAM`, `ESCALATE`, `WATCH`.
+  statements. Each prompt carries the three-line output format, the decision framework
+  and one worked example per allowed action. Release: `ROLLBACK`, `ESCALATE`, `OBSERVE`.
+  Capacity: `SCALE_OUT`, `INVESTIGATE_UPSTREAM`, `ESCALATE`, `OBSERVE`.
 - **`sql/4.3_remediation_decisions.sql`**: the fan-in table, created explicitly because
-  two INSERTs write to it. 20 columns: the decision, its targets, and the context
-  snapshot the agent was given.
+  two INSERTs write to it. **8 columns** (D-034): `window_end`, `service_name`,
+  `agent_name`, `trigger`, `action`, `target`, `reason`, `raw_response`. Everything the
+  agent was told stays in `service_health` and is joined on
+  `(service_name, window_end)`.
 - **`sql/4.3_insert_release_agent.sql`, `sql/4.3_insert_capacity_agent.sql`**: the two
   long-running INSERTs. The anomaly filter sits in a derived table *below* the `LATERAL`
   join, so the model is called once per anomalous row, not once per window. Both read
@@ -23,13 +25,15 @@ is the run order.
   whether to use it. The scorer recomputes it to check the agent copied it.
 - **`uv run evaluate`, decision half** (D-032): valid-action share, routing and mutual
   exclusivity, coverage (agent calls against anomalous rows), and per incident the
-  recommended action against the expected one, with the target checked.
+  recommended action against the expected one. Targets are checked both ways: a
+  `ROLLBACK` must name the incident's good version, a `SCALE_OUT` the replica count the
+  SQL computed, and any other action must name none.
 - **`sql/checks/remediation_routing.sql`, `remediation_call_rate.sql`**: the two
   verifications the brief asks for as queries.
 - **`uv run setup-rtce --lightning remediation_decisions`**: the walkthrough's Lightning
   example (most recent decision for a trigger, with its reasoning), next to the existing
   `service_health` one.
-- **Tests:** 190 pass, ruff clean.
+- **Tests:** 193 pass, ruff clean.
 
 **Cumulative state.**
 - **Phase 0:** plan and decisions log.
@@ -45,6 +49,14 @@ Commit: this commit.
 
 ## 2. ⚠️ Deviations and workarounds
 
+- **DEVIATION D-034 (new): `remediation_decisions` is 8 columns, not the brief's 20, and
+  the agent answers in 3 lines, not 6.** Decided with you in the Break 4 design review.
+  The context columns are gone (both readers already hold `service_health`), `Confidence`
+  is gone, the two typed target columns became one free-text `target`, `WATCH` became
+  `OBSERVE`, and the five actions are now one shared vocabulary. Each INSERT is about
+  half the size. *Impact:* the §11 acceptance checks still hold (the enum is still
+  validated), §9's closing-the-loop contract keeps a stable schema and an explicit but
+  untyped target, and the Phase 6 walkthrough must document the three-line format.
 - **DEVIATION D-033 (new): the agent SQL follows the current docs, not the F1 reference,
   on three points.**
   - *Agent name*: `AI_RUN_AGENT('release_agent', …)` as a **string**. The reference passes
@@ -57,6 +69,8 @@ Commit: this commit.
   - *`max_iterations` is not set*: it bounds tool-calling, and these agents have no tools.
   - *Impact*: if the string form is rejected, switch to backticks — one edit in each
     INSERT, and the test that pins it.
+  - D-034 undid three of the prompt-level extras recorded here: no `request_id`, no
+    `TRY_CAST`, and targets are stored exactly as the agent wrote them.
 - **DEVIATION D-031 (open from Break 3): drop services at 6 requests/s and an aligned
   generator start.** Chosen offline; still needs the live confirmation run. It can run
   at the same time as this phase, since the agents read `service_health` either way.
@@ -68,12 +82,13 @@ No workarounds in code.
 ## 3. How to test it yourself
 
 **Verified by me (offline only):**
-- `uv run pytest`: 190 passed. `uv run ruff check .`: clean.
+- `uv run pytest`: 193 passed. `uv run ruff check .`: clean.
 - `tests/test_agent_sql.py` pins the contract the four SQL files and the scorer share:
-  the six output lines in the brief's order, one example per allowed action, the allowed
-  actions equal to the scorer's set, no apostrophe inside a prompt literal, the filter
-  below the `LATERAL` join, the latest-offset hint, `INVALID` on failure, mutually
-  exclusive routing, and the 20 table columns in order against both positional INSERTs.
+  the three output lines in order (and that the dropped ones are really gone), one
+  example per allowed action, the allowed actions equal to the scorer's set and no
+  acceptance of the other agent's actions, no apostrophe inside a prompt literal, the
+  filter below the `LATERAL` join, the latest-offset hint, `INVALID` on failure, mutually
+  exclusive routing, and the 8 table columns in order against both positional INSERTs.
 - `tests/test_evaluate_decisions.py`: the scoring rules of D-032.
 - The decision half of `evaluate` rendered end to end against a synthetic run
   (a matched incident, a mismatch, a failed call and a decision outside every incident).
@@ -95,8 +110,7 @@ No workarounds in code.
    Both should reach `RUNNING` and then sit idle until the next incident.
 4. **Watch one incident.** `ops-sim` announces `INCIDENT START`. Within about 30 seconds:
    ```sql
-   SELECT window_end, service_name, agent_name, `trigger`, `action`,
-          target_version, target_replicas, confidence, summary
+   SELECT window_end, service_name, agent_name, `trigger`, `action`, target, reason
    FROM `remediation_decisions` ORDER BY window_end DESC LIMIT 10;
    ```
    Expect `ROLLBACK` with the previous version for a bad deploy, `SCALE_OUT` with a
@@ -161,15 +175,18 @@ The statements in section 3 are all that's needed.
 - **D-032:** how `evaluate` scores decisions. One number per incident, taken from the
   decision on its first anomalous window.
 - **D-033:** the agent SQL deviations, plus the prompt-level choices the brief delegates
-  (no apostrophes, `COALESCE` on nullable context, `TRY_CAST` for the replica count,
-  targets kept only for the action that uses them, a `request_id` per call).
+  (no apostrophes, `COALESCE` on nullable context).
+- **D-034:** the simplified table, answer format and action vocabulary, from the Break 4
+  design review.
 
 ## 6. Questions for me
 
 1. **Agent prompts.** The brief delegates the wording to me. Read
    `sql/4.2_release_agent.sql` and `sql/4.2_capacity_agent.sql` and tell me if the
    persona, the framework or the examples should change — they are the most
-   attendee-visible text in the workshop.
+   attendee-visible text in the workshop. Two things I decided as delegated wording:
+   `Reason` is capped at two sentences, and "never `OBSERVE` when the error rate has
+   breached" stays in both frameworks.
 2. **D-031's live confirmation.** Do you want it as a separate run, or should I score the
    same run that validates this phase? One run can do both.
 

@@ -19,11 +19,14 @@ are:
 - **Per incident.** The decisions on that service's windows inside the incident span.
   The **headline** decision is the one on the earliest such window: the first
   recommendation the on-call team would see. It matches when its action equals the
-  incident's `expected_action`. Targets are checked too: a `ROLLBACK` should name the
-  incident's `good_version`, a `SCALE_OUT` should carry the replica count the SQL
-  computed (recomputed here from the stored context).
+  incident's `expected_action`.
+- **Target.** One free-text column (D-034). A `ROLLBACK` should name the incident's
+  `good_version`; a `SCALE_OUT` should carry the replica count the SQL computed
+  (recomputed here from the joined health row); any other action should carry none.
+- **Context.** The decision rows hold no metrics, so everything else is read from the
+  `service_health` row with the same (service_name, window_end).
 - **Outside incidents.** Decisions on rows outside every incident span of their service.
-  These follow the detector's false positives; `WATCH` is the appropriate answer there.
+  These follow the detector's false positives; `OBSERVE` is the appropriate answer there.
 """
 
 from __future__ import annotations
@@ -45,27 +48,30 @@ RELEASE_AGENT = "release_agent"
 CAPACITY_AGENT = "capacity_agent"
 
 ROLLBACK = "ROLLBACK"
-WATCH = "WATCH"
-ESCALATE = "ESCALATE"
 SCALE_OUT = "SCALE_OUT"
 INVESTIGATE_UPSTREAM = "INVESTIGATE_UPSTREAM"
+ESCALATE = "ESCALATE"
+OBSERVE = "OBSERVE"
 INVALID = "INVALID"
 
+# One shared vocabulary (D-034); each agent is offered its own subset in its prompt.
+ACTIONS = (ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM, ESCALATE, OBSERVE)
 ALLOWED_ACTIONS = {
-    RELEASE_AGENT: (ROLLBACK, WATCH, ESCALATE),
-    CAPACITY_AGENT: (SCALE_OUT, INVESTIGATE_UPSTREAM, ESCALATE, WATCH),
+    RELEASE_AGENT: (ROLLBACK, ESCALATE, OBSERVE),
+    CAPACITY_AGENT: (SCALE_OUT, INVESTIGATE_UPSTREAM, ESCALATE, OBSERVE),
 }
 AGENT_FOR_TRIGGER = {
     LATENCY_HIGH: RELEASE_AGENT,
     TRAFFIC_HIGH: CAPACITY_AGENT,
     TRAFFIC_LOW: CAPACITY_AGENT,
 }
-CONFIDENCES = ("HIGH", "MEDIUM", "LOW")
 
 VALID_ACTION_TARGET = 0.95
 # A decision is written a few seconds after its window closes (the model call). Rows in
 # this tail of the range may legitimately have no decision yet.
 IN_FLIGHT_SECONDS = 60.0
+
+Key = tuple[str, float]
 
 
 def _num(v: float | int | None) -> str:
@@ -74,60 +80,33 @@ def _num(v: float | int | None) -> str:
 
 @dataclass(frozen=True)
 class DecisionRow:
-    """One row of `remediation_decisions`."""
+    """One row of `remediation_decisions`: what happened, who answered, what to do."""
 
     window_end: float
     service_name: str
     agent_name: str
     trigger: str
     action: str
-    target_version: str | None = None
-    target_replicas: int | None = None
-    confidence: str | None = None
-    summary: str | None = None
-    reasoning: str | None = None
+    target: str | None = None
+    reason: str | None = None
     raw_response: str | None = None
-    version: str | None = None
-    seconds_since_deploy: int | None = None
-    avg_latency_ms: float | None = None
-    expected_latency_ms: float | None = None
-    request_count: int | None = None
-    expected_request_count: float | None = None
-    error_rate: float | None = None
-    ready_replicas: int | None = None
-    max_replicas: int | None = None
 
     @classmethod
     def from_record(cls, rec: dict) -> DecisionRow:
-        def num(key, cast):
-            v = rec.get(key)
-            return None if v is None else cast(v)
-
+        target = rec.get("target")
         return cls(
             window_end=epoch_seconds(rec["window_end"]),
             service_name=rec["service_name"],
             agent_name=rec.get("agent_name") or "",
             trigger=rec.get("trigger") or "",
             action=(rec.get("action") or INVALID).strip().upper(),
-            target_version=rec.get("target_version"),
-            target_replicas=num("target_replicas", int),
-            confidence=rec.get("confidence"),
-            summary=rec.get("summary"),
-            reasoning=rec.get("reasoning"),
+            target=target.strip() if isinstance(target, str) else target,
+            reason=rec.get("reason"),
             raw_response=rec.get("raw_response"),
-            version=rec.get("version"),
-            seconds_since_deploy=num("seconds_since_deploy", int),
-            avg_latency_ms=num("avg_latency_ms", float),
-            expected_latency_ms=num("expected_latency_ms", float),
-            request_count=num("request_count", int),
-            expected_request_count=num("expected_request_count", float),
-            error_rate=num("error_rate", float),
-            ready_replicas=num("ready_replicas", int),
-            max_replicas=num("max_replicas", int),
         )
 
     @property
-    def key(self) -> tuple[str, float]:
+    def key(self) -> Key:
         return (self.service_name, self.window_end)
 
     @property
@@ -137,25 +116,6 @@ class DecisionRow:
     @property
     def routed_correctly(self) -> bool:
         return AGENT_FOR_TRIGGER.get(self.trigger) == self.agent_name
-
-    @property
-    def suggested_replicas(self) -> int | None:
-        """What the SQL handed the agent, recomputed from the stored context."""
-        return suggested_replicas(
-            self.ready_replicas, self.max_replicas, self.request_count, self.expected_request_count
-        )
-
-    def describe(self) -> str:
-        """The numbers behind the decision, for the mismatch list."""
-        if self.trigger == LATENCY_HIGH:
-            body = f"{_num(self.avg_latency_ms)}ms vs {_num(self.expected_latency_ms)}ms expected"
-            if self.seconds_since_deploy is not None:
-                body += f", deployed {self.seconds_since_deploy}s ago"
-            return body
-        body = f"{_num(self.request_count)} req vs {_num(self.expected_request_count)} expected"
-        if self.ready_replicas is not None:
-            body += f", {self.ready_replicas}/{_num(self.max_replicas)} replicas"
-        return body
 
 
 def suggested_replicas(
@@ -179,10 +139,43 @@ def expected_agent(row: HealthRow) -> str | None:
     return None
 
 
+def describe(d: DecisionRow, health: HealthRow | None) -> str:
+    """The numbers behind a decision, read from its `service_health` row."""
+    if health is None:
+        return "no matching service_health row in range"
+    if d.trigger == LATENCY_HIGH:
+        body = f"{_num(health.avg_latency_ms)}ms vs {_num(health.expected_latency_ms)}ms expected"
+        if health.seconds_since_deploy is not None:
+            body += f", {health.last_change or 'no change'} {health.seconds_since_deploy}s ago"
+        return body
+    body = f"{_num(health.request_count)} req vs {_num(health.expected_request_count)} expected"
+    if health.ready_replicas is not None:
+        body += f", {health.ready_replicas}/{_num(health.max_replicas)} replicas"
+    return body
+
+
+def check_target(d: DecisionRow, incident: Incident | None, health: HealthRow | None) -> bool | None:
+    """True when the target is right, False when wrong or where none belongs, None when
+    there is nothing to check."""
+    if d.action == ROLLBACK:
+        if incident is None or incident.good_version is None:
+            return None if d.target else False
+        return d.target == incident.good_version
+    if d.action == SCALE_OUT:
+        if health is None:
+            return None
+        want = suggested_replicas(
+            health.ready_replicas, health.max_replicas, health.request_count, health.expected_request_count
+        )
+        return want is not None and d.target == str(want)
+    return False if d.target else None
+
+
 @dataclass
 class IncidentDecisions:
     incident: Incident
     decisions: list[DecisionRow] = field(default_factory=list)
+    target_ok: bool | None = None  # of the headline decision
 
     @property
     def headline(self) -> DecisionRow | None:
@@ -199,18 +192,6 @@ class IncidentDecisions:
         return any(d.action == self.incident.expected_action for d in self.decisions)
 
     @property
-    def target_ok(self) -> bool | None:
-        """True/False when the headline action carries a target, None when it needs none."""
-        d = self.headline
-        if d is None:
-            return None
-        if d.action == ROLLBACK:
-            return d.target_version is not None and d.target_version == self.incident.good_version
-        if d.action == SCALE_OUT:
-            return d.target_replicas is not None and d.target_replicas == d.suggested_replicas
-        return None
-
-    @property
     def actions(self) -> Counter:
         return Counter(d.action for d in self.decisions)
 
@@ -222,7 +203,6 @@ class AgentSummary:
     valid: int = 0
     routing_errors: int = 0
     actions: Counter = field(default_factory=Counter)
-    confidences: Counter = field(default_factory=Counter)
 
     @property
     def valid_share(self) -> float | None:
@@ -251,16 +231,17 @@ class DecisionReport:
     incidents: list[IncidentDecisions]
     outside: list[DecisionRow]
     coverage: Coverage
-    both_agents: list[tuple[str, float]]  # (service, window_end) seen under both agents
+    both_agents: list[Key]  # (service, window_end) seen under both agents
+    bad_targets: list[DecisionRow]  # wrong version, wrong count, or a target that shouldn't be there
+    health: dict[Key, HealthRow] = field(default_factory=dict)
 
     @property
     def valid_share(self) -> float | None:
         valid = sum(a.valid for a in self.agents.values())
         return valid / self.total_decisions if self.total_decisions else None
 
-    @property
-    def invalid(self) -> list[DecisionRow]:
-        return [d for d in self.outside if not d.valid]
+    def context(self, d: DecisionRow) -> str:
+        return describe(d, self.health.get(d.key))
 
 
 def score_decisions(
@@ -276,6 +257,7 @@ def score_decisions(
         (d for d in decisions if range_from <= d.window_end < range_to),
         key=lambda d: (d.window_end, d.service_name, d.agent_name),
     )
+    health = {(r.service_name, r.window_end): r for r in health_rows}
 
     agents: dict[str, AgentSummary] = {}
     for d in scoped:
@@ -284,14 +266,14 @@ def score_decisions(
         a.valid += int(d.valid)
         a.routing_errors += int(not d.routed_correctly)
         a.actions[d.action] += 1
-        a.confidences[d.confidence or "-"] += 1
 
-    by_window: dict[tuple[str, float], list[DecisionRow]] = {}
+    by_window: dict[Key, list[DecisionRow]] = {}
     for d in scoped:
         by_window.setdefault(d.key, []).append(d)
     both = sorted(k for k, ds in by_window.items() if len({d.agent_name for d in ds}) > 1)
 
     per_incident = []
+    incident_of: dict[int, Incident] = {}
     claimed: set[int] = set()
     for inc in incidents:
         item = IncidentDecisions(inc)
@@ -299,8 +281,15 @@ def score_decisions(
             if d.service_name == inc.service_name and inc.in_span_at(d.window_end):
                 item.decisions.append(d)
                 claimed.add(id(d))
+                incident_of[id(d)] = inc
+        if item.headline is not None:
+            item.target_ok = check_target(item.headline, inc, health.get(item.headline.key))
         per_incident.append(item)
     outside = [d for d in scoped if id(d) not in claimed]
+
+    bad_targets = [
+        d for d in scoped if check_target(d, incident_of.get(id(d)), health.get(d.key)) is False
+    ]
 
     coverage = _coverage(scoped, health_rows, by_window, range_from, range_to)
     return DecisionReport(
@@ -312,13 +301,15 @@ def score_decisions(
         outside=outside,
         coverage=coverage,
         both_agents=both,
+        bad_targets=bad_targets,
+        health=health,
     )
 
 
 def _coverage(
     scoped: list[DecisionRow],
     health_rows: list[HealthRow],
-    by_window: dict[tuple[str, float], list[DecisionRow]],
+    by_window: dict[Key, list[DecisionRow]],
     range_from: float,
     range_to: float,
 ) -> Coverage:

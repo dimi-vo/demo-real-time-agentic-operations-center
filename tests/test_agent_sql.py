@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from scripts.evaluation.decisions import (
+    ACTIONS,
     ALLOWED_ACTIONS,
     CAPACITY_AGENT,
     RELEASE_AGENT,
@@ -25,13 +26,11 @@ AGENT_FILES = {RELEASE_AGENT: "4.2_release_agent.sql", CAPACITY_AGENT: "4.2_capa
 INSERT_FILES = {RELEASE_AGENT: "4.3_insert_release_agent.sql", CAPACITY_AGENT: "4.3_insert_capacity_agent.sql"}
 TABLE_FILE = "4.3_remediation_decisions.sql"
 
-# Brief section 5.5, in order.
-OUTPUT_LINES = ("Action:", "Target Version:", "Target Replicas:", "Confidence:", "Summary:", "Reasoning:")
+# Brief section 5.5, cut down in D-034.
+OUTPUT_LINES = ("Action:", "Target:", "Reason:")
 DECISION_COLUMNS = (
-    "window_end", "service_name", "agent_name", "trigger", "action",
-    "target_version", "target_replicas", "confidence", "summary", "reasoning", "raw_response",
-    "version", "seconds_since_deploy", "avg_latency_ms", "expected_latency_ms",
-    "request_count", "expected_request_count", "error_rate", "ready_replicas", "max_replicas",
+    "window_end", "service_name", "agent_name", "trigger",
+    "action", "target", "reason", "raw_response",
 )  # fmt: skip
 
 
@@ -45,10 +44,12 @@ def table_sql() -> str:
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_prompt_states_the_six_output_lines_in_order(agent):
+def test_prompt_states_the_three_output_lines_in_order(agent):
     prompt = read(AGENT_FILES[agent])
     positions = [prompt.index(line) for line in OUTPUT_LINES]
-    assert positions == sorted(positions), "the output format must list the six lines in the brief's order"
+    assert positions == sorted(positions), "the output format must list the three lines in order"
+    for line in ("Confidence:", "Summary:", "Reasoning:", "Target Version:", "Target Replicas:"):
+        assert line not in prompt, "D-034 cut the output down to three lines"
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
@@ -92,8 +93,8 @@ def test_agent_continues_on_a_failed_model_call(agent):
 def test_insert_calls_its_own_agent_by_name_as_a_string(agent):
     """The docs type the first AI_RUN_AGENT argument as STRING (D-033)."""
     sql = read(INSERT_FILES[agent])
-    assert f"AI_RUN_AGENT(\n    '{agent}'," in sql
-    assert f"'{agent}' AS `agent_name`" in sql
+    assert f"AI_RUN_AGENT(\n  '{agent}'," in sql
+    assert sql.count(f"'{agent}'") == 2, "once as the written agent_name, once as the call"
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
@@ -120,7 +121,9 @@ def test_insert_maps_a_failed_or_out_of_set_answer_to_invalid(agent):
     assert "ELSE 'INVALID'" in sql
     for action in ALLOWED_ACTIONS[agent]:
         assert f"'{action}'" in sql
-    assert "`raw_response`" in sql
+    for action in set(ACTIONS) - set(ALLOWED_ACTIONS[agent]):
+        assert f"'{action}'" not in sql, "an agent must not accept another agent's action"
+    assert "a.`agent_response`" in sql, "the raw answer is always written"
 
 
 def test_routing_is_mutually_exclusive():
@@ -133,7 +136,7 @@ def test_routing_is_mutually_exclusive():
     )
 
 
-def test_table_declares_the_brief_columns_in_order(table_sql):
+def test_table_declares_the_columns_in_order(table_sql):
     found = re.findall(r"^\s+`(\w+)`", table_sql, re.MULTILINE)
     assert tuple(found) == DECISION_COLUMNS
 
@@ -144,21 +147,19 @@ def test_table_is_append_only_and_readable_before_commit(table_sql):
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_inserts_write_the_table_columns_in_order(agent):
-    """Both INSERTs are positional, so their SELECT lists must match the DDL exactly."""
+def test_inserts_start_with_the_four_identity_columns(agent):
+    """Both INSERTs are positional: the first four values are the identity columns, in
+    the DDL's order. The rest is checked by the arity test below."""
     sql = read(INSERT_FILES[agent])
-    head = sql[sql.index("INSERT INTO") : sql.index("FROM (")]
-    found = re.findall(r"`(\w+)`(?:,|\n)", head)
-    aliased = re.findall(r"AS `(\w+)`", head)
-    ordered = [c for c in found if c in DECISION_COLUMNS or c in aliased]
-    assert [c for c in ordered if c in DECISION_COLUMNS] == list(DECISION_COLUMNS)
+    head = sql[sql.index("INSERT INTO") : sql.index("CASE")]
+    assert "h.`window_end`," in head and "h.`service_name`," in head
+    assert head.index("h.`window_end`") < head.index("h.`service_name`") < head.index(f"'{agent}'")
 
 
 def test_capacity_insert_computes_the_replica_suggestion_in_sql():
     """Brief 5.5: the arithmetic is deterministic, the agent only decides to use it."""
     sql = read(INSERT_FILES[CAPACITY_AGENT])
     assert "LEAST(" in sql and "GREATEST(" in sql and "CEIL(" in sql
-    assert "AS `suggested_replicas`" in sql
     assert "Suggested Replicas: " in sql, "the computed value must reach the prompt"
 
 
