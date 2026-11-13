@@ -1,4 +1,4 @@
-"""Score `remediation_decisions` against the generator's ground truth (`incidents.jsonl`)
+"""Score `remediation_decisions` against the generator's ground truth (`service_incidents`)
 and against the `service_health` rows the agents were supposed to see.
 
 Pure functions over plain data, so they're unit-tested offline. The definitions (D-032)

@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.dry_run:
         sim = Simulation(args.seed, start=aligned_start(time.time()), config=config)
-        run_realtime(sim, DryRunSink(), root=None, write_groundtruth=False)
+        run_realtime(sim, DryRunSink(), root=None)
         return
 
     # Live: produce to Kafka, loading the card and continuing from persisted state.
@@ -87,14 +87,13 @@ def main(argv: list[str] | None = None) -> None:
     root = get_project_root()
     path, card = load_card(args.creds, root)
     print(f"Using credential card: {path}")
-    from opsgen.groundtruth import incidents_path, last_incident_number
 
+    # The saved state carries the versions and the incident counter, so a restart
+    # continues both (incident ids must never repeat).
     initial = load_state(state_path(root))
     sim = Simulation(args.seed, start=aligned_start(time.time()), config=config, initial_state=initial)
-    # Continue incident numbering across restarts (ids must stay unique in incidents.jsonl).
-    sim.engine.incident_counter = last_incident_number(incidents_path(root))
-    print("Producing to service_requests and service_deployments. Ctrl-C to stop.")
-    run_realtime(sim, KafkaSink(card), root=root, write_groundtruth=True)
+    print("Producing to service_requests, service_deployments and service_incidents. Ctrl-C to stop.")
+    run_realtime(sim, KafkaSink(card), root=root)
 
 
 if __name__ == "__main__":

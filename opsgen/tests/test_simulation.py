@@ -200,7 +200,7 @@ def test_deploy_record_and_its_requests_share_the_new_version():
 
 def test_incident_ends_on_a_tick_at_the_logged_ended_at():
     # Whole-second durations: the ROLLBACK/end fires exactly at degradation_end, so the
-    # ended_at in incidents.jsonl is when traffic really returned to normal.
+    # ended_at in the end record is when traffic really returned to normal.
     sim = Simulation(42, start=1_794_390_513.319599, config=Config())
     ends = []
     for k in range(3600):

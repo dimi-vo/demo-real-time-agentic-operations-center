@@ -187,27 +187,27 @@ def test_incident_candidates_match_spec():
 
 
 def test_incident_numbering_continues_after_a_restart(tmp_path):
-    from opsgen.engine import Config, Engine
-    from opsgen.groundtruth import append_incident, incidents_path, last_incident_number
+    # D-046: the counter lives in the generator state file, next to the versions.
+    from opsgen.simulation import Simulation
+    from opsgen.state import load_state, save_state, state_path
 
-    path = incidents_path(tmp_path)
-    assert last_incident_number(path) == 0
-    first = Engine(rng=random.Random(1), start=0.0, config=Config(quiet_period=0, spacing_min=1, spacing_max=2))
-    deps = _deployments()
-    ended = []
+    path = state_path(tmp_path)
+    assert load_state(path) is None
+    config = Config(quiet_period=0, spacing_min=1, spacing_max=2)
+    first = Simulation(1, start=0.0, config=config)
+    started = []
     for now in range(0, 400):
-        for ev in first.tick(float(now), deps):
-            if ev.kind == "incident_end":
-                ended.append(ev.incident)
-                append_incident(path, ev.incident)
-    assert len(ended) >= 2
-    n = last_incident_number(path)
-    assert n == len(ended)
-    # a restarted generator picks up after the last logged id
-    second = Engine(rng=random.Random(2), start=1000.0, config=Config(quiet_period=0))
-    second.incident_counter = n
+        _, _, events = first.tick(float(now))
+        started += [ev.incident.incident_id for ev in events if ev.kind == "incident_start"]
+    assert len(started) >= 2
+    save_state(path, first.state_snapshot())
+    # a restarted generator picks up after the last id it used, and keeps the versions
+    second = Simulation(2, start=1000.0, config=config, initial_state=load_state(path))
+    assert {n: d.version for n, d in second.deployments.items()} == {
+        n: d.version for n, d in first.deployments.items()
+    }
     ids = []
     for now in range(1000, 1300):
-        events = second.tick(float(now), _deployments(1000.0))
+        _, _, events = second.tick(float(now))
         ids += [ev.incident.incident_id for ev in events if ev.kind == "incident_start"]
-    assert ids and ids[0] == f"INC{n + 1:04d}"
+    assert ids and ids[0] == f"INC{len(started) + 1:04d}"

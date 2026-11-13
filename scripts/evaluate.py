@@ -2,7 +2,8 @@
 pipeline's output against the generator's incident ground truth.
 
 Detection half (Phase 3): reads `service_health` over Kafka (no Flink statement, no
-cost), compares it with `runs/pre-provisioned/incidents.jsonl`, and prints:
+cost), compares it with the generator's ground truth in `service_incidents` (D-046),
+and prints:
 
 - pipeline checks per service: rows, duplicate or missing windows, warm-up rows;
 - per incident: whether and when it was detected (window number after onset), with
@@ -18,7 +19,9 @@ Decision half (Phase 4): if `remediation_decisions` exists, it also reads that a
 
 Offline: `--dump FILE` saves the rows it read as JSONL; `--rows FILE` evaluates such a
 file without connecting (so a run can be shared and re-scored without credentials).
-`--dump-decisions` / `--decision-rows` do the same for `remediation_decisions`.
+`--dump-decisions` / `--decision-rows` do the same for `remediation_decisions`, and
+`--dump-incidents` / `--incidents` for `service_incidents`. `--rows` needs
+`--incidents`: offline, there is no other ground truth.
 Definitions are in `scripts/evaluation/detection.py` (D-021) and
 `scripts/evaluation/decisions.py` (D-032).
 """
@@ -52,14 +55,16 @@ from scripts.evaluation.detection import (
     UNLOGGED_TAIL_SECONDS,
     DetectionReport,
     HealthRow,
+    Incident,
     default_range,
-    load_incidents,
+    incidents_from_records,
     rescale_confidence,
     score,
 )
 
 SERVICE_HEALTH = "service_health"
 REMEDIATION_DECISIONS = "remediation_decisions"
+SERVICE_INCIDENTS = "service_incidents"
 FP_TARGET_PER_HOUR = 1.0
 FRESH_START_TARGET = 1
 
@@ -83,7 +88,8 @@ def _parse_args(argv):
     p.add_argument("--to", dest="range_to", help="range end, ISO-8601 UTC (default: 100 s before the newest row)")
     p.add_argument("--topic", default=SERVICE_HEALTH, help="table to score (default: service_health)")
     p.add_argument("--creds", help="credential card (default: the active card)")
-    p.add_argument("--incidents", help="ground-truth file (default: runs/pre-provisioned/incidents.jsonl)")
+    p.add_argument("--incidents", help="score against this JSONL dump of service_incidents instead of reading Kafka")
+    p.add_argument("--dump-incidents", help="also write the incident records read to this JSONL file")
     p.add_argument("--dump", help="also write the rows read to this JSONL file")
     p.add_argument("--rows", help="evaluate this JSONL dump instead of reading Kafka")
     p.add_argument(
@@ -140,6 +146,24 @@ def _load_rows(args, root: Path) -> list[dict]:
     return records
 
 
+def _load_incidents(args, root: Path) -> tuple[list[Incident], str]:
+    """The ended incidents to score against, and where they came from (D-046)."""
+    if args.incidents:
+        return incidents_from_records(_read_jsonl(args.incidents)), args.incidents
+    if args.rows:  # offline health dump, no credentials in play
+        raise SystemExit(
+            "--rows scores offline, so it needs --incidents FILE as well: a dump of "
+            f"`{SERVICE_INCIDENTS}` made with --dump-incidents."
+        )
+    records = _read_table(SERVICE_INCIDENTS, args.creds, root)
+    if records is None:
+        console.print(f"[yellow]`{SERVICE_INCIDENTS}` doesn't exist yet, so there is no ground truth.[/yellow]")
+        return [], SERVICE_INCIDENTS
+    if args.dump_incidents:
+        _dump(records, args.dump_incidents)
+    return incidents_from_records(records), SERVICE_INCIDENTS
+
+
 def _load_decisions(args, root: Path) -> list[dict] | None:
     """The decision rows, or None when the decision half doesn't apply."""
     if args.no_decisions:
@@ -173,10 +197,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.range_from:
         range_from = epoch_seconds(args.range_from)
 
-    gt_path = Path(args.incidents) if args.incidents else root / "runs" / "pre-provisioned" / "incidents.jsonl"
-    incidents = load_incidents(gt_path)
+    incidents, gt_source = _load_incidents(args, root)
     report = score(rows, incidents, range_from, range_to)
-    _render(report, args.rows or args.topic, gt_path, len(incidents), args.details)
+    _render(report, args.rows or args.topic, gt_source, len(incidents), args.details)
 
     records = _load_decisions(args, root)
     if records is None:
@@ -194,14 +217,14 @@ def main(argv: list[str] | None = None) -> None:
     )
 
 
-def _render(rep: DetectionReport, source: str, gt_path: Path, n_incidents: int, details: bool) -> None:
+def _render(rep: DetectionReport, source: str, gt_source: str, n_incidents: int, details: bool) -> None:
     console.print(
         f"\n[bold]{source}[/bold]: {rep.total_rows} rows, {len(rep.services)} services. "
         f"Scored range: {_dt(rep.range_from)} → {_t(rep.range_to)} "
         f"([dim]ends {UNLOGGED_TAIL_SECONDS:.0f} s before the newest row, "
         f"so no incident still in progress is scored[/dim])"
     )
-    console.print(f"Ground truth: {gt_path} ({n_incidents} incidents in the file)\n")
+    console.print(f"Ground truth: {gt_source} ({n_incidents} ended incidents)\n")
 
     t = Table(title="Pipeline checks", title_justify="left")
     cols = ("service", "rows", "first window", "last window", "warm-up rows", "warm-up later", "duplicates", "gaps")

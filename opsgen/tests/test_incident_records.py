@@ -93,7 +93,7 @@ def test_driver_emits_two_records_per_incident(monkeypatch):
         return real_tick(now)
 
     sim.tick = stopping_tick
-    run_realtime(sim, sink, root=None, write_groundtruth=False)
+    run_realtime(sim, sink, root=None)
 
     starts_sent = [r for r in sink.incidents if r["ended_at"] is None]
     ends_sent = [r for r in sink.incidents if r["ended_at"] is not None]

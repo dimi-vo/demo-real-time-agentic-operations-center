@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from opsgen.engine import WINDOW_SECONDS, next_window_boundary
-from opsgen.groundtruth import append_incident, end_record, incidents_path, start_record
+from opsgen.groundtruth import end_record, start_record
 from opsgen.instances import version_hash
 from opsgen.services import service_names
 from opsgen.simulation import Simulation
@@ -37,18 +37,16 @@ def wait_until(start: float) -> None:
         time.sleep(delay)
 
 
-def run_realtime(sim: Simulation, sink, root: Path | None = None, write_groundtruth: bool = False) -> None:
+def run_realtime(sim: Simulation, sink, root: Path | None = None) -> None:
     """Tick once per wall-clock second, emitting through `sink`, until Ctrl-C.
 
-    When `root` is given, the generator's deployment state is saved and (if
-    `write_groundtruth`) each finished incident is appended to incidents.jsonl.
+    When `root` is given, the generator's state (versions, incident counter) is saved.
     `--dry-run` passes root=None, so a dry run writes nothing and stays reproducible.
     The first tick is at `sim.start`; callers pass an `aligned_start` and this waits for it.
     """
     wait_until(sim.start)
     sink.emit_deployments(sim.bootstrap())
     sink.flush()
-    gt_path = incidents_path(root) if root is not None and write_groundtruth else None
     st_path = state_path(root) if root is not None else None
     start_wall = sim.start
     k = 0
@@ -63,15 +61,12 @@ def run_realtime(sim: Simulation, sink, root: Path | None = None, write_groundtr
             for ev in events:
                 sink.emit_event(ev)
                 if ev.incident is not None:
-                    # Two records per incident on the Kafka side: one at start
-                    # (ended_at null) and one at end (both timestamps). The
-                    # incidents.jsonl file still gets one record, only on end.
+                    # Two records per incident: one at start (ended_at null) and one
+                    # at end (both timestamps), tied by incident_id.
                     if ev.kind == "incident_start":
                         sink.emit_incident(start_record(ev.incident, ev.now))
                     elif ev.kind == "incident_end":
                         sink.emit_incident(end_record(ev.incident, ev.now))
-                        if gt_path is not None:
-                            append_incident(gt_path, ev.incident)
             if st_path is not None and (events or k % 5 == 0):
                 save_state(st_path, sim.state_snapshot())
             sink.flush()

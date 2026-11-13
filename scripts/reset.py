@@ -7,7 +7,8 @@ Troubleshooting only; the continuous workshop never needs it in the normal flow.
 3. drops the lab objects — `service_health`, `remediation_decisions`, and the two
    agents — and their Schema Registry subjects;
 4. clears the records from the source topics (all delete-cleanup, so this works);
-5. deletes the generator's persisted state and `incidents.jsonl`.
+5. deletes the generator's persisted state (versions and incident counter). Step 4
+   already cleared the ground truth: it lives in the `service_incidents` topic (D-046).
 
 `--with-labs` then rebuilds the lab statements from `sql/`. `--keep-source` skips step 4.
 Everything reports whether it worked; anything that didn't exits nonzero.
@@ -23,7 +24,6 @@ import sys
 import requests
 from dotenv import dotenv_values
 
-from opsgen.groundtruth import incidents_path
 from opsgen.state import state_path
 from scripts.common.credentials import resolve_card
 from scripts.common.flink import FlinkSession, create_lab_objects
@@ -187,10 +187,9 @@ def main(argv: list[str] | None = None) -> None:
     if not args.keep_source:
         problems += _clear_source_topics(card)
 
-    # Local generator state + ground truth.
+    # Local generator state (the ground truth lives in service_incidents, cleared above).
     state_path(root).unlink(missing_ok=True)
-    incidents_path(root).unlink(missing_ok=True)
-    print("\nDeleted the generator's persisted state and incidents.jsonl.")
+    print("\nDeleted the generator's persisted state.")
 
     if args.with_labs:
         print("\nRebuilding the lab statements from sql/...")

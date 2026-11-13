@@ -1,4 +1,4 @@
-"""Score `service_health` against the generator's ground truth (`incidents.jsonl`).
+"""Score `service_health` against the generator's ground truth (`service_incidents`, D-046).
 
 Pure functions over plain data, so they're unit-tested offline. The definitions
 (D-021) are:
@@ -28,12 +28,11 @@ Pure functions over plain data, so they're unit-tested offline. The definitions
 
 from __future__ import annotations
 
-import json
 import math
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import pairwise
-from pathlib import Path
 
 from scripts.common.topic_reader import epoch_seconds
 
@@ -43,9 +42,9 @@ FRESH_START_SECONDS = 300.0
 ECHO_SECONDS = 60.0
 AFTER_DEPLOY_SECONDS = 60
 RESTART_SECONDS = 60.0
-# ops-sim logs an incident when it ends, so the newest rows may belong to one still in
-# progress. An incident lasts 40 s (D-042; it was up to 80 s with the old onset delay);
-# rows ending 100 s before the newest row can't be part of an unlogged one.
+# Only ended incidents are scored (their end record has arrived), so the newest rows may
+# belong to one still in progress. An incident lasts 40 s (D-042; it was up to 80 s with
+# the old onset delay); rows ending 100 s before the newest row can't be part of one.
 UNLOGGED_TAIL_SECONDS = 100.0
 
 LATENCY_HIGH = "LATENCY_HIGH"
@@ -155,7 +154,7 @@ class Incident:
     def from_record(cls, rec: dict) -> Incident:
         return cls(
             incident_id=str(rec["incident_id"]),
-            type=rec["type"],
+            type=rec["incident_type"],
             service_name=rec["service_name"],
             started_at=epoch_seconds(rec["started_at"]),
             ended_at=epoch_seconds(rec["ended_at"]),
@@ -193,15 +192,19 @@ class Incident:
         return self.window_number_at(row.window_end)
 
 
-def load_incidents(path: Path) -> list[Incident]:
-    path = Path(path)
-    if not path.is_file():
-        return []
-    out = []
-    for line in path.read_text().splitlines():
-        if line.strip():
-            out.append(Incident.from_record(json.loads(line)))
-    return sorted(out, key=lambda i: i.started_at)
+def incidents_from_records(records: Iterable[dict]) -> list[Incident]:
+    """The ended incidents in a set of `service_incidents` records (D-046), read from the
+    topic or from a `--dump-incidents` file. The generator writes two records per
+    incident, tied by `incident_id`: a start record (`ended_at` null) and an end record.
+    Only the end record is used, whichever order they arrive in; an incident that hasn't
+    ended yet isn't scored."""
+    ended: dict[tuple[str, float], Incident] = {}
+    for rec in records:
+        if rec.get("ended_at") is None or not rec.get("incident_id"):
+            continue
+        inc = Incident.from_record(rec)
+        ended[(inc.incident_id, inc.started_at)] = inc
+    return sorted(ended.values(), key=lambda i: i.started_at)
 
 
 @dataclass

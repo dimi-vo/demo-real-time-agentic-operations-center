@@ -36,24 +36,28 @@ class Simulation:
         seed: int | None,
         start: float,
         config: Config | None = None,
-        initial_state: dict[str, dict] | None = None,
+        initial_state: dict | None = None,
     ) -> None:
         self.start = start
         self.start_ms = round(start * 1000)
         self.config = config or Config()
         self.sched_rng = random.Random(seed)
         self.traffic_rng = random.Random(None if seed is None else seed + 1)
+        saved_services = (initial_state or {}).get("services", {})
         self.deployments: dict[str, DeploymentState] = {}
         for svc in SERVICES:
             state = DeploymentState.initial(svc, start)
-            if initial_state and svc.name in initial_state:
-                saved = initial_state[svc.name]
+            if svc.name in saved_services:
+                saved = saved_services[svc.name]
                 state.version = saved.get("version", state.version)
                 state.previous_version = saved.get("previous_version", state.previous_version)
                 state.deployed_at = saved.get("deployed_at", state.deployed_at)
                 state.last_change = saved.get("last_change", state.last_change)
             self.deployments[svc.name] = state
         self.engine = Engine(rng=self.sched_rng, start=start, config=self.config)
+        # Continue incident numbering across restarts: ops-wall pairs each incident's start
+        # and end records by incident_id, so ids must never repeat (D-046).
+        self.engine.incident_counter = int((initial_state or {}).get("incident_counter", 0))
 
     # --- records ---------------------------------------------------------------
 
@@ -144,14 +148,18 @@ class Simulation:
         requests = self._gen_requests(now)
         return requests, dep_records, events
 
-    def state_snapshot(self) -> dict[str, dict]:
-        """The persistable deployment state (versions, deployed_at) per service."""
+    def state_snapshot(self) -> dict:
+        """The persistable state: each service's deployment (versions, deployed_at) and
+        the last incident number used."""
         return {
-            name: {
-                "version": d.version,
-                "previous_version": d.previous_version,
-                "deployed_at": d.deployed_at,
-                "last_change": d.last_change,
-            }
-            for name, d in self.deployments.items()
+            "services": {
+                name: {
+                    "version": d.version,
+                    "previous_version": d.previous_version,
+                    "deployed_at": d.deployed_at,
+                    "last_change": d.last_change,
+                }
+                for name, d in self.deployments.items()
+            },
+            "incident_counter": self.engine.incident_counter,
         }

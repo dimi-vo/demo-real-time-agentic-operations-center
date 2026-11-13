@@ -11,7 +11,7 @@ from scripts.evaluation.detection import (
     HealthRow,
     Incident,
     default_range,
-    load_incidents,
+    incidents_from_records,
     score,
 )
 
@@ -156,20 +156,24 @@ def test_epoch_seconds_formats():
     assert epoch_seconds(None) is None
 
 
-def test_load_incidents_reads_what_the_generator_writes(tmp_path):
+def _gen_records(incident_id="INC0001", start=T0, duration=40):
+    """The two service_incidents records the generator writes for one BAD_DEPLOY."""
     from opsgen.engine import BAD_DEPLOY
     from opsgen.engine import Incident as GenIncident
-    from opsgen.groundtruth import append_incident
+    from opsgen.groundtruth import end_record, start_record
 
     gen = GenIncident(
-        incident_id="inc-0001", type=BAD_DEPLOY, service_name="catalog",
-        degradation_start=T0, degradation_end=T0 + 55, expected_trigger="LATENCY_HIGH",
+        incident_id=incident_id, type=BAD_DEPLOY, service_name="catalog",
+        degradation_start=start, degradation_end=start + duration, expected_trigger="LATENCY_HIGH",
         expected_action="ROLLBACK",
     )  # fmt: skip
-    path = tmp_path / "incidents.jsonl"
-    append_incident(path, gen)
-    [inc] = load_incidents(path)
-    assert (inc.started_at, inc.ended_at) == (T0, T0 + 55)
+    return start_record(gen, start), end_record(gen, start + duration)
+
+
+def test_evaluate_reads_what_the_generator_emits():
+    [inc] = incidents_from_records(_gen_records())
+    assert (inc.incident_id, inc.service_name) == ("INC0001", "catalog")
+    assert (inc.started_at, inc.ended_at) == (T0, T0 + 40)
     assert (inc.type, inc.expected_trigger, inc.expected_action) == ("BAD_DEPLOY", "LATENCY_HIGH", "ROLLBACK")
 
 
@@ -222,3 +226,37 @@ def test_rescale_confidence_widens_symmetric_bounds():
     assert out[0].latency_status == "HIGH"
     assert out[1].latency_status == "NORMAL"
     assert abs(out[1].latency_upper_bound - (50 + 20 * 3.8906 / 3.2905)) < 0.01
+
+
+def test_start_and_end_records_make_one_incident_in_either_order():
+    start, end = _gen_records()
+    assert len(incidents_from_records([start, end])) == 1
+    assert len(incidents_from_records([end, start])) == 1
+
+
+def test_an_incident_that_has_not_ended_is_not_scored():
+    start, _ = _gen_records()
+    assert incidents_from_records([start]) == []
+
+
+def test_incidents_come_back_in_start_order():
+    later = _gen_records("INC0002", start=T0 + 600)
+    earlier = _gen_records("INC0001", start=T0)
+    assert [i.incident_id for i in incidents_from_records([*later, *earlier])] == ["INC0001", "INC0002"]
+
+
+def test_incident_timestamps_load_from_kafka_a_dump_or_epoch_millis():
+    """fastavro gives naive datetimes, a --dump-incidents file has ISO text (jsonable),
+    and the generator's own records carry epoch milliseconds."""
+    from datetime import datetime, timezone
+
+    _, end = _gen_records()
+    as_datetime = {
+        **end,
+        "started_at": datetime.fromtimestamp(T0, tz=timezone.utc).replace(tzinfo=None),
+        "ended_at": datetime.fromtimestamp(T0 + 40, tz=timezone.utc).replace(tzinfo=None),
+    }
+    as_dump = json.loads(json.dumps(jsonable(as_datetime)))
+    for rec in (end, as_datetime, as_dump):
+        [inc] = incidents_from_records([rec])
+        assert (inc.started_at, inc.ended_at) == (T0, T0 + 40), rec

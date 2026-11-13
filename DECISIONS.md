@@ -787,7 +787,7 @@ CREATE TABLE heredoc, model statement's `depends_on` moves to it so the chain st
 linear). Generator emits via `opsgen/kafka_io.py::emit_incident`. `reset.py` purges it on
 every reset. **Pending: `terraform apply` on your environment to register the subject.**
 
-### D-038 · DECISION · `evaluate` keeps reading `incidents.jsonl`
+### D-038 · DECISION · `evaluate` keeps reading `incidents.jsonl` (superseded by D-046)
 **What.** The decision scorer in `scripts/evaluate.py` stays on the file, not the topic.
 **Why.** The generator writes both from the same `Incident` object so they can't disagree;
 `evaluate` was live-validated on 2026-11-12 against the file; rewriting a working loader
@@ -937,3 +937,37 @@ mock. `bad_version` is gone from `incidents.jsonl`. `evaluate`: `HealthRow` gain
 `previous_version`; `check_target` loses its incident argument; `Incident` loses both
 versions; `IncidentResult.version_mismatches` and its report column are gone.
 `scripts/tuning/sweep.py` builds `Incident` without them. Amends D-021, D-032 and D-037.
+
+### D-046 · DECISION · `service_incidents` is the only answer key; `incidents.jsonl` removed
+**What.** The generator wrote the ground truth twice: the `service_incidents` topic
+(ops wall) and `runs/pre-provisioned/incidents.jsonl` (`evaluate`, and the generator's
+own incident numbering across restarts). D-038 kept the file only because `evaluate`
+already worked against it.
+**Options.** (a) Keep both; (b) make the topic the only answer key, and give the file's
+two side jobs a new home.
+**Choice.** (b), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`):
+- **`evaluate` reads `service_incidents`** through the same `read_topic` path as
+  `service_health` and `remediation_decisions`. `incidents_from_records` keeps each
+  incident's end record (keyed by `incident_id` and `started_at`), in whatever order the
+  two records arrive, and ignores incidents that haven't ended — the file only ever held
+  finished incidents, so scoring is unchanged.
+- **Offline**: `--dump-incidents FILE` saves the records read, and `--incidents FILE`
+  scores against such a dump, like `--dump`/`--rows` and
+  `--dump-decisions`/`--decision-rows`. `--rows` without `--incidents` exits with a
+  message: offline there is no other ground truth.
+- **Incident numbering** moves into the generator state file, which `ops-sim` already
+  saves every 5 s and `reset` already deletes: `{"services": {...}, "incident_counter": n}`.
+  Ids must not repeat because the ops wall pairs start and end records by `incident_id`.
+  State files in the old shape aren't migrated: `reset` deletes them and environments are
+  recreated.
+**Why.** One answer key instead of two, and the same read path for all three tables.
+`reset` already clears the topic (step 4), so a fresh run starts with a clean answer key
+either way.
+**Impact.** `opsgen/groundtruth.py` keeps only `start_record`/`end_record`;
+`opsgen/driver.run_realtime` loses `write_groundtruth`; `opsgen/simulation.py`
+(`state_snapshot`, `initial_state`), `opsgen/state.py` and `opsgen/cli.py` carry the
+counter; `scripts/reset.py` step 5 deletes only the state file; `scripts/evaluate.py`
+and `scripts/evaluation/detection.py` (`incidents_from_records` replaces
+`load_incidents`; `Incident.from_record` reads the topic's `incident_type`). Supersedes
+D-038.
