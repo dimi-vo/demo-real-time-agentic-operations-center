@@ -124,7 +124,7 @@ resource "confluent_flink_statement" "create_service_incidents_table" {
       `expected_action` STRING COMMENT 'What the agent should pick: ROLLBACK, SCALE_OUT or INVESTIGATE_UPSTREAM',
       WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
     )
-    DISTRIBUTED BY HASH(`service_name`) INTO 1 BUCKETS
+    DISTRIBUTED INTO 1 BUCKETS
     WITH (
       'changelog.mode' = 'append',
       'connector' = 'confluent',

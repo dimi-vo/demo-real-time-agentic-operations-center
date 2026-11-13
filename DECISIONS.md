@@ -1026,3 +1026,19 @@ wall-clock (the same rule as `topic_reader.epoch_seconds`).
 columns D-043/D-044 dropped), plus deployments and incidents through the real Avro pair in
 an in-memory Schema Registry. `.gitignore` now admits `tests/fixtures/` (credential
 patterns still excluded). Still to confirm in a live run against a recreated environment.
+
+### D-049 · FIX · `service_incidents` has no key columns (`DISTRIBUTED INTO 1 BUCKETS`)
+**What.** D-037's DDL said `DISTRIBUTED BY HASH(service_name) INTO 1 BUCKETS` with
+`service_name` as the third column. Phase 5 never applied it; the first live
+`terraform apply` (2026-11-13) failed with "Key columns must appear at the beginning of
+the table schema": `DISTRIBUTED BY` makes `service_name` a Flink key column, which
+Confluent Cloud requires first and registers as an Avro key. That also contradicted the
+generator, which writes a raw-string key and expects no key subject
+(`opsgen/kafka_io.emit_incident`, "same shape as service_requests").
+**Choice.** `DISTRIBUTED INTO 1 BUCKETS`, exactly like `service_requests` (proven live
+since Phase 2): no key columns, `service_name` stays in the value where ops-wall and
+`evaluate` read it. One bucket keeps per-service order anyway.
+**Impact.** `sql/source_service_incidents.sql` and its copy in
+`platform-team/modules/developer/statements.tf`. An environment where the old statement
+already created the table must drop it before re-applying (`CREATE TABLE IF NOT EXISTS`
+won't change an existing table).
