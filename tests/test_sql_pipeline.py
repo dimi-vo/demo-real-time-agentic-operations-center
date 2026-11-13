@@ -36,9 +36,9 @@ DETECTOR_OVER = (
 # Brief sections 5.2-5.4, in order.
 SERVICE_HEALTH_COLUMNS = (
     "service_name", "window_start", "window_end",
-    "request_count", "error_count", "error_rate", "avg_latency_ms", "max_latency_ms", "avg_response_bytes",
+    "request_count", "error_count", "error_rate", "avg_latency_ms", "max_latency_ms",
     "version", "previous_version", "last_change", "seconds_since_deploy",
-    "ready_replicas", "desired_replicas", "tier",
+    "ready_replicas", "tier",
     "latency_status", "expected_latency_ms", "latency_upper_bound",
     "traffic_status", "expected_request_count", "traffic_lower_bound", "traffic_upper_bound",
     "error_rate_breach",
@@ -125,7 +125,7 @@ def test_window_is_fixed_at_ten_seconds(name):
 
 def test_deployment_context_uses_last_value_not_max():
     body = _body("2.2_window_aggregation.sql")
-    context = ("version", "previous_version", "last_change", "ready_replicas", "desired_replicas")
+    context = ("version", "previous_version", "last_change", "ready_replicas")
     context += ("tier",)
     for col in context:
         assert f"LAST_VALUE({col}) AS {col}" in body
@@ -167,3 +167,14 @@ def test_temporal_join_solution_hints_both_sides():
     body = _norm(_body("2.1_temporal_join.sql"))
     assert f"`service_requests` {EARLIEST} r" in body
     assert f"`service_deployments` {EARLIEST} FOR SYSTEM_TIME AS OF r.event_time AS d" in body
+
+
+def test_unread_columns_are_not_carried_through_the_pipeline():
+    """D-044: nothing downstream reads them, so attendees don't have to read them either.
+    The raw message fields stay in the source tables."""
+    for path in sorted((ROOT / "sql").glob("2.*.sql")):
+        body = path.read_text()
+        assert "response_bytes" not in body, path.name
+        assert "desired_replicas" not in body, path.name
+    assert "`response_bytes`" in (ROOT / "sql/source_service_requests.sql").read_text()
+    assert "`desired_replicas`" in (ROOT / "sql/source_service_deployments.sql").read_text()

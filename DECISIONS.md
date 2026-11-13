@@ -891,3 +891,20 @@ Replicas tile). `ESCALATE` is gone from both prompts, both INSERTs, the
 `remediation_decisions` comment, `evaluate`, the ops wall (closer set, pin, legend, status
 label) and the mock (the `auth` scene; issue 06 rebuilds the rest). Environments must be
 recreated: `service_deployments` changes shape.
+
+### D-044 · DECISION · `avg_response_bytes` and `desired_replicas` no longer carried through the pipeline
+**What.** The 2.2–2.4 statements computed `avg_response_bytes` and carried
+`desired_replicas` from the deployment record into `service_health`. Nothing downstream
+reads either: not the agents, not `evaluate`, not the ops wall.
+**Options.** (a) Keep them for completeness; (b) drop them from the SQL and keep the raw
+message fields; (c) drop the raw fields too.
+**Choice.** (b), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`). `response_bytes` stays in `service_requests` and
+`desired_replicas` in `service_deployments` — in the simulator, the `.avsc` files and the
+source DDL — because they make the messages look real and cost no SQL.
+**Why.** Attendees read the 2.x statements line by line; every column there should matter
+to something they will see later.
+**Impact.** `sql/2.2_window_metrics.sql`, `sql/2.2_window_aggregation.sql`,
+`sql/2.3_anomaly_detection.sql`, `sql/2.3_anomaly_status.sql`,
+`sql/2.4_service_health.sql` (and so the `service_health` schema), and
+`tests/test_sql_pipeline.py`, which now guards against either column coming back.
