@@ -16,7 +16,6 @@ def _inc(itype=BAD_DEPLOY, good="1.0.0", bad="1.0.1"):
         incident_id="INC0007",
         type=itype,
         service_name="checkout",
-        t0=1000.0,
         degradation_start=1010.0,
         degradation_end=1070.0,
         expected_trigger=_TRIGGER[itype],

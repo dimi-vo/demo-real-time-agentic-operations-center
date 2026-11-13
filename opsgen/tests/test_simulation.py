@@ -104,12 +104,10 @@ def test_upstream_drop_never_zeroes_a_window():
         incident_id="INC0001",
         type=UPSTREAM_DROP,
         service_name="payments",
-        t0=0.0,
         degradation_start=0.0,
         degradation_end=70.0,
         expected_trigger="TRAFFIC_LOW",
         expected_action="INVESTIGATE_UPSTREAM",
-        _start_fired=True,
     )
     total = 0
     for k in range(10):
@@ -126,13 +124,10 @@ def test_bad_deploy_window_raises_latency_and_errors():
         incident_id="INC0001",
         type=BAD_DEPLOY,
         service_name="checkout",
-        t0=0.0,
         degradation_start=0.0,
         degradation_end=70.0,
         expected_trigger="LATENCY_HIGH",
         expected_action="ROLLBACK",
-        _deploy_fired=True,
-        _start_fired=True,
     )
     lat = []
     errors = 0
@@ -147,6 +142,30 @@ def test_bad_deploy_window_raises_latency_and_errors():
                     errors += 1
     assert sum(lat) / len(lat) > 300  # baseline checkout median is 140ms; x4 under bad deploy
     assert errors / count > 0.05  # ~12% server errors
+
+
+def test_bad_deploy_degrades_from_its_own_tick():
+    # D-042: no onset delay. The deploy fires on a window boundary, and the 10-second
+    # window it opens is already fully degraded.
+    from statistics import mean
+
+    from opsgen.services import SERVICES_BY_NAME
+
+    sim = _sim(seed=11, config=Config(quiet_period=10, spacing_min=30, spacing_max=30))
+    for k in range(3000):
+        reqs, _, events = sim.tick(float(k))
+        bad = next((e for e in events if e.kind == "bad_deploy"), None)
+        if bad is not None:
+            break
+    else:
+        raise AssertionError("expected a BAD_DEPLOY in this seeded run")
+    assert bad.now % 10 == 0
+    assert any(e.kind == "incident_start" and e.now == bad.now for e in events)
+    window = [r for r in reqs if r["service_name"] == bad.service_name]
+    for j in range(1, 10):
+        window += [r for r in sim.tick(float(k + j))[0] if r["service_name"] == bad.service_name]
+    baseline = SERVICES_BY_NAME[bad.service_name].median_latency_ms
+    assert mean(r["latency_ms"] for r in window) > 2.5 * baseline  # x4 under a bad deploy
 
 
 def test_tick_timestamps_never_collide_with_the_next_tick():

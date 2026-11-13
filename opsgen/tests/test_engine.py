@@ -39,19 +39,20 @@ def test_quiet_period_no_incident_before_it():
     events, _, _ = _run(config, seed=1, horizon=1200)
     incs = _incidents(events)
     assert incs, "expected at least one incident in 20 minutes"
-    assert all(inc.t0 >= 180 for inc in incs)
+    assert all(inc.degradation_start >= 180 for inc in incs)
     # The first incident should start promptly once the quiet period ends.
-    assert min(inc.t0 for inc in incs) <= 181
+    assert min(inc.degradation_start for inc in incs) == 180
 
 
 def test_spacing_between_incidents():
-    config = Config(quiet_period=120, spacing_min=240, spacing_max=360, duration_min=40, duration_max=70)
+    config = Config(quiet_period=120, spacing_min=240, spacing_max=360)
     events, _, _ = _run(config, seed=2, horizon=3600)
-    incs = sorted(_incidents(events), key=lambda i: i.t0)
+    incs = sorted(_incidents(events), key=lambda i: i.degradation_start)
     assert len(incs) >= 3
     for prev, nxt in pairwise(incs):
-        gap = nxt.t0 - prev.degradation_end
-        assert 240 - 2 <= gap <= 360 + 2, f"spacing {gap} out of range"
+        gap = nxt.degradation_start - prev.degradation_end
+        # the spacing, rounded up to the next 10-second boundary
+        assert 240 <= gap < 360 + 10, f"spacing {gap} out of range"
 
 
 def test_only_one_incident_active_at_a_time():
@@ -67,31 +68,56 @@ def test_only_one_incident_active_at_a_time():
             assert depth == 0
 
 
+def test_cooldown_default_is_seven_minutes():
+    assert Config().cooldown == 420
+
+
 def test_cooldown_per_service():
-    config = Config(quiet_period=30, spacing_min=30, spacing_max=45, duration_min=30, duration_max=45, cooldown=900)
+    config = Config(quiet_period=30, spacing_min=30, spacing_max=45)
     events, _, _ = _run(config, seed=4, horizon=7200)
     by_service: dict[str, list] = {}
     for inc in _incidents(events):
         by_service.setdefault(inc.service_name, []).append(inc)
+    assert any(len(incs) >= 2 for incs in by_service.values()), "expected a repeat to check"
     for incs in by_service.values():
-        incs.sort(key=lambda i: i.t0)
+        incs.sort(key=lambda i: i.degradation_start)
         for prev, nxt in pairwise(incs):
-            assert nxt.t0 - prev.degradation_end >= 900 - 2
+            assert nxt.degradation_start - prev.degradation_end >= 420
 
 
 def test_bad_deploy_lifecycle_and_rollback():
-    config = Config(quiet_period=10, spacing_min=600, spacing_max=600)
-    events, _, _ = _run(config, seed=42, horizon=400)
-    # Find the first BAD_DEPLOY incident.
+    config = Config(quiet_period=10, spacing_min=30, spacing_max=30)
+    events, _, _ = _run(config, seed=42, horizon=2000)
     bad = next((i for i in _incidents(events) if i.type == BAD_DEPLOY), None)
-    if bad is None:
-        return  # seed-dependent; other tests force the type directly
-    kinds = [(e.kind, e.service_name) for e in events if e.service_name == bad.service_name]
-    assert ("bad_deploy", bad.service_name) in kinds
-    assert ("incident_end", bad.service_name) in kinds
-    # degradation starts 10s after the deploy
-    assert abs(bad.degradation_start - (bad.t0 + 10)) < 1e-6
-    assert bad.bad_version is not None and bad.good_version is not None
+    assert bad is not None, "expected a BAD_DEPLOY in this seeded run"
+    mine = [e for e in events if e.incident is bad]
+    # The deploy and the degradation start on the same tick (D-042), deploy first.
+    assert [(e.kind, e.now) for e in mine] == [
+        ("bad_deploy", bad.degradation_start),
+        ("incident_start", bad.degradation_start),
+        ("incident_end", bad.degradation_end),
+    ]
+    deploy, _, end = mine
+    assert (deploy.old_version, deploy.new_version) == (bad.good_version, bad.bad_version)
+    # the end rolls the bad version back to the good one
+    assert (end.old_version, end.new_version) == (bad.bad_version, bad.good_version)
+
+
+def test_every_incident_is_40_s_on_window_boundaries():
+    # Start off a boundary to prove the rounding: the windows are epoch-aligned, not
+    # aligned to the generator's start.
+    rng = random.Random(9)
+    deployments = _deployments(3.0)
+    eng = Engine(rng=rng, start=3.0, config=Config())
+    events = []
+    for k in range(2 * 3600):
+        events.extend(eng.tick(3.0 + k, deployments))
+    incs = _incidents(events)
+    assert len(incs) >= 10
+    for inc in incs:
+        assert inc.degradation_start % 10 == 0, inc
+        assert inc.degradation_end - inc.degradation_start == 40, inc
+    assert {i.type for i in incs} == {BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP}
 
 
 def test_no_incidents_flag_still_deploys():

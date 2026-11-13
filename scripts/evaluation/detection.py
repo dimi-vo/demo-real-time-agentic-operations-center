@@ -44,8 +44,8 @@ ECHO_SECONDS = 60.0
 AFTER_DEPLOY_SECONDS = 60
 RESTART_SECONDS = 60.0
 # ops-sim logs an incident when it ends, so the newest rows may belong to one still in
-# progress. An incident lasts at most 70 s; rows ending 100 s before the newest row
-# can't be part of an unlogged one.
+# progress. An incident lasts 40 s (D-042; it was up to 80 s with the old onset delay);
+# rows ending 100 s before the newest row can't be part of an unlogged one.
 UNLOGGED_TAIL_SECONDS = 100.0
 
 LATENCY_HIGH = "LATENCY_HIGH"

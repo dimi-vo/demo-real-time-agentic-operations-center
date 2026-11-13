@@ -825,3 +825,33 @@ by revealing whole panels. One fewer piece of state and one fewer thing the walk
 has to explain.
 **Impact.** `scripts/opswall/static/` has no unlock logic. The Phase 6 walkthrough must
 describe the chart's lane-by-lane fill-in, not the brief's progressive-reveal pattern.
+
+### D-042 · DEVIATION · Incidents start at once, last 40 s, sit on window boundaries; 7-min cooldown
+**What.** The brief (§4.5) has a BAD_DEPLOY degrade 10 s after its deploy, incidents last
+40–70 s (uniform) and start at any second, and a service waits 15 min between incidents.
+All four change.
+**Options.** (a) Keep the brief's timing; (b) make the cause and the anomaly coincide and
+make every incident the same, whole-window shape.
+**Choice.** (b), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`):
+- **No onset delay.** A BAD_DEPLOY's DEPLOY record and its degradation start on the same
+  tick. The "onset" requests (new version, baseline metrics) no longer exist.
+- **A fixed 40 s duration.** `Config.duration` replaces `duration_min`/`duration_max`;
+  `--duration` replaces `--duration-min`/`--duration-max`.
+- **Window-aligned starts.** The end of the quiet period and every spacing are rounded up
+  to the next 10-second boundary (epoch seconds, like Flink's tumbling windows), so an
+  incident covers exactly 4 whole windows and ends — and a BAD_DEPLOY rolls back — on a
+  boundary. Benign deploys stay unaligned: they don't move the metrics.
+- **Cooldown 900 → 420 s.**
+**Why.** This is a workshop, and the point it makes is "anomaly → agent reacts → anomaly
+gone". With the delay, attendees saw a deploy, then 10 s of nothing, then the anomaly.
+With unaligned starts the first and last windows were half degraded and flagged or not
+by chance — the fuzzy edges on the charts. Now an anomaly starts on the same window as
+its cause, and every incident has the same 4-window shape. The shorter cooldown keeps
+repeats possible on the 3-service surge/drop lists now that incidents are short.
+**Impact.** `opsgen/engine.py` (`WINDOW_SECONDS`, `next_window_boundary`, `Config`; the
+BAD_DEPLOY deploy and the start events fire in `_maybe_start_incident`; `Incident.t0` and
+the `_deploy_fired`/`_start_fired` flags are gone), `opsgen/cli.py`, `opsgen/driver.py`
+(`aligned_start` reuses `next_window_boundary`), and the tests. Dropping the duration
+draw changes the RNG sequence, so `--seed` schedules differ from earlier runs. The
+detector, request rates (D-030/D-031) and spacing are unchanged.

@@ -4,11 +4,11 @@
 
 from __future__ import annotations
 
-import math
 import sys
 import time
 from pathlib import Path
 
+from opsgen.engine import WINDOW_SECONDS, next_window_boundary
 from opsgen.groundtruth import append_incident, end_record, incidents_path, start_record
 from opsgen.instances import version_hash
 from opsgen.services import service_names
@@ -21,15 +21,12 @@ def _mmss(seconds: int) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
-WINDOW_SECONDS = 10
-
-
 def aligned_start(now: float) -> float:
     """The next 10-second boundary at or after `now` (D-031). Starting there means the
     first 10-second window Flink aggregates is a full one: a half-empty first window would
     look like a traffic drop and widen the detectors' bounds while it stays in training.
     The F1 race did the same with its 20-second laps."""
-    return float(math.ceil(now / WINDOW_SECONDS) * WINDOW_SECONDS)
+    return next_window_boundary(now)
 
 
 def wait_until(start: float) -> None:
@@ -102,7 +99,7 @@ def run_simulate(sim: Simulation, minutes: float, out=None) -> None:
     out.write(
         f"# ops-sim --simulate {minutes:g}min  "
         f"(quiet={sim.config.quiet_period:g}s spacing={sim.config.spacing_min:g}-{sim.config.spacing_max:g}s "
-        f"duration={sim.config.duration_min:g}-{sim.config.duration_max:g}s cooldown={sim.config.cooldown:g}s)\n"
+        f"duration={sim.config.duration:g}s cooldown={sim.config.cooldown:g}s)\n"
     )
     for k in range(total):
         now = sim.start + k
@@ -115,7 +112,7 @@ def run_simulate(sim: Simulation, minutes: float, out=None) -> None:
             a["lat"] += r["latency_ms"]
             if r["status_code"] >= 500:
                 a["errors"] += 1
-        if k % 10 == 9:
+        if k % WINDOW_SECONDS == WINDOW_SECONDS - 1:
             label = _mmss(k + 1)
             for name in names:
                 a = agg[name]

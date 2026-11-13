@@ -39,8 +39,7 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument("--quiet-period", type=float, default=Config.quiet_period, help="Incident-free period at start")
     g.add_argument("--spacing-min", type=float, default=Config.spacing_min, help="Min gap after an incident ends")
     g.add_argument("--spacing-max", type=float, default=Config.spacing_max, help="Max gap after an incident ends")
-    g.add_argument("--duration-min", type=float, default=Config.duration_min, help="Min incident degradation duration")
-    g.add_argument("--duration-max", type=float, default=Config.duration_max, help="Max incident degradation duration")
+    g.add_argument("--duration", type=float, default=Config.duration, help="Incident degradation duration")
     g.add_argument("--cooldown", type=float, default=Config.cooldown, help="Min gap between incidents on one service")
     g.add_argument("--benign-first", type=float, default=Config.benign_first, help="When the first benign deploy fires")
     g.add_argument("--benign-min", type=float, default=Config.benign_min, help="Min gap between benign deploys")
@@ -53,8 +52,7 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         quiet_period=args.quiet_period,
         spacing_min=args.spacing_min,
         spacing_max=args.spacing_max,
-        duration_min=args.duration_min,
-        duration_max=args.duration_max,
+        duration=args.duration,
         cooldown=args.cooldown,
         benign_first=args.benign_first,
         benign_min=args.benign_min,

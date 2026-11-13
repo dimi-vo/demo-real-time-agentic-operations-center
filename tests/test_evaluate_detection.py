@@ -172,7 +172,7 @@ def test_load_incidents_reads_what_the_generator_writes(tmp_path):
     from opsgen.groundtruth import append_incident
 
     gen = GenIncident(
-        incident_id="inc-0001", type=BAD_DEPLOY, service_name="catalog", t0=T0 - 10,
+        incident_id="inc-0001", type=BAD_DEPLOY, service_name="catalog",
         degradation_start=T0, degradation_end=T0 + 55, expected_trigger="LATENCY_HIGH",
         expected_action="ROLLBACK", bad_version="5.0.4", good_version="5.0.3",
     )  # fmt: skip

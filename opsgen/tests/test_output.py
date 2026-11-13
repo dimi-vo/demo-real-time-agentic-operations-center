@@ -77,3 +77,13 @@ def test_no_incidents_simulate_has_no_incidents():
     text = _simulate(minutes=30, no_incidents=True)
     assert "INCIDENT START" not in text
     assert "DEPLOY" in text
+
+
+def test_cli_schedule_overrides_reach_the_config():
+    from opsgen.cli import _build_parser, _config_from_args
+
+    defaults = _config_from_args(_build_parser().parse_args([]))
+    assert (defaults.duration, defaults.cooldown) == (40.0, 420.0)
+    args = _build_parser().parse_args(["--duration", "30", "--cooldown", "600"])
+    config = _config_from_args(args)
+    assert (config.duration, config.cooldown) == (30.0, 600.0)
