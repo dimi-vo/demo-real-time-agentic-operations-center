@@ -17,14 +17,14 @@ def _run_full_loop():
 
 
 def test_catalogue_covers_every_rendering_path():
-    assert all_actions() >= {"ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM",
-                              "ESCALATE", "OBSERVE", "INVALID"}
+    assert all_actions() >= {"ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM", "OBSERVE", "INVALID"}
+    assert "ESCALATE" not in all_actions()
 
 
 def test_every_actionable_decision_appears_in_one_loop():
     snap = _run_full_loop()
     seen = {d["action"] for s in snap["services"] for d in s["decisions"]}
-    assert {"ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM", "ESCALATE"} <= seen
+    assert {"ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM"} <= seen
 
 
 def test_every_incident_has_a_ground_truth_span():

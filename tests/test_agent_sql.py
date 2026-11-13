@@ -159,24 +159,32 @@ def test_inserts_start_with_the_four_identity_columns(agent):
 def test_capacity_insert_computes_the_replica_suggestion_in_sql():
     """Brief 5.5: the arithmetic is deterministic, the agent only decides to use it."""
     sql = read(INSERT_FILES[CAPACITY_AGENT])
-    assert "LEAST(" in sql and "GREATEST(" in sql and "CEIL(" in sql
+    assert "GREATEST(" in sql and "CEIL(" in sql
     assert "Suggested Replicas: " in sql, "the computed value must reach the prompt"
+    # D-043: no autoscaling ceiling, so no cap and no Max Replicas in the prompt.
+    assert "LEAST(" not in sql and "max_replicas" not in sql and "Max Replicas" not in sql
 
 
 @pytest.mark.parametrize(
-    ("ready", "maximum", "count", "expected", "want"),
+    ("ready", "count", "expected", "want"),
     [
-        (3, 10, 600, 200, 9),  # three times the load, room to grow
-        (3, 10, 210, 200, 4),  # a nudge over: always at least one more replica
-        (4, 4, 450, 150, 4),  # at the ceiling (auth): nothing to give
-        (2, 6, 90, 30, 6),  # six times the load, capped by the ceiling
-        (2, 6, 90, 0, 3),  # an expected count of zero must not divide
-        (2, 6, 90, None, 3),  # nor a missing one
-        (None, 6, 90, 30, None),
+        (3, 600, 200, 9),  # three times the load
+        (3, 210, 200, 4),  # a nudge over: always at least one more replica
+        (4, 450, 150, 12),  # auth: no ceiling any more (D-043)
+        (2, 90, 30, 6),  # three times the load on two replicas
+        (2, 90, 0, 3),  # an expected count of zero must not divide
+        (2, 90, None, 3),  # nor a missing one
+        (None, 90, 30, None),
     ],
 )
-def test_suggested_replicas_matches_the_sql_formula(ready, maximum, count, expected, want):
-    assert suggested_replicas(ready, maximum, count, expected) == want
+def test_suggested_replicas_matches_the_sql_formula(ready, count, expected, want):
+    assert suggested_replicas(ready, count, expected) == want
+
+
+def test_escalate_is_gone_from_every_agent_file():
+    """D-043: every incident type has exactly one correct answer, and none is ESCALATE."""
+    for name in (*AGENT_FILES.values(), *INSERT_FILES.values(), TABLE_FILE):
+        assert "ESCALATE" not in read(name), name
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))

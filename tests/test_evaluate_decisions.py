@@ -2,7 +2,6 @@
 
 from scripts.evaluation.decisions import (
     CAPACITY_AGENT,
-    ESCALATE,
     INVALID,
     INVESTIGATE_UPSTREAM,
     OBSERVE,
@@ -24,7 +23,7 @@ def _row(service, k, lat="NORMAL", trf="NORMAL", version="1.0.0", ssd=600):
         latency_status=lat, traffic_status=trf, avg_latency_ms=100.0, expected_latency_ms=50.0,
         latency_upper_bound=70.0, request_count=30, expected_request_count=10.0,
         traffic_lower_bound=5.0, traffic_upper_bound=15.0, version=version, seconds_since_deploy=ssd,
-        last_change="DEPLOY", ready_replicas=3, max_replicas=10,
+        last_change="DEPLOY", ready_replicas=3,
     )  # fmt: skip
 
 
@@ -69,7 +68,7 @@ def test_an_action_outside_the_agents_set_is_invalid():
 
 
 def test_a_trigger_belonging_to_the_other_agent_is_a_routing_error():
-    d = _dec("cart", 10, agent=RELEASE_AGENT, trigger="TRAFFIC_LOW", action=ESCALATE)
+    d = _dec("cart", 10, agent=RELEASE_AGENT, trigger="TRAFFIC_LOW", action=OBSERVE)
     rep = _score([d], _series("cart", 20), [])
     assert rep.agents[RELEASE_AGENT].routing_errors == 1
 
@@ -150,13 +149,13 @@ def test_the_headline_decision_is_the_one_on_the_first_window_of_the_span():
     rows = _series("cart", 60, {40: {"lat": "HIGH"}, 41: {"lat": "HIGH"}})
     inc = _inc("cart", 40, duration=50, good_version="1.0.0", bad_version="1.0.1")
     decisions = [
-        _dec("cart", 41, action=ESCALATE),  # later window, listed first
+        _dec("cart", 41, action=OBSERVE),  # later window, listed first
         _dec("cart", 40, action=ROLLBACK, target="1.0.0"),
     ]
     item = _score(decisions, rows, [inc]).incidents[0]
     assert item.headline.action == ROLLBACK
     assert item.matched and item.target_ok is True
-    assert item.actions[ESCALATE] == 1
+    assert item.actions[OBSERVE] == 1
 
 
 def test_a_rollback_naming_the_wrong_version_fails_the_target_check():
@@ -234,7 +233,7 @@ def test_a_target_on_an_action_that_needs_none_is_flagged():
     """D-034: the SQL stores whatever the agent wrote, so a contradiction is visible."""
     rows = _series("cart", 60, {40: {"lat": "HIGH"}})
     inc = _inc("cart", 40, good_version="1.0.0")
-    rep = _score([_dec("cart", 40, action=ESCALATE, target="1.0.0")], rows, [inc])
+    rep = _score([_dec("cart", 40, action=OBSERVE, target="1.0.0")], rows, [inc])
     assert len(rep.bad_targets) == 1
     assert rep.incidents[0].target_ok is False
 

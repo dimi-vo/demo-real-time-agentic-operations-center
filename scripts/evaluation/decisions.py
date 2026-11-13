@@ -55,15 +55,15 @@ CAPACITY_AGENT = "capacity_agent"
 ROLLBACK = "ROLLBACK"
 SCALE_OUT = "SCALE_OUT"
 INVESTIGATE_UPSTREAM = "INVESTIGATE_UPSTREAM"
-ESCALATE = "ESCALATE"
 OBSERVE = "OBSERVE"
 INVALID = "INVALID"
 
-# One shared vocabulary (D-034); each agent is offered its own subset in its prompt.
-ACTIONS = (ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM, ESCALATE, OBSERVE)
+# One shared vocabulary (D-034, D-043); each agent is offered its own subset in its
+# prompt. Every incident type has exactly one correct action; OBSERVE answers a false alarm.
+ACTIONS = (ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM, OBSERVE)
 ALLOWED_ACTIONS = {
-    RELEASE_AGENT: (ROLLBACK, ESCALATE, OBSERVE),
-    CAPACITY_AGENT: (SCALE_OUT, INVESTIGATE_UPSTREAM, ESCALATE, OBSERVE),
+    RELEASE_AGENT: (ROLLBACK, OBSERVE),
+    CAPACITY_AGENT: (SCALE_OUT, INVESTIGATE_UPSTREAM, OBSERVE),
 }
 AGENT_FOR_TRIGGER = {
     LATENCY_HIGH: RELEASE_AGENT,
@@ -123,16 +123,14 @@ class DecisionRow:
         return AGENT_FOR_TRIGGER.get(self.trigger) == self.agent_name
 
 
-def suggested_replicas(
-    ready: int | None, maximum: int | None, count: int | None, expected: float | None
-) -> int | None:
-    """The capacity INSERT's formula (brief section 5.5), in Python."""
-    if ready is None or maximum is None:
+def suggested_replicas(ready: int | None, count: int | None, expected: float | None) -> int | None:
+    """The capacity INSERT's formula (brief section 5.5, uncapped since D-043), in Python."""
+    if ready is None:
         return None
     base = ready + 1
     if count is not None and expected:
         base = max(base, math.ceil(ready * count / expected))
-    return min(maximum, base)
+    return base
 
 
 def expected_agent(row: HealthRow) -> str | None:
@@ -155,7 +153,7 @@ def describe(d: DecisionRow, health: HealthRow | None) -> str:
         return body
     body = f"{_num(health.request_count)} req vs {_num(health.expected_request_count)} expected"
     if health.ready_replicas is not None:
-        body += f", {health.ready_replicas}/{_num(health.max_replicas)} replicas"
+        body += f", {health.ready_replicas} replicas"
     return body
 
 
@@ -169,9 +167,7 @@ def check_target(d: DecisionRow, incident: Incident | None, health: HealthRow | 
     if d.action == SCALE_OUT:
         if health is None:
             return None
-        want = suggested_replicas(
-            health.ready_replicas, health.max_replicas, health.request_count, health.expected_request_count
-        )
+        want = suggested_replicas(health.ready_replicas, health.request_count, health.expected_request_count)
         return want is not None and d.target == str(want)
     return False if d.target else None
 

@@ -66,12 +66,11 @@ function formatPct(pct) {
   return `${pct.toFixed(1)}%`;
 }
 
-const CLOSERS = new Set(["ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM", "ESCALATE"]);
+const CLOSERS = new Set(["ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM"]);
 const PIN = {
   ROLLBACK:  { label: "Rollback", d: "M -6 -6 L -6 6 M -6 -6 L 6 -6 L 2.5 -2.5 L 6 1 L -6 1 Z", fill: "var(--crit)" },
   SCALE_OUT: { label: "Scale out", d: "M 0 -7 L 7 5 L -7 5 Z", fill: "var(--warn)" },
   INVESTIGATE_UPSTREAM: { label: "Investigate upstream", d: "M 2 -6 L -6 0 L 2 6 L 2 3 L 7 3 L 7 -3 L 2 -3 Z", fill: "var(--serious)" },
-  ESCALATE:  { label: "Escalate", d: "M 0 -7.5 L 7.5 5.5 L -7.5 5.5 Z M -1 -2.5 L 1 -2.5 L 1 1.5 L -1 1.5 Z M -1 2.5 L 1 2.5 L 1 4 L -1 4 Z", fill: "var(--crit)", evenodd: true },
   OBSERVE:   { label: "Observe", note: "Keeps watching. Doesn't close the detection." },
   INVALID:   { label: "Invalid decision", note: "The agent's answer was rejected." },
 };
@@ -94,7 +93,6 @@ function pinShape(action, parent) {
   }
   return s("path", {
     d: p.d, fill: p.fill, stroke: "var(--ink-0)", "stroke-width": 1.25, "stroke-linejoin": "round",
-    ...(p.evenodd ? { "fill-rule": "evenodd" } : {}),
   }, parent);
 }
 
@@ -263,7 +261,7 @@ function serviceRow(svc, defaultWarmup, hosts) {
       ${note ? `<p class="note">${note}</p>` : ""}
       <dl class="stats">
         <div><dt>Version</dt><dd>v${svc.version || "—"}</dd></div>
-        <div><dt>Replicas</dt><dd>${svc.replicas != null ? svc.replicas + (svc.maxReplicas ? "/" + svc.maxReplicas : "") : "—"}</dd></div>
+        <div><dt>Replicas</dt><dd>${svc.replicas != null ? svc.replicas : "—"}</dd></div>
         <div><dt>Rate</dt><dd>${rateStr}</dd></div>
         <div><dt>Errors</dt><dd class="${errHot}">${errStr}</dd></div>
       </dl>
@@ -327,7 +325,7 @@ function renderLegend() {
     <span class="item">${swatch("fill:url(#hatch);stroke:var(--line)")}Detector warm-up</span>
     <span class="item"><svg width="22" height="12"><path d="M 1 2 V 10 M 1 6 H 21 M 21 2 V 10" stroke="var(--text)" stroke-width="1.25" fill="none"/></svg>Time to detect</span>
     <span class="sep"></span>`;
-  for (const a of ["OBSERVE", "ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM", "ESCALATE", "INVALID"]) {
+  for (const a of ["OBSERVE", "ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM", "INVALID"]) {
     const item = document.createElement("span");
     item.className = "item";
     const svg = s("svg", { width: 16, height: 16, viewBox: "-8 -8 16 16" });

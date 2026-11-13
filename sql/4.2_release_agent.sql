@@ -13,24 +13,19 @@ CREATE AGENT `release_agent`
 USING MODEL `llm_textgen_model`
 USING PROMPT 'OUTPUT FORMAT — respond with exactly these 3 labeled lines, in this order. Plain text only: no markdown, no bold, no bullet points, no blank lines, nothing before or after.
 
-Action: [ROLLBACK | ESCALATE | OBSERVE]
+Action: [ROLLBACK | OBSERVE]
 Target: [the version to roll back to if ROLLBACK, otherwise N/A]
 Reason: [one or two sentences]
 
 Correct ROLLBACK example:
 Action: ROLLBACK
 Target: 4.2.1
-Reason: Checkout latency is 580 ms against an expected 142 ms and the current version went live 38 seconds ago, with 11 percent of requests failing. Returning to 4.2.1 is the fastest safe fix.
-
-Correct ESCALATE example:
-Action: ESCALATE
-Target: N/A
-Reason: Payments latency is 910 ms against an expected 223 ms with no deploy in the last ten minutes. Nothing can be rolled back, so this points at a dependency or the infrastructure and needs an on-call engineer.
+Reason: Checkout latency is 580 ms against an expected 142 ms and the current version went live 10 seconds ago, with 11 percent of requests failing. Returning to 4.2.1 is the fastest safe fix.
 
 Correct OBSERVE example:
 Action: OBSERVE
 Target: N/A
-Reason: Catalog latency is 64 ms against an upper bound of 61 ms, a marginal overshoot with no error rate breach. A single window this close to the band is more likely to be noise than a real regression.
+Reason: Catalog latency is 64 ms against an upper bound of 61 ms and the last deploy went live 41 minutes ago, so there is no recent release to roll back. A single window this close to the band is more likely to be noise than a real regression.
 
 ---
 
@@ -38,10 +33,9 @@ You are the release reliability engineer on call for River Shop, an online store
 
 DECISION FRAMEWORK — apply the rules in this order and stop at the first one that matches:
 1. ROLLBACK — only when ALL THREE hold: Last Change is DEPLOY, Seconds Since Deploy is less than 600, and Previous Version is not N/A. A deploy in the last ten minutes is the prime suspect for a latency regression. Copy Previous Version into the Target line exactly as given.
-2. ESCALATE — latency is anomalous and no qualifying recent deploy explains it: there was no deploy, the deploy is older than 600 seconds, or there is no previous version to return to. This points at a dependency, the database or the infrastructure, and needs a human.
-3. OBSERVE — only when the evidence is weak: the measured latency is barely above the Expected Upper Bound and Error Rate Breach is false. Never choose OBSERVE when Error Rate Breach is true.
+2. OBSERVE — everything rule 1 does not cover: there was no deploy, the deploy is older than 600 seconds, or there is no previous version to return to. With no recent release to blame, there is nothing to roll back, so keep watching.
 
-STRICT VALUES — the Action line must be exactly ROLLBACK, ESCALATE or OBSERVE, with no extra words. The Target line is N/A unless the action is ROLLBACK. Use only the numbers given in the input; never invent a value, a version or a service name.'
+STRICT VALUES — the Action line must be exactly ROLLBACK or OBSERVE, with no extra words. The Target line is N/A unless the action is ROLLBACK. Use only the numbers given in the input; never invent a value, a version or a service name.'
 WITH (
   'handle_exception' = 'continue',
   'max_consecutive_failures' = '3',

@@ -26,18 +26,18 @@ def test_services_are_preseeded_with_tier_and_replicas():
     names = {s["name"]: s for s in snap["services"]}
     assert "checkout" in names and "web-gateway" in names
     assert names["checkout"]["tier"] in ("CRITICAL", "STANDARD")
-    assert names["checkout"]["maxReplicas"] is not None
+    assert names["checkout"]["replicas"] is not None
+    assert "maxReplicas" not in names["checkout"]  # D-043: no ceiling
 
 
 def test_deployment_upsert_keeps_latest():
     st = _state()
     st.apply_deployment({"service_name": "checkout", "version": "1.0.0", "ready_replicas": 3,
-                         "max_replicas": 6, "deployed_at": int((NOW - 300) * 1000)})
+                         "deployed_at": int((NOW - 300) * 1000)})
     st.apply_deployment({"service_name": "checkout", "version": "1.0.1", "ready_replicas": 4})
     s = _get(st, "checkout")
     assert s["version"] == "1.0.1"
     assert s["replicas"] == 4
-    assert s["maxReplicas"] == 6
     assert 299 <= s["secondsSinceDeploy"] <= 301
 
 

@@ -11,7 +11,7 @@ CREATE TABLE `remediation_decisions` (
   `service_name` STRING NOT NULL,
   `agent_name` STRING NOT NULL COMMENT 'release_agent or capacity_agent',
   `trigger` STRING NOT NULL COMMENT 'LATENCY_HIGH, TRAFFIC_HIGH or TRAFFIC_LOW',
-  `action` STRING NOT NULL COMMENT 'ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM, ESCALATE, OBSERVE, or INVALID',
+  `action` STRING NOT NULL COMMENT 'ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM, OBSERVE, or INVALID',
   `target` STRING COMMENT 'Version for ROLLBACK, replica count for SCALE_OUT, otherwise null',
   `reason` STRING COMMENT 'The agent explanation, one or two sentences',
   `raw_response` STRING COMMENT 'The full agent answer, kept for debugging when parsing returns null'

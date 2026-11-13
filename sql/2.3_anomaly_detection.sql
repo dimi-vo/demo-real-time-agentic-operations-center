@@ -16,7 +16,6 @@ WITH enriched AS (
     d.last_change,
     d.desired_replicas,
     d.ready_replicas,
-    d.max_replicas,
     d.tier
   FROM `service_requests` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */ r
   JOIN `service_deployments` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
@@ -41,7 +40,6 @@ windowed AS (
     TIMESTAMPDIFF(SECOND, LAST_VALUE(deployed_at), window_end) AS seconds_since_deploy,
     LAST_VALUE(ready_replicas) AS ready_replicas,
     LAST_VALUE(desired_replicas) AS desired_replicas,
-    LAST_VALUE(max_replicas) AS max_replicas,
     LAST_VALUE(tier) AS tier
   FROM TABLE(TUMBLE(TABLE enriched, DESCRIPTOR(event_time), INTERVAL '10' SECOND))
   GROUP BY window_start, window_end, window_time, service_name

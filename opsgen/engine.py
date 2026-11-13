@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from opsgen.deployments import DeploymentState
 from opsgen.services import SERVICES_BY_NAME, service_names
 
-# Incident types, their weights, candidate services, trigger and expected action.
+# Incident types, their weights, candidate services, trigger and expected action. Every
+# type has exactly one expected action, whatever the service (D-043).
 BAD_DEPLOY = "BAD_DEPLOY"
 TRAFFIC_SURGE = "TRAFFIC_SURGE"
 UPSTREAM_DROP = "UPSTREAM_DROP"
@@ -199,7 +200,7 @@ class Engine:
             degradation_start=now,
             degradation_end=now + duration,
             expected_trigger=TRIGGER[itype],
-            expected_action=self._expected_action(itype, svc),
+            expected_action=EXPECTED_ACTION[itype],
         )
         # A BAD_DEPLOY's deploy and its degradation start on the same tick (D-042).
         if itype == BAD_DEPLOY:
@@ -250,13 +251,6 @@ class Engine:
             and now - self.last_deploy_at.get(name, float("-inf")) >= self.config.benign_min_gap
         ]
         return self.rng.choice(eligible) if eligible else None
-
-    @staticmethod
-    def _expected_action(itype: str, svc: str) -> str:
-        # A surge on a service already at its replica ceiling can't scale out.
-        if itype == TRAFFIC_SURGE and SERVICES_BY_NAME[svc].ready_replicas >= SERVICES_BY_NAME[svc].max_replicas:
-            return "ESCALATE"
-        return EXPECTED_ACTION[itype]
 
     def _uniform(self, lo: float, hi: float) -> float:
         return self.rng.uniform(lo, hi)

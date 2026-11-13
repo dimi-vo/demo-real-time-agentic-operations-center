@@ -1,7 +1,7 @@
 """`uv run ops-wall --mock` — drive OpsWallState from a scripted incident sequence.
 
-Twelve minutes, eight scenes, no Kafka. Exists so every rendering path the live
-wall could show is visible on demand: the four actionable decisions, OBSERVE,
+Twelve minutes, seven scenes, no Kafka. Exists so every rendering path the live
+wall could show is visible on demand: the three actionable decisions, OBSERVE,
 INVALID, a missed detection, a false alarm, and the open-right-edge "still
 happening" state.
 
@@ -72,7 +72,8 @@ class Scene:
         return "LATENCY_HIGH"
 
 
-# The eight scenes (plan §9), with substitutions where the service list differs:
+# The scenes (plan §9, minus the ESCALATE one since D-043), with substitutions where the
+# service list differs:
 #   "recommendations" → "catalog"   (catalog is the standard-tier stand-in)
 #   "search"          → "web-gateway" (used here for the false-alarm scene)
 SCENES: tuple[Scene, ...] = (
@@ -99,11 +100,6 @@ SCENES: tuple[Scene, ...] = (
         start_offset=300, service="payments", incident_type="UPSTREAM_DROP",
         detection_offset=15, detection_duration=25,
         decisions=(Decision(at_offset=25, action="INVESTIGATE_UPSTREAM"),),
-    ),
-    Scene(  # ESCALATE (auth is already at max replicas, can't scale)
-        start_offset=380, service="auth", incident_type="TRAFFIC_SURGE",
-        detection_offset=20, detection_duration=30,
-        decisions=(Decision(at_offset=30, action="ESCALATE"),),
     ),
     Scene(  # resolved-without-action: only OBSERVE, span closes naturally
         start_offset=460, service="catalog", incident_type="BAD_DEPLOY",
@@ -154,7 +150,6 @@ class MockDriver:
                 "deployed_at": int((self.start_wall - 3600) * 1000),
                 "last_change": "INITIAL",
                 "ready_replicas": svc.ready_replicas,
-                "max_replicas": svc.max_replicas,
                 "tier": svc.tier,
             })
 

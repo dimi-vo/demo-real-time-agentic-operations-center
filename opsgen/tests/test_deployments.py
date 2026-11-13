@@ -21,7 +21,6 @@ def test_initial_state():
     assert s.last_change == INITIAL
     assert s.deployed_at == 100.0
     assert s.desired_replicas == s.ready_replicas == 3
-    assert s.max_replicas == 8
     assert s.tier == "CRITICAL"
 
 

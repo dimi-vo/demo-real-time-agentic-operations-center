@@ -26,7 +26,6 @@ DEPLOYMENT_FIELDS = {
     "last_change",
     "desired_replicas",
     "ready_replicas",
-    "max_replicas",
     "tier",
     "owner_team",
     "event_time",

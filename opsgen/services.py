@@ -7,8 +7,8 @@ that can suffer an UPSTREAM_DROP (cart, checkout, payments) run at 6 requests/s:
 fewer than ~60 requests per 10-second window, a drop to 20% can't be told apart from
 normal noise (measured live and in the offline sweep, scripts/tuning). web-gateway stays
 the busiest service.
-`auth` deliberately runs at its replica ceiling (ready == max == 4) so a traffic surge on
-`auth` exercises the capacity agent's ESCALATE path instead of SCALE_OUT.
+There is no replica ceiling (D-043): a surge on any surge candidate, `auth` included,
+expects SCALE_OUT.
 """
 
 from __future__ import annotations
@@ -45,7 +45,6 @@ class Service:
     median_latency_ms: float
     rps: float  # Poisson mean requests per second (lambda); see D-030/D-031
     ready_replicas: int
-    max_replicas: int
     routes: tuple[Route, ...]
 
 
@@ -58,7 +57,6 @@ SERVICES: tuple[Service, ...] = (
         median_latency_ms=35,
         rps=10,
         ready_replicas=4,
-        max_replicas=12,
         routes=(
             Route("GET", "/", 60, 1200),
             Route("GET", "/api/v1/home", 30, 3500),
@@ -73,7 +71,6 @@ SERVICES: tuple[Service, ...] = (
         median_latency_ms=20,
         rps=5,
         ready_replicas=4,
-        max_replicas=4,  # at the ceiling on purpose -> surge -> ESCALATE
         routes=(
             Route("POST", "/api/v1/login", 60, 420),
             Route("POST", "/api/v1/token/refresh", 30, 260),
@@ -88,7 +85,6 @@ SERVICES: tuple[Service, ...] = (
         median_latency_ms=60,
         rps=8,
         ready_replicas=3,
-        max_replicas=10,
         routes=(
             Route("GET", "/api/v1/products", 60, 4200),
             Route("GET", "/api/v1/products/{id}", 30, 1600),
@@ -103,7 +99,6 @@ SERVICES: tuple[Service, ...] = (
         median_latency_ms=45,
         rps=6,
         ready_replicas=2,
-        max_replicas=6,
         routes=(
             Route("GET", "/api/v1/cart", 60, 950),
             Route("POST", "/api/v1/cart/items", 30, 320),
@@ -118,7 +113,6 @@ SERVICES: tuple[Service, ...] = (
         median_latency_ms=140,
         rps=6,
         ready_replicas=3,
-        max_replicas=8,
         routes=(
             Route("POST", "/api/v1/checkout", 60, 760),
             Route("GET", "/api/v1/checkout/{id}", 40, 1180),
@@ -132,7 +126,6 @@ SERVICES: tuple[Service, ...] = (
         median_latency_ms=220,
         rps=6,
         ready_replicas=2,
-        max_replicas=6,
         routes=(
             Route("POST", "/api/v1/payments", 60, 480),
             Route("GET", "/api/v1/payments/{id}", 40, 820),

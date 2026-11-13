@@ -67,7 +67,6 @@ class Simulation:
             "last_change": d.last_change,
             "desired_replicas": d.desired_replicas,
             "ready_replicas": d.ready_replicas,
-            "max_replicas": d.max_replicas,
             "tier": d.tier,
             "owner_team": d.owner_team,
             "event_time": self.tick_ms(now),

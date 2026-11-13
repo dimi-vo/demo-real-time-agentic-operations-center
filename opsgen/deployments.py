@@ -35,7 +35,6 @@ class DeploymentState:
     last_change: str
     desired_replicas: int
     ready_replicas: int
-    max_replicas: int
     tier: str
     owner_team: str
 
@@ -49,7 +48,6 @@ class DeploymentState:
             last_change=INITIAL,
             desired_replicas=service.ready_replicas,
             ready_replicas=service.ready_replicas,
-            max_replicas=service.max_replicas,
             tier=service.tier,
             owner_team=service.owner_team,
         )

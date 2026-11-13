@@ -32,7 +32,7 @@ from opsgen.services import SERVICES
 AXIS_SECONDS = 600
 WARMUP_SECONDS = 130
 REMEDIATION_RECENT_SECONDS = 120.0
-CLOSING_ACTIONS = ("ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM", "ESCALATE")
+CLOSING_ACTIONS = ("ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM")
 HEALTH_RETAIN_MARGIN = 60.0  # keep 60 s past the axis so a span straddling it stays whole
 
 
@@ -75,7 +75,6 @@ class ServiceState:
     version: str | None = None
     previous_version: str | None = None
     ready_replicas: int | None = None
-    max_replicas: int | None = None
     last_change: str | None = None
     deployed_at: float | None = None
     health: list[HealthRow] = field(default_factory=list)
@@ -91,10 +90,7 @@ class OpsWallState:
         self.warmup_seconds = warmup_seconds
         self._lock = threading.RLock()
         self._services: dict[str, ServiceState] = {
-            s.name: ServiceState(
-                name=s.name, tier=s.tier,
-                ready_replicas=s.ready_replicas, max_replicas=s.max_replicas,
-            )
+            s.name: ServiceState(name=s.name, tier=s.tier, ready_replicas=s.ready_replicas)
             for s in SERVICES
         }
         self._connection_errors: dict[str, dict] = {}  # topic -> {code, detail, ts}
@@ -110,7 +106,6 @@ class OpsWallState:
             s.version = record.get("version") or s.version
             s.previous_version = record.get("previous_version") or s.previous_version
             s.ready_replicas = record.get("ready_replicas") or s.ready_replicas
-            s.max_replicas = record.get("max_replicas") or s.max_replicas
             s.last_change = record.get("last_change") or s.last_change
             if record.get("deployed_at") is not None:
                 s.deployed_at = _to_seconds(record["deployed_at"])
@@ -275,7 +270,6 @@ class OpsWallState:
             "version": s.version,
             "previousVersion": s.previous_version,
             "replicas": s.ready_replicas,
-            "maxReplicas": s.max_replicas,
             "lastChange": s.last_change,
             "secondsSinceDeploy": seconds_since_deploy,
             "rateRps": rate,
@@ -380,7 +374,6 @@ def _status(s: ServiceState, health, actionable, now) -> tuple[str, str]:
             "ROLLBACK": f"Rolled back to v{d.target}" if d.target else "Rolled back",
             "SCALE_OUT": f"Scaled out to {d.target} replicas" if d.target else "Scaled out",
             "INVESTIGATE_UPSTREAM": "Traced to upstream",
-            "ESCALATE": "Escalated to on-call",
         }.get(d.action, "Remediated")
         return "remediated", label
     return "healthy", "Healthy"

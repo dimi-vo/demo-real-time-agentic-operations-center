@@ -706,7 +706,8 @@ happened, who answered, what to do — and read everything else from `service_he
   `Target Replicas` collapse into one free-text `target`; `Summary` and `Reasoning`
   collapse into one or two sentences; `Confidence` is dropped.
 - **One shared action vocabulary**: `ROLLBACK`, `SCALE_OUT`, `INVESTIGATE_UPSTREAM`,
-  `ESCALATE`, `OBSERVE` (`OBSERVE` replaces the brief's `WATCH`), plus `INVALID`. Each
+  `ESCALATE`, `OBSERVE` (`OBSERVE` replaces the brief's `WATCH`), plus `INVALID` (`ESCALATE`
+  later removed by D-043). Each
   prompt still offers only its own agent's subset, and each INSERT validates against that
   subset, so the two statements differ only in the agent, the filter and the list.
 - **The target is stored as the agent wrote it** (with `N/A` mapped to null). The SQL no
@@ -855,3 +856,38 @@ the `_deploy_fired`/`_start_fired` flags are gone), `opsgen/cli.py`, `opsgen/dri
 (`aligned_start` reuses `next_window_boundary`), and the tests. Dropping the duration
 draw changes the RNG sequence, so `--seed` schedules differ from earlier runs. The
 detector, request rates (D-030/D-031) and spacing are unchanged.
+
+### D-043 · DEVIATION · One answer per incident type: `ESCALATE` and `max_replicas` removed
+**What.** The brief puts `auth` at its replica ceiling (ready = max = 4) so a surge on
+`auth` expects `ESCALATE`, and gives the release agent `ESCALATE` for "latency is high but
+no recent deploy explains it". Both go, along with `max_replicas`.
+**Options.** (a) Keep `ESCALATE` and the ceiling; (b) raise `auth`'s ceiling so it never
+binds but keep the field and the rule; (c) remove the ceiling and `ESCALATE` everywhere.
+**Choice.** (c), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`). Every incident type now has exactly one correct
+answer, whatever the service:
+- `BAD_DEPLOY` → `ROLLBACK` (Target = the previous version) on any of the six services;
+- `TRAFFIC_SURGE` → `SCALE_OUT` (Target = Suggested Replicas) on `web-gateway`, `catalog`
+  and `auth`;
+- `UPSTREAM_DROP` → `INVESTIGATE_UPSTREAM` on `cart`, `checkout` and `payments`.
+The vocabulary is `ROLLBACK`, `SCALE_OUT`, `INVESTIGATE_UPSTREAM`, `OBSERVE`, plus
+`INVALID`. The release agent's framework is rule 1 `ROLLBACK` (unchanged conditions),
+rule 2 `OBSERVE` for everything else; its "never OBSERVE when Error Rate Breach is true"
+rule goes, since nothing else is left to pick. The capacity agent loses its `ESCALATE`
+rule and the "Ready Replicas is less than Max Replicas" condition on `SCALE_OUT`; its other
+rules keep their order and wording. Suggested Replicas is
+`GREATEST(ready + 1, CEIL(ready × count / expected))`, with no `LEAST(max_replicas, …)`.
+`OBSERVE` stays as the answer to a false alarm (detection on normal traffic).
+**Why.** The workshop's point is "anomaly → agent reacts → anomaly gone", and it is easier
+to follow when each incident has one concrete action. After D-042 a bad deploy degrades on
+its own tick, so the release agent's `ESCALATE` could only ever answer a false alarm; and
+the capacity agent's `ESCALATE` existed only for `auth`'s artificial ceiling. With no
+environment running, removing the field costs nothing to roll out.
+**Impact.** `max_replicas` is gone from `opsgen/` (`Service`, `DeploymentState`, the
+deployment record), `schemas/service_deployments.avsc`, `sql/source_service_deployments.sql`
+and its copy in `platform-team/modules/developer/statements.tf`, the 2.2–2.4 statements and
+`service_health`, `evaluate` (`HealthRow`, `suggested_replicas`) and the ops wall (state,
+Replicas tile). `ESCALATE` is gone from both prompts, both INSERTs, the
+`remediation_decisions` comment, `evaluate`, the ops wall (closer set, pin, legend, status
+label) and the mock (the `auth` scene; issue 06 rebuilds the rest). Environments must be
+recreated: `service_deployments` changes shape.

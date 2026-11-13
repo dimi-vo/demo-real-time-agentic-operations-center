@@ -21,7 +21,7 @@ SELECT
   CASE
     WHEN a.`agent_status` = 'SUCCESS'
       AND UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
-          IN ('ROLLBACK', 'ESCALATE', 'OBSERVE')
+          IN ('ROLLBACK', 'OBSERVE')
       THEN UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
     ELSE 'INVALID'
   END,

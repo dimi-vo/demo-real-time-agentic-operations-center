@@ -98,5 +98,5 @@ def test_ddl_parsed_expected_columns():
     assert len(reqs) == 9
     deps = _ddl_columns((ROOT / "sql/source_service_deployments.sql").read_text())
     assert deps["service_name"] == "string"
-    assert deps["max_replicas"] == "int"
-    assert len(deps) == 11
+    assert "max_replicas" not in deps  # D-043: no autoscaling ceiling
+    assert len(deps) == 10

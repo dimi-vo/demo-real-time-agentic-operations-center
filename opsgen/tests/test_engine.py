@@ -3,10 +3,13 @@
 import random
 from itertools import pairwise
 
+import pytest
+
 from opsgen.deployments import DeploymentState
 from opsgen.engine import (
     BAD_DEPLOY,
     CANDIDATES,
+    INCIDENT_TYPES,
     TRAFFIC_SURGE,
     UPSTREAM_DROP,
     Config,
@@ -164,12 +167,16 @@ def test_choose_incident_returns_none_when_all_in_cooldown():
     assert eng._choose_incident(now) is None
 
 
-def test_expected_action_escalate_on_auth_surge():
-    assert Engine._expected_action(TRAFFIC_SURGE, "auth") == "ESCALATE"
-    assert Engine._expected_action(TRAFFIC_SURGE, "web-gateway") == "SCALE_OUT"
-    assert Engine._expected_action(TRAFFIC_SURGE, "catalog") == "SCALE_OUT"
-    assert Engine._expected_action(UPSTREAM_DROP, "cart") == "INVESTIGATE_UPSTREAM"
-    assert Engine._expected_action(BAD_DEPLOY, "payments") == "ROLLBACK"
+ONE_ANSWER = {BAD_DEPLOY: "ROLLBACK", TRAFFIC_SURGE: "SCALE_OUT", UPSTREAM_DROP: "INVESTIGATE_UPSTREAM"}
+
+
+@pytest.mark.parametrize(("itype", "svc"), [(t, s) for t in INCIDENT_TYPES for s in CANDIDATES[t]])
+def test_every_incident_has_exactly_one_expected_action(itype, svc):
+    # D-043: the action depends on the type only. A surge on auth expects SCALE_OUT too.
+    eng = Engine(rng=random.Random(0), start=0.0, config=Config(quiet_period=0))
+    eng._choose_incident = lambda now: (itype, svc)
+    [inc] = _incidents(eng.tick(0.0, _deployments()))
+    assert (inc.type, inc.service_name, inc.expected_action) == (itype, svc, ONE_ANSWER[itype])
 
 
 def test_incident_candidates_match_spec():

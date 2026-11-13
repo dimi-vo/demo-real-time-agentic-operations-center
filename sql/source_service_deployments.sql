@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS `service_deployments` (
   `last_change` STRING COMMENT 'INITIAL, DEPLOY or ROLLBACK (SCALE is reserved for a later project)',
   `desired_replicas` INT COMMENT 'Desired replica count (equal to ready_replicas in this phase)',
   `ready_replicas` INT COMMENT 'Ready replica count (fixed per service in this phase)',
-  `max_replicas` INT COMMENT 'Autoscaling ceiling; tells the capacity agent whether scaling out is possible',
   `tier` STRING COMMENT 'CRITICAL or STANDARD',
   `owner_team` STRING COMMENT 'Team that owns the service',
   `event_time` TIMESTAMP(3) COMMENT 'Emit time of this state record (changes on every re-emit)',
