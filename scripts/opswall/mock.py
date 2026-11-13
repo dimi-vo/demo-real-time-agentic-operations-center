@@ -1,18 +1,21 @@
 """`uv run ops-wall --mock` — drive OpsWallState from a scripted incident sequence.
 
-Twelve minutes, seven scenes, no Kafka. Exists so every rendering path the live
-wall could show is visible on demand: the three actionable decisions, OBSERVE,
-INVALID, a missed detection, a false alarm, and the open-right-edge "still
-happening" state.
+Ten minutes, six scenes, no Kafka. Exists so every rendering path the live wall could
+show is visible on demand: ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM, OBSERVE on a
+false alarm, an INVALID answer, a missed incident, and the open-right-edge "still
+happening" state. The scenes follow the simulator's rules (D-042, D-043, D-047): every
+incident starts on a 10-second boundary and lasts 40 s, each incident type happens only
+on its candidate services, and each actionable decision is that type's one answer.
 
-Each scene has a start time, a service, an incident (or None, for a false
-alarm), the detection timing, and the decisions the agent would make. The
-driver converts these into the same record dicts the consumer would apply, then
-calls ``state.apply_*(...)``. On every pass the loop counter advances so
-incident ids stay unique across cycles (``INC-M<loop>-<n>``).
+Each scene has a start time, a service, an incident (or None, for a false alarm), the
+detection timing, and the decisions the agent would make. The driver converts these
+into the same record dicts the consumer would apply, then calls ``state.apply_*(...)``.
+A bad-deploy scene also deploys the next patch version at its start and rolls it back
+at its end, as ops-sim does. On every pass the loop counter advances so incident ids
+stay unique across cycles (``INC-M<loop>-<n>``).
 
-Pre-seeded deployments give every service a version and replica count up front;
-the dashboard tiles look lived-in from the first render.
+Pre-seeded deployments give every service its catalogue version and replica count up
+front; the dashboard tiles look lived-in from the first render.
 """
 
 from __future__ import annotations
@@ -20,24 +23,18 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from opsgen.services import SERVICES
+from opsgen.deployments import next_patch_version
+from opsgen.engine import EXPECTED_ACTION, TRIGGER, WINDOW_SECONDS
+from opsgen.services import SERVICES, SERVICES_BY_NAME
 from scripts.opswall.state import OpsWallState
 
-LOOP_SECONDS = 720  # 12 minutes
-DEGRADATION_SECONDS = 60
-POST_WINDOWS_AFTER_CLOSE = 3
-WINDOW_SECONDS = 10
+LOOP_SECONDS = 600  # 10 minutes
+DEGRADATION_SECONDS = 40  # D-042: every incident lasts 40 s, i.e. 4 whole windows
+WARMUP_SECONDS = 120
+# The agent's first decision lands after the first window closes: 10 s for the window,
+# 5 s of watermark, a few seconds for the model call.
+DECISION_DELAY = 18
 
-TRIGGER_OF_TYPE = {
-    "BAD_DEPLOY": "LATENCY_HIGH",
-    "TRAFFIC_SURGE": "TRAFFIC_HIGH",
-    "UPSTREAM_DROP": "TRAFFIC_LOW",
-}
-ACTION_OF_TYPE = {
-    "BAD_DEPLOY": "ROLLBACK",
-    "TRAFFIC_SURGE": "SCALE_OUT",
-    "UPSTREAM_DROP": "INVESTIGATE_UPSTREAM",
-}
 AGENT_OF_TRIGGER = {
     "LATENCY_HIGH": "release_agent",
     "TRAFFIC_HIGH": "capacity_agent",
@@ -47,7 +44,7 @@ AGENT_OF_TRIGGER = {
 
 @dataclass(frozen=True)
 class Decision:
-    at_offset: float   # seconds after detection_offset
+    at_offset: float   # seconds after the scene starts
     action: str
     target: str | None = None
     reason: str | None = None
@@ -58,73 +55,53 @@ class Scene:
     start_offset: float
     service: str
     incident_type: str | None       # None = false alarm (detection without ground truth)
-    detection_offset: float         # seconds after start_offset
-    detection_duration: float       # seconds the detector keeps flagging
+    detected_windows: int = 4       # anomalous windows flagged from the start; 0 = missed
     decisions: tuple[Decision, ...] = ()
-    omit_detection: bool = False    # True = missed (ground truth, no detection)
 
     @property
     def trigger(self) -> str:
         if self.incident_type:
-            return TRIGGER_OF_TYPE[self.incident_type]
+            return TRIGGER[self.incident_type]
         # false alarm: pretend latency HIGH on a healthy service
         return "LATENCY_HIGH"
 
 
-# The scenes (plan §9, minus the ESCALATE one since D-043), with substitutions where the
-# service list differs:
-#   "recommendations" → "catalog"   (catalog is the standard-tier stand-in)
-#   "search"          → "web-gateway" (used here for the false-alarm scene)
+def _first_decision(action: str, target: str | None = None) -> tuple[Decision, ...]:
+    return (Decision(at_offset=DECISION_DELAY, action=action, target=target),)
+
+
+# Six scenes, 80 s apart after the warm-up, each on a 10-second boundary (D-047).
 SCENES: tuple[Scene, ...] = (
-    # Everything starts after the 120 s warm-up so detector output and warm-up
-    # rows don't overlap for the same window.
-    Scene(  # ROLLBACK
+    Scene(  # ROLLBACK to the version before the bad deploy
         start_offset=140, service="checkout", incident_type="BAD_DEPLOY",
-        detection_offset=20, detection_duration=35,
-        decisions=(
-            Decision(at_offset=20, action="OBSERVE"),
-            Decision(at_offset=35, action="ROLLBACK", target="2.9.3"),
-        ),
+        decisions=_first_decision("ROLLBACK", SERVICES_BY_NAME["checkout"].initial_version),
     ),
-    Scene(  # SCALE_OUT
-        start_offset=220, service="cart", incident_type="TRAFFIC_SURGE",
-        detection_offset=20, detection_duration=35,
-        decisions=(
-            Decision(at_offset=20, action="OBSERVE"),
-            Decision(at_offset=35, action="SCALE_OUT", target="6"),
-        ),
+    Scene(  # SCALE_OUT: 3 times the traffic on 3 replicas -> 9 (the uncapped SQL formula)
+        start_offset=220, service="catalog", incident_type="TRAFFIC_SURGE",
+        decisions=_first_decision("SCALE_OUT", str(SERVICES_BY_NAME["catalog"].ready_replicas * 3)),
     ),
     Scene(  # INVESTIGATE_UPSTREAM
         start_offset=300, service="payments", incident_type="UPSTREAM_DROP",
-        detection_offset=15, detection_duration=25,
-        decisions=(Decision(at_offset=25, action="INVESTIGATE_UPSTREAM"),),
+        decisions=_first_decision("INVESTIGATE_UPSTREAM"),
     ),
-    Scene(  # resolved-without-action: only OBSERVE, span closes naturally
-        start_offset=460, service="catalog", incident_type="BAD_DEPLOY",
-        detection_offset=20, detection_duration=40,
-        decisions=(Decision(at_offset=20, action="OBSERVE"),),
+    Scene(  # false alarm (detection with no ground truth): OBSERVE is the right answer
+        start_offset=380, service="web-gateway", incident_type=None, detected_windows=2,
+        decisions=_first_decision("OBSERVE"),
     ),
-    Scene(  # false alarm (detection with no ground truth)
-        start_offset=540, service="web-gateway", incident_type=None,
-        detection_offset=0, detection_duration=20,
-        decisions=(Decision(at_offset=10, action="OBSERVE"),),
-    ),
-    Scene(  # INVALID decision (agent returned junk)
-        start_offset=600, service="cart", incident_type="TRAFFIC_SURGE",
-        detection_offset=15, detection_duration=30,
-        decisions=(Decision(at_offset=30, action="INVALID"),),
+    Scene(  # INVALID decision (agent returned junk); the span stays open until it ends
+        start_offset=460, service="cart", incident_type="UPSTREAM_DROP",
+        decisions=_first_decision("INVALID"),
     ),
     Scene(  # missed: ground truth, no detection
-        start_offset=670, service="payments", incident_type="BAD_DEPLOY",
-        detection_offset=0, detection_duration=0,
-        omit_detection=True,
+        start_offset=540, service="payments", incident_type="BAD_DEPLOY", detected_windows=0,
     ),
 )
 
-PRESEED_VERSIONS = {
-    "web-gateway": "3.4.2", "auth": "4.1.0", "catalog": "1.8.2",
-    "cart": "5.0.1", "checkout": "2.9.4", "payments": "1.3.2",
-}
+
+def aligned_start(now: float) -> float:
+    """The 10-second boundary at or before `now`: scene offsets are multiples of 10, so
+    every incident then starts and ends on a window edge, as in ops-sim."""
+    return float(_window_floor(now))
 
 
 @dataclass
@@ -140,15 +117,9 @@ class MockDriver:
     def seed_deployments(self) -> None:
         """Pre-seed each service so tiles have a version and replica count from tick 1."""
         for svc in SERVICES:
-            self.state.apply_deployment({
-                "service_name": svc.name,
-                "version": PRESEED_VERSIONS.get(svc.name, svc.initial_version),
-                "previous_version": None,
-                "deployed_at": int((self.start_wall - 3600) * 1000),
-                "last_change": "INITIAL",
-                "ready_replicas": svc.ready_replicas,
-                "tier": svc.tier,
-            })
+            self.state.apply_deployment(_deployment_record(
+                svc.name, svc.initial_version, None, self.start_wall - 3600, "INITIAL",
+            ))
 
     def tick(self, now: float) -> None:
         """Emit everything that should have landed by ``now``. Idempotent — the
@@ -168,8 +139,8 @@ class MockDriver:
                 continue
             base = self.start_wall + loop * self.loop_seconds
             effective_now = min(now, base + self.loop_seconds + 60)
-            self._emit_warmup_health(base, min(effective_now, base + 120))
-            self._emit_normal_health(base + 120, effective_now)
+            self._emit_warmup_health(base, min(effective_now, base + WARMUP_SECONDS))
+            self._emit_normal_health(base + WARMUP_SECONDS, effective_now)
             self._emit_loop(loop, base, effective_now)
 
     def _emit_loop(self, loop: int, base: float, now: float) -> None:
@@ -177,29 +148,27 @@ class MockDriver:
             inc_id = f"INC-M{loop}-{n:03d}"
             start_at = base + scene.start_offset
             end_at = start_at + DEGRADATION_SECONDS
-            det_start = start_at + scene.detection_offset
-            det_end = det_start + scene.detection_duration
             if scene.incident_type and start_at <= now:
                 if self._once(("inc_start", inc_id)):
+                    if scene.incident_type == "BAD_DEPLOY":
+                        self._deploy(scene.service, start_at)
                     self.state.apply_incident(_incident_start(
                         inc_id=inc_id, service=scene.service,
                         incident_type=scene.incident_type, started_at=start_at,
                         now=start_at,
                     ))
                 if end_at <= now and self._once(("inc_end", inc_id)):
+                    if scene.incident_type == "BAD_DEPLOY":
+                        self._rollback(scene.service, end_at)
                     self.state.apply_incident(_incident_end(
                         inc_id=inc_id, service=scene.service,
                         incident_type=scene.incident_type, started_at=start_at, ended_at=end_at,
                         now=end_at,
                     ))
-            if not scene.omit_detection:
-                self._emit_detection_health(
-                    scene=scene, loop=loop, base=base, now=now,
-                    det_start=det_start, det_end=det_end,
-                )
+            self._emit_detection_health(scene=scene, loop=loop, start_at=start_at, now=now)
             # Decisions come from the agent inside its invocation; emit when due.
             for i, d in enumerate(scene.decisions):
-                at = det_start + d.at_offset
+                at = start_at + d.at_offset
                 if at > now:
                     continue
                 dec_id = ("dec", inc_id, i)
@@ -207,21 +176,31 @@ class MockDriver:
                     self.state.apply_decision(_decision_record(
                         service=scene.service, trigger=scene.trigger,
                         action=d.action, target=d.target,
-                        window_end=_window_floor(det_start + d.at_offset),
+                        window_end=_window_floor(at),
                     ), kafka_ts=at)
 
-    def _emit_detection_health(self, scene: Scene, loop: int, base: float, now: float,
-                               det_start: float, det_end: float) -> None:
-        """Emit anomalous health rows every 10 s between det_start and det_end, then
-        a NORMAL row at det_end + 10 so the span closes if no actionable decision landed."""
+    def _deploy(self, service: str, now: float) -> None:
+        """A bad deploy: the next patch version goes live, as in ops-sim."""
+        good = SERVICES_BY_NAME[service].initial_version
+        self.state.apply_deployment(_deployment_record(service, next_patch_version(good), good, now, "DEPLOY"))
+
+    def _rollback(self, service: str, now: float) -> None:
+        """The end of a bad deploy: back to the catalogue version, as in ops-sim."""
+        good = SERVICES_BY_NAME[service].initial_version
+        self.state.apply_deployment(_deployment_record(service, good, next_patch_version(good), now, "ROLLBACK"))
+
+    def _emit_detection_health(self, scene: Scene, loop: int, start_at: float, now: float) -> None:
+        """Emit the scene's anomalous windows (the first `detected_windows` windows from
+        its start), then a NORMAL row after them so the span closes if no actionable
+        decision landed."""
+        if not scene.detected_windows:
+            return
         key = f"detw-{loop}-{scene.service}-{scene.start_offset}"
-        # Which 10 s window boundaries fall inside the detection span?
-        first = _window_ceil(det_start)
-        last = _window_ceil(det_end)
         trigger = scene.trigger
         is_latency = trigger == "LATENCY_HIGH"
         direction_hi = trigger == "TRAFFIC_HIGH"
-        for we in _windows_between(first, last):
+        last = start_at + scene.detected_windows * WINDOW_SECONDS
+        for we in _windows_between(start_at + WINDOW_SECONDS, last):
             if we > now:
                 return
             if self._once((key, we)):
@@ -296,6 +275,20 @@ def _windows_between(first: float, last: float, step: int = WINDOW_SECONDS):
         k += step
 
 
+def _deployment_record(service: str, version: str, previous: str | None, deployed_at: float,
+                       last_change: str) -> dict:
+    svc = SERVICES_BY_NAME[service]
+    return {
+        "service_name": service,
+        "version": version,
+        "previous_version": previous,
+        "deployed_at": int(deployed_at * 1000),
+        "last_change": last_change,
+        "ready_replicas": svc.ready_replicas,
+        "tier": svc.tier,
+    }
+
+
 def _incident_start(inc_id: str, service: str, incident_type: str,
                      started_at: float, now: float) -> dict:
     return {
@@ -305,8 +298,8 @@ def _incident_start(inc_id: str, service: str, incident_type: str,
         "incident_type": incident_type,
         "started_at": int(started_at * 1000),
         "ended_at": None,
-        "expected_trigger": TRIGGER_OF_TYPE[incident_type],
-        "expected_action": ACTION_OF_TYPE[incident_type],
+        "expected_trigger": TRIGGER[incident_type],
+        "expected_action": EXPECTED_ACTION[incident_type],
     }
 
 
@@ -348,7 +341,7 @@ def run_until_interrupt(state: OpsWallState, start_wall: float | None = None) ->
     """Advance the mock driver once a second until Ctrl-C."""
     import sys
 
-    start = start_wall if start_wall is not None else time.time()
+    start = start_wall if start_wall is not None else aligned_start(time.time())
     driver = MockDriver(state=state, start_wall=start)
     driver.seed_deployments()
     try:

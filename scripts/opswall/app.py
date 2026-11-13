@@ -61,9 +61,9 @@ def main() -> None:
     feeds: list[threading.Thread] = []
 
     if args.mock:
-        from scripts.opswall.mock import MockDriver
+        from scripts.opswall.mock import MockDriver, aligned_start
 
-        driver = MockDriver(state=state, start_wall=time.time())
+        driver = MockDriver(state=state, start_wall=aligned_start(time.time()))
         driver.seed_deployments()
 
         def pump():

@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
-from scripts.opswall.mock import LOOP_SECONDS, SCENES, advance_to, all_actions
+from opsgen.engine import CANDIDATES, EXPECTED_ACTION
+from scripts.opswall.mock import (
+    DEGRADATION_SECONDS,
+    LOOP_SECONDS,
+    SCENES,
+    WARMUP_SECONDS,
+    advance_to,
+    aligned_start,
+    all_actions,
+)
 from scripts.opswall.state import OpsWallState
 
 START = 1_800_000_000.0  # fixed wall-clock epoch so snapshots are deterministic
 
 
 def _run_full_loop():
-    """Drive one 12-minute loop at `now = start + LOOP_SECONDS + 10 s`
+    """Drive one 10-minute loop at `now = start + LOOP_SECONDS + 30 s`
     (tail buffer so the last scene's end record and decision land)."""
     st = OpsWallState()
     advance_to(st, start_wall=START, now=START + LOOP_SECONDS + 30)
@@ -17,8 +26,51 @@ def _run_full_loop():
 
 
 def test_catalogue_covers_every_rendering_path():
-    assert all_actions() >= {"ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM", "OBSERVE", "INVALID"}
-    assert "ESCALATE" not in all_actions()
+    assert all_actions() == {"ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM", "OBSERVE", "INVALID"}
+
+
+def test_observe_appears_only_on_the_false_alarm():
+    # D-047: OBSERVE is the right answer to a false alarm, never to a real incident.
+    observing = [sc for sc in SCENES if any(d.action == "OBSERVE" for d in sc.decisions)]
+    assert [sc.incident_type for sc in observing] == [None]
+
+
+def test_every_scene_follows_the_simulator_rules():
+    """D-043: each type happens only on its candidate services, and each actionable
+    decision is that type's one answer."""
+    for sc in SCENES:
+        if sc.incident_type is None:
+            continue
+        assert sc.service in CANDIDATES[sc.incident_type], sc
+        for d in sc.decisions:
+            if d.action not in ("OBSERVE", "INVALID"):
+                assert d.action == EXPECTED_ACTION[sc.incident_type], sc
+
+
+def test_every_incident_is_40_s_on_a_window_boundary_inside_the_loop():
+    assert DEGRADATION_SECONDS == 40
+    assert LOOP_SECONDS == 600
+    for sc in SCENES:
+        assert sc.start_offset % 10 == 0, sc
+        assert sc.start_offset >= WARMUP_SECONDS, sc
+        # the incident and its trailing NORMAL window both finish inside the loop
+        assert sc.start_offset + DEGRADATION_SECONDS + 10 < LOOP_SECONDS, sc
+    assert aligned_start(1_800_000_007.9) == 1_800_000_000.0
+
+
+def test_a_bad_deploy_scene_changes_the_version_and_rolls_it_back():
+    checkout = next(sc for sc in SCENES if sc.service == "checkout")
+    st = OpsWallState()
+
+    def tile(at):
+        advance_to(st, start_wall=START, now=START + at)
+        return next(s for s in st.snapshot(now=START + at)["services"] if s["name"] == "checkout")
+
+    assert tile(checkout.start_offset - 1)["version"] == "4.2.1"
+    during = tile(checkout.start_offset + 5)
+    assert (during["version"], during["previousVersion"], during["lastChange"]) == ("4.2.2", "4.2.1", "DEPLOY")
+    after = tile(checkout.start_offset + DEGRADATION_SECONDS + 1)
+    assert (after["version"], after["lastChange"]) == ("4.2.1", "ROLLBACK")
 
 
 def test_every_actionable_decision_appears_in_one_loop():
@@ -36,21 +88,21 @@ def test_every_incident_has_a_ground_truth_span():
 
 
 def test_missed_scene_has_truth_but_no_detection():
-    """Scene 7 (payments BAD_DEPLOY) is explicitly 'omit_detection'."""
+    """Scene 6 (payments BAD_DEPLOY) has no detected windows."""
     snap = _run_full_loop()
     payments = next(s for s in snap["services"] if s["name"] == "payments")
     # payments has an UPSTREAM_DROP earlier in the loop plus the missed BAD_DEPLOY,
     # so only check that at least one ground-truth span has no matching detection.
     detections = payments["detectedLatency"]
     bad_deploy_truths = [gt for gt in payments["groundTruth"] if gt["type"] == "BAD_DEPLOY"]
-    assert bad_deploy_truths, "scene 7 should be present"
+    assert bad_deploy_truths, "scene 6 should be present"
     overlapping = [gt for gt in bad_deploy_truths
                    if any(d["start"] <= gt["end"] and d["end"] >= gt["start"] for d in detections)]
     assert len(overlapping) < len(bad_deploy_truths), "at least one BAD_DEPLOY should be missed"
 
 
 def test_false_alarm_has_detection_but_no_truth():
-    """Scene 5 (web-gateway) has no ground truth; the detection stands alone."""
+    """Scene 4 (web-gateway) has no ground truth; the detection stands alone."""
     snap = _run_full_loop()
     web = next(s for s in snap["services"] if s["name"] == "web-gateway")
     assert web["detectedLatency"], "false alarm should produce a detection"
@@ -61,7 +113,8 @@ def test_rollback_closes_the_checkout_span_at_the_decision():
     snap = _run_full_loop()
     checkout = next(s for s in snap["services"] if s["name"] == "checkout")
     rollback = next((d for d in checkout["decisions"] if d["action"] == "ROLLBACK"), None)
-    assert rollback and rollback["target"] == "2.9.3"
+    # the target is checkout's real version before the bad deploy (D-047)
+    assert rollback and rollback["target"] == "4.2.1"
     # The latency span's end should be close to the rollback's `at`.
     span = checkout["detectedLatency"][0]
     assert abs(span["end"] - rollback["at"]) < 5

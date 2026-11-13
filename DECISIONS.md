@@ -971,3 +971,30 @@ counter; `scripts/reset.py` step 5 deletes only the state file; `scripts/evaluat
 and `scripts/evaluation/detection.py` (`incidents_from_records` replaces
 `load_incidents`; `Incident.from_record` reads the topic's `incident_type`). Supersedes
 D-038.
+
+### D-047 · DECISION · The ops-wall mock follows the simplified rules
+**What.** `uv run ops-wall --mock` scripted 8 scenes in a 12-minute loop, with 60 s
+incidents at arbitrary offsets, `OBSERVE` as a lead-in to real actions, an `ESCALATE`
+scene, a "resolved without action" scene, surges on `cart` (which can't surge in ops-sim)
+and starting versions shuffled between services (its `checkout` ran `payments`' 2.9.4).
+**Options.** (a) Leave the mock as a free-standing showcase; (b) make it obey the same
+rules as ops-sim.
+**Choice.** (b), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`). Six scenes, 80 s apart after the 120 s warm-up,
+in a 10-minute loop: `checkout` bad deploy → `ROLLBACK` to 4.2.1; `catalog` surge →
+`SCALE_OUT` to 9; `payments` drop → `INVESTIGATE_UPSTREAM`; `web-gateway` false alarm →
+`OBSERVE`; `cart` drop → `INVALID`; `payments` bad deploy, missed. Every incident starts
+on a 10-second boundary (the driver's start is aligned) and lasts 40 s; each detected
+incident flags its 4 windows (the false alarm 2); the first decision lands 18 s after the
+start, i.e. after the first window closes. Services start on their catalogue versions,
+and a bad-deploy scene deploys the next patch at its start and rolls it back at its end.
+The incident mapping comes from `opsgen.engine` (`TRIGGER`, `EXPECTED_ACTION`), not a copy.
+**Why.** The mock is what most people will see first; if it shows things the simulator
+never does (an `OBSERVE` before every fix, an anomaly that fades on its own), it teaches
+the wrong story. Note that the mock now shows the open loop honestly: the wall closes a
+detection at the agent's decision while the injected incident runs its full 40 s. That
+gap is what closing the loop (later) removes.
+**Impact.** `scripts/opswall/mock.py` (scenes, timing, versions, `aligned_start`; the
+unused `POST_WINDOWS_AFTER_CLOSE` and `PRESEED_VERSIONS` are gone), `scripts/opswall/app.py`
+(aligned start) and `tests/test_opswall_mock.py`, which now checks the mapping, the
+timing, `OBSERVE`-only-on-false-alarms and the deploy/rollback on the tile.
