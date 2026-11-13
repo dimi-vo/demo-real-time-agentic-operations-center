@@ -99,8 +99,6 @@ class Incident:
     degradation_end: float
     expected_trigger: str
     expected_action: str
-    bad_version: str | None = None
-    good_version: str | None = None
 
     def effect(self) -> Effect:
         if self.type == BAD_DEPLOY:
@@ -205,7 +203,6 @@ class Engine:
         # A BAD_DEPLOY's deploy and its degradation start on the same tick (D-042).
         if itype == BAD_DEPLOY:
             old, new = deployments[svc].deploy(now)
-            inc.good_version, inc.bad_version = old, new
             self.last_deploy_at[svc] = now
             events.append(Event("bad_deploy", now, svc, old, new, inc))
         events.append(Event("incident_start", now, svc, incident=inc))

@@ -83,8 +83,7 @@ def test_start_record_opens_span_end_record_closes_it():
                        "incident_type": "BAD_DEPLOY",
                        "event_time": int((NOW - 200) * 1000),
                        "started_at": int((NOW - 200) * 1000),
-                       "expected_trigger": "LATENCY_HIGH", "expected_action": "ROLLBACK",
-                       "good_version": "2.9.4"})
+                       "expected_trigger": "LATENCY_HIGH", "expected_action": "ROLLBACK"})
     s = _get(st, "checkout")
     assert len(s["groundTruth"]) == 1
     assert s["groundTruth"][0]["open"] is True

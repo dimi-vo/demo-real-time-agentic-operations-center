@@ -232,8 +232,6 @@ def _render(rep: DetectionReport, source: str, gt_path: Path, n_incidents: int, 
         }[r.status]
         if r.wrong_direction:
             result += " [red](wrong direction)[/red]"
-        if r.version_mismatches:
-            result += f" [red]({r.version_mismatches} version mismatches)[/red]"
         evidence = r.detected_row.describe(inc.expected_trigger) if r.detected_row else ""
         also = ", ".join(f"{sig}@{k}{' end' if end else ''}" for k, sig, end in r.other_signals)
         t.add_row(

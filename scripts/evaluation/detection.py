@@ -78,8 +78,9 @@ class HealthRow:
     version: str | None = None
     last_change: str | None = None
     seconds_since_deploy: int | None = None
-    # Read by the decision half (D-034): the agent's context lives here, not on the
-    # decision row.
+    # Read by the decision half (D-034, D-045): the agent's context lives here, not on
+    # the decision row, and the targets are checked against it.
+    previous_version: str | None = None
     ready_replicas: int | None = None
 
     @classmethod
@@ -105,6 +106,7 @@ class HealthRow:
             version=rec.get("version"),
             last_change=rec.get("last_change"),
             seconds_since_deploy=rec.get("seconds_since_deploy"),
+            previous_version=rec.get("previous_version"),
             ready_replicas=rec.get("ready_replicas"),
         )
 
@@ -148,8 +150,6 @@ class Incident:
     ended_at: float
     expected_trigger: str
     expected_action: str
-    bad_version: str | None = None
-    good_version: str | None = None
 
     @classmethod
     def from_record(cls, rec: dict) -> Incident:
@@ -161,8 +161,6 @@ class Incident:
             ended_at=epoch_seconds(rec["ended_at"]),
             expected_trigger=rec["expected_trigger"],
             expected_action=rec["expected_action"],
-            bad_version=rec.get("bad_version"),
-            good_version=rec.get("good_version"),
         )
 
     @property
@@ -215,7 +213,6 @@ class IncidentResult:
     span_rows: int = 0
     other_signals: list[tuple[int, str, bool]] = field(default_factory=list)  # (window, signal, at end)
     wrong_direction: bool = False
-    version_mismatches: int = 0
 
     @property
     def in_time(self) -> bool:
@@ -337,13 +334,6 @@ def score_incident(inc: Incident, service_rows: list[HealthRow]) -> IncidentResu
                     result.wrong_direction = True
     if result.first_window is not None:
         result.status = DETECTED if result.first_window <= DETECT_WITHIN_WINDOWS else LATE
-    if inc.bad_version and inc.good_version:
-        # Windows fully inside the incident ran the bad version; the window holding the
-        # rollback (at the effective end) ends on the good one (LAST_VALUE, D-011).
-        for r in span:
-            want = inc.good_version if inc.at_end(r) else inc.bad_version
-            if r.version != want:
-                result.version_mismatches += 1
     return result
 
 

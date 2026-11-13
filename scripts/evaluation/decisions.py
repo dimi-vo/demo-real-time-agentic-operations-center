@@ -25,9 +25,10 @@ are:
   The **headline** decision is the one on the earliest such window: the first
   recommendation the on-call team would see. It matches when its action equals the
   incident's `expected_action`.
-- **Target.** One free-text column (D-034). A `ROLLBACK` should name the incident's
-  `good_version`; a `SCALE_OUT` should carry the replica count the SQL computed
-  (recomputed here from the joined health row); any other action should carry none.
+- **Target.** One free-text column (D-034). Both targets are checked against the joined
+  `service_health` row, the input the agent answered (D-045): a `ROLLBACK` should name its
+  `previous_version`, a `SCALE_OUT` should carry the replica count the SQL computed
+  (recomputed here); any other action should carry none.
 - **Context.** The decision rows hold no metrics, so everything else is read from the
   `service_health` row with the same (service_name, window_end).
 - **Outside incidents.** Decisions on rows outside every incident span of their service.
@@ -157,13 +158,13 @@ def describe(d: DecisionRow, health: HealthRow | None) -> str:
     return body
 
 
-def check_target(d: DecisionRow, incident: Incident | None, health: HealthRow | None) -> bool | None:
+def check_target(d: DecisionRow, health: HealthRow | None) -> bool | None:
     """True when the target is right, False when wrong or where none belongs, None when
-    there is nothing to check."""
+    there is nothing to check. Judged against the health row the agent answered (D-045)."""
     if d.action == ROLLBACK:
-        if incident is None or incident.good_version is None:
+        if health is None or health.previous_version is None:
             return None if d.target else False
-        return d.target == incident.good_version
+        return d.target == health.previous_version
     if d.action == SCALE_OUT:
         if health is None:
             return None
@@ -275,7 +276,6 @@ def score_decisions(
     both = sorted(k for k, ds in by_window.items() if len({d.agent_name for d in ds}) > 1)
 
     per_incident = []
-    incident_of: dict[int, Incident] = {}
     claimed: set[int] = set()
     for inc in incidents:
         item = IncidentDecisions(inc)
@@ -283,15 +283,12 @@ def score_decisions(
             if d.service_name == inc.service_name and inc.in_span_at(d.window_end):
                 item.decisions.append(d)
                 claimed.add(id(d))
-                incident_of[id(d)] = inc
         if item.headline is not None:
-            item.target_ok = check_target(item.headline, inc, health.get(item.headline.key))
+            item.target_ok = check_target(item.headline, health.get(item.headline.key))
         per_incident.append(item)
     outside = [d for d in scoped if id(d) not in claimed]
 
-    bad_targets = [
-        d for d in scoped if check_target(d, incident_of.get(id(d)), health.get(d.key)) is False
-    ]
+    bad_targets = [d for d in scoped if check_target(d, health.get(d.key)) is False]
 
     coverage = _coverage(scoped, health_rows, by_window, range_to)
     return DecisionReport(

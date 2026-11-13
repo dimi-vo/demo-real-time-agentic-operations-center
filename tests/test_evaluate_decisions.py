@@ -17,13 +17,13 @@ from scripts.evaluation.detection import HealthRow, Incident
 T0 = 1_800_000_000.0  # a 10-second boundary
 
 
-def _row(service, k, lat="NORMAL", trf="NORMAL", version="1.0.0", ssd=600):
+def _row(service, k, lat="NORMAL", trf="NORMAL", version="1.0.1", prev="1.0.0", ssd=600):
     return HealthRow(
         service_name=service, window_start=T0 + 10 * k, window_end=T0 + 10 * k + 10,
         latency_status=lat, traffic_status=trf, avg_latency_ms=100.0, expected_latency_ms=50.0,
         latency_upper_bound=70.0, request_count=30, expected_request_count=10.0,
         traffic_lower_bound=5.0, traffic_upper_bound=15.0, version=version, seconds_since_deploy=ssd,
-        last_change="DEPLOY", ready_replicas=3,
+        last_change="DEPLOY", previous_version=prev, ready_replicas=3,
     )  # fmt: skip
 
 
@@ -147,7 +147,7 @@ def test_a_decision_on_a_normal_row_is_unexpected():
 
 def test_the_headline_decision_is_the_one_on_the_first_window_of_the_span():
     rows = _series("cart", 60, {40: {"lat": "HIGH"}, 41: {"lat": "HIGH"}})
-    inc = _inc("cart", 40, duration=50, good_version="1.0.0", bad_version="1.0.1")
+    inc = _inc("cart", 40, duration=50)
     decisions = [
         _dec("cart", 41, action=OBSERVE),  # later window, listed first
         _dec("cart", 40, action=ROLLBACK, target="1.0.0"),
@@ -160,9 +160,24 @@ def test_the_headline_decision_is_the_one_on_the_first_window_of_the_span():
 
 def test_a_rollback_naming_the_wrong_version_fails_the_target_check():
     rows = _series("cart", 60, {40: {"lat": "HIGH"}})
-    inc = _inc("cart", 40, good_version="1.0.0", bad_version="1.0.1")
+    inc = _inc("cart", 40)
     item = _score([_dec("cart", 40, target="9.9.9")], rows, [inc]).incidents[0]
     assert item.matched and item.target_ok is False
+
+
+def test_a_rollback_target_is_judged_against_the_health_row_it_answered():
+    """D-045: the right target is the Previous Version the agent was given, read from the
+    service_health row with the decision's (service_name, window_end); no ground truth."""
+    rows = _series("cart", 60, {40: {"lat": "HIGH", "version": "2.0.5", "prev": "2.0.4"}})
+    right = _score([_dec("cart", 40, target="2.0.4")], rows, [])
+    assert right.bad_targets == []
+    wrong = _score([_dec("cart", 40, target="1.0.0")], rows, [])
+    assert len(wrong.bad_targets) == 1
+    # no health row (or no previous version): nothing to check, unless the target is missing
+    assert _score([_dec("cart", 99, target="2.0.4")], rows, []).bad_targets == []
+    assert len(_score([_dec("cart", 99)], rows, []).bad_targets) == 1
+    no_prev = _series("cart", 60, {40: {"lat": "HIGH", "prev": None}})
+    assert _score([_dec("cart", 40, target="2.0.4")], no_prev, []).bad_targets == []
 
 
 def test_a_scale_out_must_carry_the_replica_count_the_sql_computed():
@@ -232,7 +247,7 @@ def test_from_record_parses_a_remediation_decisions_row():
 def test_a_target_on_an_action_that_needs_none_is_flagged():
     """D-034: the SQL stores whatever the agent wrote, so a contradiction is visible."""
     rows = _series("cart", 60, {40: {"lat": "HIGH"}})
-    inc = _inc("cart", 40, good_version="1.0.0")
+    inc = _inc("cart", 40)
     rep = _score([_dec("cart", 40, action=OBSERVE, target="1.0.0")], rows, [inc])
     assert len(rep.bad_targets) == 1
     assert rep.incidents[0].target_ok is False

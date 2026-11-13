@@ -118,11 +118,10 @@ resource "confluent_flink_statement" "create_service_incidents_table" {
       `incident_id` STRING COMMENT 'Stable id for this incident across its start and end records',
       `service_name` STRING COMMENT 'Service the incident affects (foreign key to service_deployments)',
       `incident_type` STRING COMMENT 'BAD_DEPLOY, TRAFFIC_SURGE or UPSTREAM_DROP',
-      `started_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation actually began (not the deploy or trigger moment)',
+      `started_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation began (for BAD_DEPLOY, the same tick as the deploy)',
       `ended_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation ended; NULL on the start record, set on the end record',
       `expected_trigger` STRING COMMENT 'What service_health should flag: LATENCY_HIGH, TRAFFIC_HIGH or TRAFFIC_LOW',
       `expected_action` STRING COMMENT 'What the agent should pick: ROLLBACK, SCALE_OUT or INVESTIGATE_UPSTREAM',
-      `good_version` STRING COMMENT 'For BAD_DEPLOY, the version a ROLLBACK should target; NULL otherwise',
       WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
     )
     DISTRIBUTED BY HASH(`service_name`) INTO 1 BUCKETS

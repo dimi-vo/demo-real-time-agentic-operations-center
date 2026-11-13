@@ -301,7 +301,7 @@ the fresh-start measurement. `--dump`/`--rows` save and re-score a run offline;
   containing `started_at` is window 1; *detected in time* = expected trigger in window
   1–3, *late* after that, else *missed*; an opposite traffic signal is flagged as wrong
   direction; for `BAD_DEPLOY`, rows are also checked to carry `bad_version` (and the
-  rollback window `good_version`);
+  rollback window `good_version`) — check removed by D-045;
 - *false positive*: any signal outside every incident span of its service, tagged *echo*
   (within 60 s after an incident ended) or *after deploy* (deploy < 60 s earlier);
 - *fresh start*: signals in the first 5 minutes after each service's first window, outside
@@ -640,8 +640,9 @@ decision on its first anomalous window, and report the rest as context.
 - **Per incident**: the **headline** decision is the one on the earliest window of the
   span — the first recommendation the on-call team would see — and it matches when its
   action equals the incident's `expected_action`. A `ROLLBACK` must name the incident's
-  `good_version`; a `SCALE_OUT` must carry the replica count the SQL computed (recomputed
-  in Python from the row's stored context). Later windows are reported as an action mix,
+  `good_version` (since D-045: the health row's `previous_version`); a `SCALE_OUT` must
+  carry the replica count the SQL computed (recomputed in Python from the row's stored
+  context). Later windows are reported as an action mix,
   and a late match is marked, not counted.
 **Why.** An incident spans several windows and AR(1) keeps it flagged for most of them
 (D-029), so counting rows would weight long incidents more heavily and hide what matters:
@@ -771,7 +772,7 @@ not just the `incidents.jsonl` file. One record at `degradation_start` (`ended_a
 and one at `degradation_end` (both timestamps set), tied by `incident_id`. Append-only,
 keyed by `service_name`, 9 columns: `event_time`, `incident_id`, `service_name`,
 `incident_type`, `started_at`, `ended_at`, `expected_trigger`, `expected_action`,
-`good_version`.
+`good_version` (8 columns since D-045 removed `good_version`).
 **Options.** (a) Platform-team Terraform resource, same shape as `service_requests` /
 `service_deployments`; (b) attendee creates the topic in the workshop; (c) generator
 creates the topic over the admin API.
@@ -908,3 +909,31 @@ to something they will see later.
 `sql/2.3_anomaly_detection.sql`, `sql/2.3_anomaly_status.sql`,
 `sql/2.4_service_health.sql` (and so the `service_health` schema), and
 `tests/test_sql_pipeline.py`, which now guards against either column coming back.
+
+### D-045 · DECISION · No versions in the ground truth; `ROLLBACK` targets scored against `service_health`
+**What.** The ground truth carried `good_version` (topic and file) and `bad_version`
+(file only). Three things used them: `evaluate` checked a `ROLLBACK` target against
+`good_version`; `evaluate`'s version-mismatch check compared each incident window's
+`version` with `bad_version`/`good_version`; the ops wall stored `good_version` and never
+showed it. The agent never sees either — it reads `Previous Version` from `service_health`.
+**Options.** (a) Add `bad_version` to the topic so `evaluate` can switch to it (D-046);
+(b) drop the version-mismatch check and judge `ROLLBACK` targets against the health row
+the agent answered; (c) derive `bad_version` from `good_version` + 1 patch in `evaluate`.
+**Choice.** (b), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`). A `ROLLBACK` is right when its target equals the
+`previous_version` of the `service_health` row with the decision's `(service_name,
+window_end)` — the same row `SCALE_OUT` targets are already checked against — and
+unscorable when there is no such row or no previous version (a missing target is still
+wrong). The ground truth keeps only: incident id, type, service, start, end, expected
+trigger, expected action.
+**Why.** Less to carry and nothing lost: the target check now asks "did the agent use the
+Previous Version it was given", and `sql/checks/temporal_join_attribution.sql` already
+checks version attribution per request, more strictly than the per-window check did.
+**Impact.** `good_version` is gone from `schemas/service_incidents.avsc`,
+`sql/source_service_incidents.sql` and its copy in `platform-team/…/statements.tf`
+(environments must be recreated), `opsgen/groundtruth.py`, `opsgen/engine.Incident` (the
+console log already uses `Event.old_version`/`new_version`), the ops-wall state and the
+mock. `bad_version` is gone from `incidents.jsonl`. `evaluate`: `HealthRow` gains
+`previous_version`; `check_target` loses its incident argument; `Incident` loses both
+versions; `IncidentResult.version_mismatches` and its report column are gone.
+`scripts/tuning/sweep.py` builds `Incident` without them. Amends D-021, D-032 and D-037.

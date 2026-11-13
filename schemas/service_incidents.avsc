@@ -11,7 +11,6 @@
     {"name": "started_at", "type": ["null", {"type": "long", "logicalType": "local-timestamp-millis"}], "default": null},
     {"name": "ended_at", "type": ["null", {"type": "long", "logicalType": "local-timestamp-millis"}], "default": null},
     {"name": "expected_trigger", "type": ["null", "string"], "default": null},
-    {"name": "expected_action", "type": ["null", "string"], "default": null},
-    {"name": "good_version", "type": ["null", "string"], "default": null}
+    {"name": "expected_action", "type": ["null", "string"], "default": null}
   ]
 }

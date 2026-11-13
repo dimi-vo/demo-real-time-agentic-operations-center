@@ -101,9 +101,10 @@ def test_bad_deploy_lifecycle_and_rollback():
         ("incident_end", bad.degradation_end),
     ]
     deploy, _, end = mine
-    assert (deploy.old_version, deploy.new_version) == (bad.good_version, bad.bad_version)
-    # the end rolls the bad version back to the good one
-    assert (end.old_version, end.new_version) == (bad.bad_version, bad.good_version)
+    good, broken = deploy.old_version, deploy.new_version
+    assert good is not None and broken is not None and good != broken
+    # the end rolls the broken version back to the good one
+    assert (end.old_version, end.new_version) == (broken, good)
 
 
 def test_every_incident_is_40_s_on_window_boundaries():

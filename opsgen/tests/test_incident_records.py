@@ -11,7 +11,7 @@ _TRIGGER = {BAD_DEPLOY: "LATENCY_HIGH", TRAFFIC_SURGE: "TRAFFIC_HIGH", UPSTREAM_
 _ACTION = {BAD_DEPLOY: "ROLLBACK", TRAFFIC_SURGE: "SCALE_OUT", UPSTREAM_DROP: "INVESTIGATE_UPSTREAM"}
 
 
-def _inc(itype=BAD_DEPLOY, good="1.0.0", bad="1.0.1"):
+def _inc(itype=BAD_DEPLOY):
     return Incident(
         incident_id="INC0007",
         type=itype,
@@ -20,8 +20,6 @@ def _inc(itype=BAD_DEPLOY, good="1.0.0", bad="1.0.1"):
         degradation_end=1070.0,
         expected_trigger=_TRIGGER[itype],
         expected_action=_ACTION[itype],
-        bad_version=bad if itype == BAD_DEPLOY else None,
-        good_version=good if itype == BAD_DEPLOY else None,
     )
 
 
@@ -35,7 +33,6 @@ def test_start_record_has_null_end_and_both_ids():
     assert r["ended_at"] is None
     assert r["expected_trigger"] == "LATENCY_HIGH"
     assert r["expected_action"] == "ROLLBACK"
-    assert r["good_version"] == "1.0.0"
     assert r["event_time"] == 1_010_500
 
 
@@ -46,10 +43,12 @@ def test_end_record_carries_both_timestamps():
     assert r["event_time"] == 1_070_000
 
 
-def test_good_version_only_set_for_bad_deploy():
-    assert end_record(_inc(TRAFFIC_SURGE), now=1070.0)["good_version"] is None
-    assert end_record(_inc(UPSTREAM_DROP), now=1070.0)["good_version"] is None
-    assert end_record(_inc(BAD_DEPLOY), now=1070.0)["good_version"] == "1.0.0"
+def test_ground_truth_carries_no_versions():
+    # D-045: a ROLLBACK target is judged against service_health, so the answer key
+    # holds only what happened and what the right action is.
+    for itype in (BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP):
+        for rec in (start_record(_inc(itype), now=1010.0), end_record(_inc(itype), now=1070.0)):
+            assert not any("version" in key for key in rec)
 
 
 def test_schema_fields_match_the_avsc():

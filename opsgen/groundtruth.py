@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from opsgen.engine import BAD_DEPLOY, Incident
+from opsgen.engine import Incident
 
 INCIDENTS_FILENAME = "incidents.jsonl"
 
@@ -27,7 +27,7 @@ def _iso(epoch_seconds: float) -> str:
 
 
 def incident_record(inc: Incident) -> dict:
-    rec = {
+    return {
         "incident_id": inc.incident_id,
         "type": inc.type,
         "service_name": inc.service_name,
@@ -36,10 +36,6 @@ def incident_record(inc: Incident) -> dict:
         "expected_trigger": inc.expected_trigger,
         "expected_action": inc.expected_action,
     }
-    if inc.type == BAD_DEPLOY:
-        rec["bad_version"] = inc.bad_version
-        rec["good_version"] = inc.good_version
-    return rec
 
 
 def _epoch_millis(seconds: float) -> int:
@@ -60,7 +56,6 @@ def start_record(inc: Incident, now: float) -> dict:
         "ended_at": None,
         "expected_trigger": inc.expected_trigger,
         "expected_action": inc.expected_action,
-        "good_version": inc.good_version if inc.type == BAD_DEPLOY else None,
     }
 
 
@@ -76,7 +71,6 @@ def end_record(inc: Incident, now: float) -> dict:
         "ended_at": _epoch_millis(inc.degradation_end),
         "expected_trigger": inc.expected_trigger,
         "expected_action": inc.expected_action,
-        "good_version": inc.good_version if inc.type == BAD_DEPLOY else None,
     }
 
 

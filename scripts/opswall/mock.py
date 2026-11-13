@@ -61,7 +61,6 @@ class Scene:
     detection_offset: float         # seconds after start_offset
     detection_duration: float       # seconds the detector keeps flagging
     decisions: tuple[Decision, ...] = ()
-    good_version: str | None = None
     omit_detection: bool = False    # True = missed (ground truth, no detection)
 
     @property
@@ -86,7 +85,6 @@ SCENES: tuple[Scene, ...] = (
             Decision(at_offset=20, action="OBSERVE"),
             Decision(at_offset=35, action="ROLLBACK", target="2.9.3"),
         ),
-        good_version="2.9.3",
     ),
     Scene(  # SCALE_OUT
         start_offset=220, service="cart", incident_type="TRAFFIC_SURGE",
@@ -105,7 +103,6 @@ SCENES: tuple[Scene, ...] = (
         start_offset=460, service="catalog", incident_type="BAD_DEPLOY",
         detection_offset=20, detection_duration=40,
         decisions=(Decision(at_offset=20, action="OBSERVE"),),
-        good_version="1.8.1",
     ),
     Scene(  # false alarm (detection with no ground truth)
         start_offset=540, service="web-gateway", incident_type=None,
@@ -120,7 +117,7 @@ SCENES: tuple[Scene, ...] = (
     Scene(  # missed: ground truth, no detection
         start_offset=670, service="payments", incident_type="BAD_DEPLOY",
         detection_offset=0, detection_duration=0,
-        omit_detection=True, good_version="1.3.1",
+        omit_detection=True,
     ),
 )
 
@@ -187,13 +184,13 @@ class MockDriver:
                     self.state.apply_incident(_incident_start(
                         inc_id=inc_id, service=scene.service,
                         incident_type=scene.incident_type, started_at=start_at,
-                        now=start_at, good_version=scene.good_version,
+                        now=start_at,
                     ))
                 if end_at <= now and self._once(("inc_end", inc_id)):
                     self.state.apply_incident(_incident_end(
                         inc_id=inc_id, service=scene.service,
                         incident_type=scene.incident_type, started_at=start_at, ended_at=end_at,
-                        now=end_at, good_version=scene.good_version,
+                        now=end_at,
                     ))
             if not scene.omit_detection:
                 self._emit_detection_health(
@@ -300,7 +297,7 @@ def _windows_between(first: float, last: float, step: int = WINDOW_SECONDS):
 
 
 def _incident_start(inc_id: str, service: str, incident_type: str,
-                     started_at: float, now: float, good_version: str | None) -> dict:
+                     started_at: float, now: float) -> dict:
     return {
         "event_time": int(now * 1000),
         "incident_id": inc_id,
@@ -310,14 +307,12 @@ def _incident_start(inc_id: str, service: str, incident_type: str,
         "ended_at": None,
         "expected_trigger": TRIGGER_OF_TYPE[incident_type],
         "expected_action": ACTION_OF_TYPE[incident_type],
-        "good_version": good_version if incident_type == "BAD_DEPLOY" else None,
     }
 
 
 def _incident_end(inc_id: str, service: str, incident_type: str,
-                   started_at: float, ended_at: float, now: float,
-                   good_version: str | None) -> dict:
-    rec = _incident_start(inc_id, service, incident_type, started_at, now, good_version)
+                   started_at: float, ended_at: float, now: float) -> dict:
+    rec = _incident_start(inc_id, service, incident_type, started_at, now)
     rec["ended_at"] = int(ended_at * 1000)
     rec["event_time"] = int(ended_at * 1000)
     return rec

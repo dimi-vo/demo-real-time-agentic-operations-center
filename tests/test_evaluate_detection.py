@@ -118,16 +118,6 @@ def test_duplicates_and_gaps():
     assert (s.gaps, s.missing_windows) == (1, 5)
 
 
-def test_bad_deploy_version_check_uses_last_value_semantics():
-    # incident windows 40-44 run 1.0.1; window 45 holds the rollback (ends on 1.0.0)
-    versions = {k: {"version": "1.0.1", "lat": "HIGH" if k == 40 else "NORMAL"} for k in range(40, 45)}
-    rows = _series("payments", 60, versions)
-    inc = _inc("payments", 40, 0, 52, bad_version="1.0.1", good_version="1.0.0")
-    assert _score(rows, [inc]).incidents[0].version_mismatches == 0
-    rows_wrong = _series("payments", 60, {**versions, 45: {"version": "1.0.1"}})
-    assert _score(rows_wrong, [inc]).incidents[0].version_mismatches == 1
-
-
 def test_incidents_scored_only_when_they_start_in_range():
     inc = _inc("cart", 40, 0, 50)
     assert score(_series("cart", 60), [inc], T0 + 1000, T0 + 2000).incidents == []
@@ -174,13 +164,13 @@ def test_load_incidents_reads_what_the_generator_writes(tmp_path):
     gen = GenIncident(
         incident_id="inc-0001", type=BAD_DEPLOY, service_name="catalog",
         degradation_start=T0, degradation_end=T0 + 55, expected_trigger="LATENCY_HIGH",
-        expected_action="ROLLBACK", bad_version="5.0.4", good_version="5.0.3",
+        expected_action="ROLLBACK",
     )  # fmt: skip
     path = tmp_path / "incidents.jsonl"
     append_incident(path, gen)
     [inc] = load_incidents(path)
     assert (inc.started_at, inc.ended_at) == (T0, T0 + 55)
-    assert (inc.bad_version, inc.good_version, inc.expected_trigger) == ("5.0.4", "5.0.3", "LATENCY_HIGH")
+    assert (inc.type, inc.expected_trigger, inc.expected_action) == ("BAD_DEPLOY", "LATENCY_HIGH", "ROLLBACK")
 
 
 def test_opposite_signal_in_the_end_window_is_an_echo_not_wrong_direction():
@@ -203,16 +193,11 @@ def test_rollback_window_found_with_a_fractional_ended_at():
     # INC0007 shape: started on a tick at :x9.32, logged ended_at 50.5 s later at :x9.84,
     # the ROLLBACK really fires at the :x0.32 tick, i.e. in the following window.
     start = T0 + 9.32
-    inc = Incident("i", "BAD_DEPLOY", "auth", start, start + 50.5, "LATENCY_HIGH", "ROLLBACK", "2.1.10", "2.1.9")
-    rows = [_row("auth", k, version="2.1.10" if 1 <= k <= 5 else "2.1.9") for k in range(10)]
-    rows[0] = _row("auth", 0, version="2.1.10")  # the deploy itself, 10 s before onset
-    assert score_incident_versions(rows, inc) == 0
-
-
-def score_incident_versions(rows, inc):
-    from scripts.evaluation.detection import score_incident
-
-    return score_incident(inc, rows).version_mismatches
+    inc = Incident("i", "BAD_DEPLOY", "auth", start, start + 50.5, "LATENCY_HIGH", "ROLLBACK")
+    rows = [_row("auth", k) for k in range(10)]
+    span = [k for k, r in enumerate(rows) if inc.in_span(r)]
+    assert span == [0, 1, 2, 3, 4, 5, 6]
+    assert [k for k in span if inc.at_end(rows[k])] == [6]
 
 
 def test_signals_next_to_a_data_gap_are_restart_artifacts():

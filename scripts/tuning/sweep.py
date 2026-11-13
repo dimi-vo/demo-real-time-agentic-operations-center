@@ -122,7 +122,7 @@ def simulate(data: DataConfig, seed: int, hours: float) -> tuple[list[HealthRow]
                 inc = ev.incident
                 incidents.append(
                     Incident(inc.incident_id, inc.type, inc.service_name, inc.degradation_start, inc.degradation_end,
-                             inc.expected_trigger, inc.expected_action, inc.bad_version, inc.good_version)
+                             inc.expected_trigger, inc.expected_action)
                 )  # fmt: skip
     rows = []
     for (name, w), (count, lat_sum, errs) in sorted(agg.items(), key=lambda kv: (kv[0][0], kv[0][1])):

@@ -54,7 +54,6 @@ class IncidentEvent:
     ended_at: float | None
     expected_trigger: str
     expected_action: str
-    good_version: str | None
 
 
 @dataclass
@@ -173,7 +172,6 @@ class OpsWallState:
                 ended_at=_to_seconds(record.get("ended_at")),
                 expected_trigger=record.get("expected_trigger") or "",
                 expected_action=record.get("expected_action") or "",
-                good_version=record.get("good_version"),
             )
             for i, prior in enumerate(s.incidents):
                 if prior.incident_id == iid:
