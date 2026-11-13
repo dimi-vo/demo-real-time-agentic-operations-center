@@ -26,6 +26,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from opsgen.services import SERVICES
 
@@ -287,9 +288,15 @@ class OpsWallState:
 # ---- helpers ------------------------------------------------------------------
 
 def _to_seconds(value) -> float | None:
-    """Accept epoch ms (int, as Kafka payloads carry) or seconds (float)."""
+    """Epoch seconds from what a record carries: a `datetime` (what the Avro decoder makes
+    of Flink's TIMESTAMP(3), registered as local-timestamp-millis; naive values are UTC
+    wall-clock here, D-048), epoch ms (int) or seconds (float, as the mock passes)."""
     if value is None:
         return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
     if isinstance(value, (int, float)):
         v = float(value)
         return v / 1000.0 if v > 1e12 else v

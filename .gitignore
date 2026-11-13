@@ -170,6 +170,8 @@ tests/*
 !tests/__init__.py
 !tests/conftest.py
 !tests/test_*.py
+# Data fixtures for the tests (D-048). The credential rules below still apply inside.
+!tests/fixtures/
 # Credential fixtures stay out regardless of where they sit in the tree.
 tests/**/*.env
 tests/**/credentials*

@@ -998,3 +998,31 @@ gap is what closing the loop (later) removes.
 unused `POST_WINDOWS_AFTER_CLOSE` and `PRESEED_VERSIONS` are gone), `scripts/opswall/app.py`
 (aligned start) and `tests/test_opswall_mock.py`, which now checks the mapping, the
 timing, `OBSERVE`-only-on-false-alarms and the deploy/rollback on the tile.
+
+### D-048 · DECISION · The live ops wall decodes records the way Kafka delivers them
+**What.** Read in the simplify-simulator session and reproduced offline: the live ops
+wall would drop most of what it reads. (1) The Avro decoder turns Flink's `TIMESTAMP(3)`
+columns (registered as `local-timestamp-millis`, D-027) into naive `datetime`s, and
+`OpsWallState._to_seconds` returned `None` for them — so every `service_health` row was
+discarded (no sparklines, statuses or detection spans) and incident start times fell back
+to 0.0. (2) `service_deployments` values carry no `service_name` (it is only in the key,
+D-027), the consumer decoded only the value, and `apply_deployment` returned at once — so
+tiles never showed the live version or a rollback. The mock and the tests fed the state
+plain dicts with epoch milliseconds and a `service_name`, so neither path was exercised.
+A third suspicion — decisions overwriting each other — was ruled out by running it.
+**Evidence.** The Phase 4 dumps read from Confluent Cloud hold the timestamps as the ISO
+text `jsonable` writes only for `datetime`s; D-027 checked the deployments schemas against
+the live Schema Registry; an Avro round trip through the real serializer/deserializer
+pair reproduced both drops.
+**Options.** For (2): (a) decode the key in the consumer and merge it into the record;
+(b) change the source DDL so the key is also written into the value.
+**Choice.** (a), decided with the user: local to the ops wall, no schema or attendee-facing
+change, testable offline. For (1), `_to_seconds` reads a naive `datetime` as UTC
+wall-clock (the same rule as `topic_reader.epoch_seconds`).
+**Impact.** `scripts/opswall/state.py` (`_to_seconds`), `scripts/opswall/consumer.py`
+(`make_deserializer`, `decode_record`; only `service_deployments` decodes its key), and
+`tests/test_opswall_ingest.py` with `tests/fixtures/opswall/` — real `service_health` and
+`remediation_decisions` rows from the Phase 4 run (the payments bad deploy, minus the
+columns D-043/D-044 dropped), plus deployments and incidents through the real Avro pair in
+an in-memory Schema Registry. `.gitignore` now admits `tests/fixtures/` (credential
+patterns still excluded). Still to confirm in a live run against a recreated environment.

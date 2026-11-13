@@ -8,7 +8,10 @@ The dashboard reads four topics with the keys on the attendee's credential card:
 Each topic gets one thread with a dedicated consumer group id (so partitions
 aren't shared across threads and nothing is ever committed; we always tail).
 Avro deserialization is per-topic, driven off the Schema Registry's latest
-version for each ``*-value`` subject. A missing topic is NOT fatal — it stays
+version for each subject. ``service_deployments`` also decodes its key and merges
+``service_name`` into the record, because Flink keeps the primary key out of the
+value (D-027, D-048). Timestamps arrive as ``datetime``s; OpsWallState converts
+them. A missing topic is NOT fatal — it stays
 silent until Flink registers it; the connection banner on the page surfaces the
 reason so an empty wall never leaves the attendee guessing.
 """
@@ -115,6 +118,35 @@ def _assign_from_earliest(consumer: Consumer, topic: str) -> bool:
     return True
 
 
+def make_deserializer(sr: SchemaRegistryClient) -> AvroDeserializer:
+    # schema_str=None + use.latest.version=True resolves the registered schema per
+    # subject, same pattern as opsgen/kafka_io.py on the produce side.
+    return AvroDeserializer(sr, schema_str=None, conf={"use.latest.version": True})
+
+
+def decode_record(
+    value: bytes,
+    key: bytes | None,
+    topic: str,
+    value_deserializer: AvroDeserializer,
+    key_deserializer: AvroDeserializer | None = None,
+) -> dict | None:
+    """One Kafka message as the dict OpsWallState.apply_* expects.
+
+    With a `key_deserializer`, the key's fields are merged in: Flink keeps a table's
+    primary key out of the value, so a `service_deployments` value has no `service_name`
+    (D-027, D-048). Fields already in the value win."""
+    record = value_deserializer(value, SerializationContext(topic, MessageField.VALUE))
+    if record is None or key_deserializer is None or key is None:
+        return record
+    key_record = key_deserializer(key, SerializationContext(topic, MessageField.KEY))
+    if isinstance(key_record, dict):
+        return {**key_record, **record}
+    if isinstance(key_record, str):  # a primitive string key schema
+        return {"service_name": key_record, **record}
+    return record
+
+
 def _tail(
     state: OpsWallState,
     card: dict[str, str],
@@ -123,11 +155,11 @@ def _tail(
     stop: threading.Event,
     assign: callable,
     deserializer: AvroDeserializer,
+    key_deserializer: AvroDeserializer | None = None,
     use_kafka_ts: bool = False,
 ) -> None:
     """One consumer thread: wait for topic, assign, poll, deserialize, apply, repeat."""
     consumer = _build_consumer(card, topic)
-    ctx = SerializationContext(topic, MessageField.VALUE)
     assigned = False
     try:
         while not stop.is_set():
@@ -157,7 +189,7 @@ def _tail(
             try:
                 # One bad record must not kill the tail: catch anything the
                 # deserializer raises and surface it in /healthz, continue polling.
-                record = deserializer(value, ctx)
+                record = decode_record(value, msg.key(), topic, deserializer, key_deserializer)
             except Exception as exc:
                 logger.warning("[%s] deserialize failed: %s", topic, exc)
                 state.record_error(topic, "DESERIALIZE_FAILED", str(exc))
@@ -179,27 +211,27 @@ def start_threads(state: OpsWallState, card: dict[str, str], stop: threading.Eve
     """Start four daemon consumer threads and return them."""
     sr = _schema_registry(card)
 
-    def deser(subject: str) -> AvroDeserializer:
-        # schema_str=None + use.latest.version=True resolves the registered schema
-        # per topic, same pattern as opsgen/kafka_io.py on the produce side.
-        return AvroDeserializer(sr, schema_str=None, conf={"use.latest.version": True})
-
+    # (topic, apply, assign, decode the key?, use the Kafka timestamp?). Only
+    # service_deployments needs its key: it is the only topic whose value lacks
+    # service_name. service_incidents keys are raw strings, not Avro.
     topics = [
         (DEPLOYMENTS_TOPIC, state.apply_deployment,
-         lambda c: _assign_from_earliest(c, DEPLOYMENTS_TOPIC), False),
+         lambda c: _assign_from_earliest(c, DEPLOYMENTS_TOPIC), True, False),
         (HEALTH_TOPIC, state.apply_health,
-         lambda c: _assign_from_timestamp(c, HEALTH_TOPIC, STARTUP_BACKREAD_SECONDS), False),
+         lambda c: _assign_from_timestamp(c, HEALTH_TOPIC, STARTUP_BACKREAD_SECONDS), False, False),
         (DECISIONS_TOPIC, state.apply_decision,
-         lambda c: _assign_from_timestamp(c, DECISIONS_TOPIC, STARTUP_BACKREAD_SECONDS), True),
+         lambda c: _assign_from_timestamp(c, DECISIONS_TOPIC, STARTUP_BACKREAD_SECONDS), False, True),
         (INCIDENTS_TOPIC, state.apply_incident,
-         lambda c: _assign_from_timestamp(c, INCIDENTS_TOPIC, STARTUP_BACKREAD_SECONDS), False),
+         lambda c: _assign_from_timestamp(c, INCIDENTS_TOPIC, STARTUP_BACKREAD_SECONDS), False, False),
     ]
     threads = []
-    for topic, apply, assign, uses_ts in topics:
+    for topic, apply, assign, uses_key, uses_ts in topics:
+        deser = make_deserializer(sr)
         t = threading.Thread(
             target=_tail,
             kwargs=dict(state=state, card=card, topic=topic, apply=apply,
-                         stop=stop, assign=assign, deserializer=deser(topic),
+                         stop=stop, assign=assign, deserializer=deser,
+                         key_deserializer=deser if uses_key else None,
                          use_kafka_ts=uses_ts),
             name=f"ops-wall-{topic}", daemon=True,
         )
