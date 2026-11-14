@@ -79,7 +79,7 @@ def test_services_are_preseeded_with_tier_and_replicas():
 def test_deployment_upsert_keeps_latest():
     st = OpsWallState()
     st.apply_deployment({"service_name": "checkout", "version": "1.0.0", "ready_replicas": 3,
-                         "deployed_at": int((NOW - 300) * 1000)})
+                         "deployed_at": _dt(NOW - 300)})
     st.apply_deployment({"service_name": "checkout", "version": "1.0.1", "ready_replicas": 4})
     s = _svc(st, "checkout")
     assert s["version"] == "1.0.1"
@@ -90,7 +90,7 @@ def test_deployment_upsert_keeps_latest():
 def test_unknown_service_is_silently_ignored():
     st = OpsWallState()
     st.apply_deployment({"service_name": "not-a-real-service", "version": "1.0.0"})
-    st.apply_health({"service_name": "nope", "window_end": int(NOW * 1000)})
+    st.apply_health({"service_name": "nope", "window_end": _dt(NOW)})
     st.apply_decision({"service_name": "nope"})
     st.apply_incident({"service_name": "nope", "incident_id": "X"})
     assert len(st.snapshot(now=NOW)["services"]) == 6
@@ -440,7 +440,7 @@ def test_trim_drops_entries_older_than_the_axis():
 
 def _fill(st):
     st.apply_deployment({"service_name": "checkout", "version": "9.9.9", "ready_replicas": 7,
-                         "deployed_at": int((NOW - 60) * 1000)})
+                         "deployed_at": _dt(NOW - 60)})
     _incident(st, "checkout", NOW - 40, iid="INC-1")
     _health(st, "checkout", NOW - 20, lat="HIGH")
     _decide(st, "checkout", NOW - 20, at=NOW - 5)

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -102,8 +103,10 @@ def test_refresh_returns_the_new_generation_and_the_next_snapshot_is_clean():
         return [_FakeThread()]
 
     app, state = _refreshable_app(starter)
-    state.apply_health({"service_name": "cart", "window_end": int((time.time() - 20) * 1000),
-                        "detected_at": int((time.time() - 14) * 1000),
+    now = datetime.now(timezone.utc)
+    state.apply_health({"service_name": "cart",
+                        "window_end": (now - timedelta(seconds=20)).replace(tzinfo=None),  # TIMESTAMP(3)
+                        "detected_at": now - timedelta(seconds=14),                        # TIMESTAMP_LTZ(3)
                         "latency_status": "HIGH", "traffic_status": "NORMAL"})
     state.record_error("service_health", "UNKNOWN_TOPIC", "gone")
     before = state.snapshot()

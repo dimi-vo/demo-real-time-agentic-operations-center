@@ -1,12 +1,12 @@
 """The restartable owner of the threads that feed an OpsWallState.
 
 ``uv run ops-wall`` builds one ``Feed`` around a *starter*: a function that, given a stop
-event, starts the threads that write into the state and returns them. The live starter
-(``consumer.start_threads``) runs one Kafka consumer per topic; the mock starter
-(``mock.start_threads``) runs the scripted loop. The server's ``POST /refresh`` calls
-``Feed.restart()``: stop the running threads, wait for them, clear the state, start a new
-set (D-053). A restart re-attaches every consumer, so a topic that was deleted and recreated
-under a running wall is read again from its usual starting point.
+event, starts the threads that write into the state and returns them. The wall's starter
+(``consumer.start_threads``) runs one Kafka consumer per topic; tests pass fakes. The
+server's ``POST /refresh`` calls ``Feed.restart()``: stop the running threads, wait for
+them, clear the state, start a new set (D-053). A restart re-attaches every consumer, so a
+topic that was deleted and recreated under a running wall is read again from its usual
+starting point.
 
 Restarts are serialised by one lock, so two overlapping clicks can never leave two sets of
 consumers running.

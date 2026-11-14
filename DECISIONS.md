@@ -1029,6 +1029,7 @@ gap is what closing the loop (later) removes.
 unused `POST_WINDOWS_AFTER_CLOSE` and `PRESEED_VERSIONS` are gone), `scripts/opswall/app.py`
 (aligned start) and `tests/test_opswall_mock.py`, which now checks the mapping, the
 timing, `OBSERVE`-only-on-false-alarms and the deploy/rollback on the tile.
+**Replaced by D-055.** The mock is removed; the wall needs a live feed.
 
 ### D-048 · DECISION · The live ops wall decodes records the way Kafka delivers them
 **What.** Read in the simplify-simulator session and reproduced offline: the live ops
@@ -1270,3 +1271,28 @@ check):** the real detection delay and answer time (the 6 s and 8 s in the spec 
 estimates; the first live run read 15 s to detect once the zone offset is taken out), and
 that `CURRENT_TIMESTAMP` is evaluated in the final projection (`EXPLAIN` on the live
 statement shows it). The `TIMESTAMP_LTZ` column needs the table dropped and applied again.
+
+### D-055 · DECISION · The ops-wall mock is removed
+**What.** `uv run ops-wall --mock` drove the wall from a scripted scene loop with no Kafka
+(D-047). It had drifted from the live wall: it writes no `detected_at`, so since D-054 it
+drew incident boxes and no blocks, and six of its tests were skipped. Every wall change
+had to read around it, and D-054 left a follow-up issue to bring it back in step.
+**Options.** (a) Update the mock to the D-054 rules
+(`.scratch/opswall-detected-answered/issues/01-mock-draws-blocks.md`) and keep it in step
+with every later wall change; (b) remove it.
+**Choice.** (b), decided with the user in the simplify-demo grilling session
+(`.scratch/simplify-demo/spec.md`). The wall needs a live feed: `ops-sim` and the
+attendee's environment. `OpsWallState._to_seconds` now reads only `datetime`s. Every time
+the wall reads arrives that way through the Avro decoder, and the epoch-millisecond and
+float paths existed only for the mock and for tests that fed the state in its shape.
+**Why.** The mock showed a story the live wall no longer told, and keeping it in step costs
+work on every wall change. The design drafts in `.scratch/mockups/` stay: they are HTML
+mockups, not a feed.
+**Impact.** `scripts/opswall/mock.py` and `tests/test_opswall_mock.py` are deleted.
+`scripts/opswall/app.py` loses `--mock`, its starter and the `[MOCK FEED]` log suffix; the
+consumer import is no longer lazy. "Refresh data" (D-053) re-attaches the Kafka consumers
+and nothing else. Docstrings in `scripts/opswall/` (`__init__`, `feed`, `state`) and
+`tests/test_opswall_ingest.py` no longer mention the mock. `tests/test_opswall_feed.py`
+loses the mock refresh test. `tests/test_opswall_state.py` and `tests/test_opswall_server.py`
+feed `datetime`s where they passed epoch milliseconds. The D-054 follow-up issue is
+`wontfix`. Replaces D-047.

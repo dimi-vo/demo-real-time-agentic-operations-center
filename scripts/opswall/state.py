@@ -1,7 +1,7 @@
 """Thread-safe in-memory snapshot of the dashboard.
 
-One ``OpsWallState`` is shared between the Kafka consumer threads (or the mock
-driver) which call ``apply_*()`` and the FastAPI websocket loop which calls
+One ``OpsWallState`` is shared between the Kafka consumer threads, which call
+``apply_*()``, and the FastAPI websocket loop, which calls
 ``snapshot(now)`` and pushes it to every browser at ~4 Hz. All access is guarded
 by one lock; the write methods are tiny so contention is negligible.
 
@@ -327,7 +327,7 @@ def _blocks(health: list[HealthRow], decisions: list[DecisionMark], now: float) 
     for trigger in TRIGGERS:
         for run in _runs(health, trigger):
             if run[0].detected_at is None:
-                continue  # a row from before detected_at existed (or the mock): no block
+                continue  # a row from before detected_at existed: no block
             windows = {_ms(r.window_end) for r in run}
             answers = sorted((d for d in decisions
                               if d.trigger == trigger.name and _ms(d.window_end) in windows),
@@ -452,19 +452,14 @@ def _seeded_services() -> dict[str, ServiceState]:
 
 
 def _to_seconds(value) -> float | None:
-    """Epoch seconds from what a record carries: a `datetime` (what the Avro decoder makes
-    of Flink's TIMESTAMP(3), registered as local-timestamp-millis; naive values are UTC
-    wall-clock here, D-048), epoch ms (int) or seconds (float, as the mock passes)."""
-    if value is None:
+    """Epoch seconds from a record's timestamp, which the Avro decoder hands over as a
+    `datetime`: naive for Flink's TIMESTAMP(3) (registered as local-timestamp-millis, read
+    as UTC wall-clock, D-048), aware for a TIMESTAMP_LTZ. Anything else is no time."""
+    if not isinstance(value, datetime):
         return None
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.timestamp()
-    if isinstance(value, (int, float)):
-        v = float(value)
-        return v / 1000.0 if v > 1e12 else v
-    return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
 
 
 def _decision(record: dict, window_end: float | None, at: float, agent: str) -> DecisionMark:
@@ -488,8 +483,8 @@ def _earliest(a: float | None, b: float | None) -> float | None:
 
 
 def _ms(t: float) -> int:
-    """A window time as a match key: health rows and decisions decode it the same way, but
-    the mock passes epoch milliseconds and the decoder datetimes."""
+    """A window time as a match key: whole milliseconds, so float noise never splits a
+    window."""
     return round(t * 1000)
 
 

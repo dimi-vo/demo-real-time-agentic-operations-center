@@ -1,18 +1,14 @@
 """Feed: the restartable owner of the threads behind the wall (D-053).
 
-No Kafka: the live starter is replaced by a fake that records what happens to it, and the
-mock starter runs for real against a fake clock.
+No Kafka: the consumer starter is replaced by a fake that records what happens to it.
 """
 
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
-from opsgen.services import SERVICES_BY_NAME
-from scripts.opswall import mock
 from scripts.opswall.feed import Feed
 from scripts.opswall.state import OpsWallState
 
@@ -30,15 +26,6 @@ class _FakeThread:
 
     def is_alive(self) -> bool:
         return self._stays_alive
-
-
-def _wait_until(predicate, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.005)
-    raise AssertionError("condition not reached in time")
 
 
 # --- restart ordering -----------------------------------------------------------
@@ -114,51 +101,3 @@ def test_stop_signals_the_running_threads():
     feed.start()
     feed.stop()
     assert stops[0].is_set()
-
-
-# --- the mock feed ---------------------------------------------------------------
-
-
-def test_the_mock_feed_starts_over_after_a_refresh_with_its_first_scene_at_the_same_offset():
-    first = SERVICES_BY_NAME["checkout"]
-    t0 = 1_800_000_003.0   # 3 s past a 10 s boundary: the loop starts on the boundary before it
-    clock = {"t": t0}
-    state = OpsWallState()
-    threads: list[threading.Thread] = []
-
-    def starter(stop):
-        started = mock.start_threads(state, stop, clock=lambda: clock["t"], interval=0.001)
-        threads.extend(started)
-        return started
-
-    def checkout(now):
-        return next(s for s in state.snapshot(now=now)["services"] if s["name"] == "checkout")
-
-    feed = Feed(state, starter)
-    feed.start()
-    try:
-        # run past the end of loop 0 into loop 1: incidents of two passes are on the wall
-        clock["t"] = t0 + mock.LOOP_SECONDS + 160
-        _wait_until(lambda: len(checkout(clock["t"])["groundTruth"]) == 2)
-
-        # refresh later, on a different 10 s boundary
-        t1 = t0 + 5000.0
-        clock["t"] = t1
-        generation = state.generation
-        feed.restart()
-        assert state.generation == generation + 1
-        assert not threads[0].is_alive()                       # the old loop is gone
-        assert checkout(t1)["groundTruth"] == []               # nothing of the old run survives
-        assert checkout(t1)["version"] == first.initial_version  # tiles are pre-seeded again
-
-        # play the new loop up to just past its first scene's start
-        base = float(int(t1) // 10 * 10)
-        clock["t"] = base + 160
-        _wait_until(lambda: checkout(clock["t"])["groundTruth"] != [])
-        incidents = checkout(clock["t"])["groundTruth"]
-        assert [i["incidentId"] for i in incidents] == ["INC-M0-000"]  # the loop counter starts over
-        assert incidents[0]["start"] == pytest.approx((base + mock.SCENES[0].start_offset) - (clock["t"] - 600))
-    finally:
-        feed.stop()
-        for t in threads:
-            t.join(2.0)

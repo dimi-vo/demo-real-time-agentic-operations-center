@@ -1,7 +1,7 @@
 """The live ops wall must understand records the way Kafka actually delivers them.
 
-The mock feeds OpsWallState plain dicts with epoch milliseconds and a service_name on
-every record, so it never exercised the live decoder. Two differences matter (D-048):
+Plain dicts with epoch milliseconds and a service_name on every record never exercised
+the live decoder. Two differences matter (D-048):
 
 - Flink's TIMESTAMP(3) columns are registered as `local-timestamp-millis` (D-027), and
   the Avro decoder turns them into naive `datetime`s (UTC wall-clock here).
@@ -86,9 +86,6 @@ def _service(st: OpsWallState, name: str, now: float) -> dict:
 def test_a_naive_datetime_is_read_as_utc_wall_clock():
     assert _to_seconds(datetime(2026, 11, 12, 9, 46, 0)) == _epoch("2026-11-12T09:46:00Z")
     assert _to_seconds(datetime(2026, 11, 12, 9, 46, 0, tzinfo=timezone.utc)) == _epoch("2026-11-12T09:46:00Z")
-    # the mock's shapes still work
-    assert _to_seconds(1_800_000_000_000) == 1_800_000_000.0
-    assert _to_seconds(1_800_000_000.5) == 1_800_000_000.5
 
 
 # --- real service_health + remediation_decisions rows ------------------------------
