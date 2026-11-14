@@ -20,7 +20,9 @@ front; the dashboard tiles look lived-in from the first render.
 
 from __future__ import annotations
 
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from opsgen.deployments import next_patch_version
@@ -337,20 +339,27 @@ def _decision_record(service: str, trigger: str, action: str,
     }
 
 
-def run_until_interrupt(state: OpsWallState, start_wall: float | None = None) -> None:
-    """Advance the mock driver once a second until Ctrl-C."""
-    import sys
-
-    start = start_wall if start_wall is not None else aligned_start(time.time())
-    driver = MockDriver(state=state, start_wall=start)
+def start_threads(
+    state: OpsWallState,
+    stop: threading.Event,
+    clock: Callable[[], float] = time.time,
+    interval: float = 0.25,
+) -> list[threading.Thread]:
+    """Start the scripted loop and return its thread: a fresh driver on a fresh aligned start,
+    deployments pre-seeded, ticked every ``interval`` seconds (4 Hz, matching the broadcast
+    cadence) until ``stop`` is set. Calling it again after ``state.clear()`` replays the loop
+    from its beginning, which is what "Refresh data" does in mock mode (D-053)."""
+    driver = MockDriver(state=state, start_wall=aligned_start(clock()))
     driver.seed_deployments()
-    try:
-        while True:
-            now = time.time()
-            driver.tick(now)
-            time.sleep(0.25)  # 4 Hz, matches the broadcast cadence
-    except KeyboardInterrupt:
-        sys.stderr.write("\nStopped.\n")
+
+    def pump() -> None:
+        while not stop.is_set():
+            driver.tick(clock())
+            stop.wait(interval)
+
+    t = threading.Thread(target=pump, name="ops-wall-mock", daemon=True)
+    t.start()
+    return [t]
 
 
 # For callers that want to drive it synchronously (tests, offline preview).

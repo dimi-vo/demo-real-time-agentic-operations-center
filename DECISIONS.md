@@ -283,6 +283,10 @@ pool/catalog as the existing model check). Six new tests
 missing, table-check error (`?` not `✗`), model-check error.
 
 ## Phase 3
+**Amended by D-050.** The two lab output tables (`service_health`, `remediation_decisions`)
+are the platform team's now, so the check lists five tables: a missing output table says
+"ask your platform team to re-run their apply" like a missing source table
+(`provision.PLATFORM_TABLES`).
 
 ### D-021 · DECISION · How `uv run evaluate` reads and scores `service_health`
 **What.** The data path and the scoring definitions for the detection half (brief §7.2).
@@ -350,7 +354,13 @@ asks for explicit hints on both from 2.3 on, and one identical CTE is easier to 
 `tests/test_sql_pipeline.py` enforces that the CTEs, the detector config and window, and
 the CTAS body stay identical across files.
 **Why.** F1 pedagogy; attendees grow one statement step by step.
-**Impact.** `reset --with-labs` submits only `2.4_service_health.sql` (from Phase 2).
+**Impact.** `reset --with-labs` submits only `2.4_service_health.sql` (from Phase 2) (removed by D-051).
+**Amended by D-050.** 2.4 is now `INSERT INTO service_health` in front of the unchanged 2.3
+status query, not a CTAS: the table already exists, created by the platform team. The
+test is `test_insert_body_is_the_23_status_query`. `reset --with-labs` is gone (D-051).
+**Amended by D-054.** The 2.3 status query ends with `detected_at` (`CURRENT_TIMESTAMP` cast to
+`TIMESTAMP(3)`), so attendees see the real-time delay before they write the INSERT and 2.4
+stays the 2.3 query behind one line.
 
 ### D-024 · DECISION · Metric expressions and types in the window aggregation
 **What.** Expressions the brief left open.
@@ -362,6 +372,10 @@ AVG(CAST(response_bytes AS DOUBLE))` (DOUBLE; `AVG` of an INT would truncate to 
 to `service_health`. `owner_team` is not carried (not in the brief's column list).
 **Why.** Plain SQL attendees can read; no integer-division surprises.
 **Impact.** Column types of `service_health` follow from these.
+**Amended by D-050.** The types of `service_health` are no longer left to the query: they
+are declared in `sql/sink_service_health.sql`. The ones above are still what the DDL was
+derived from, and the first `terraform apply` is the live check (only the two status
+columns were ever observed).
 
 ### D-025 · CONFIRMED · Warm-up is detected as `is_anomaly IS NULL`; status columns come out as STRING
 **Status (Phase 3, live).** `DESCRIBE service_health` shows `latency_status` as
@@ -377,6 +391,10 @@ VARCHAR for the second, but I haven't seen it in Confluent Cloud.
 **Impact.** Verify with `sql/checks/service_health_describe.sql` and by `WARMING_UP`
 appearing exactly in each service's first 6 windows. `evaluate` trims statuses anyway.
 If they come out as `CHAR(10)`, wrap each `CASE` in `CAST(... AS STRING)`.
+**Amended by D-050.** The status columns are declared `STRING` in the table's DDL, so the
+"wrap each `CASE` in `CAST(... AS STRING)`" fallback is moot: the INSERT converts the
+query's `VARCHAR(10)` implicitly, and a declared `VARCHAR(n)` is avoided on purpose
+because Confluent Cloud truncates to it.
 
 ### D-026 · DECISION · Developer check queries live in `sql/checks/`
 **What.** Where verification-only SQL lives.
@@ -385,8 +403,10 @@ version hash in `instance_id` vs `SHA1` of the joined version; `SHA1` and `LEFT`
 joins are both in the current Confluent docs), deploy windows (`LAST_VALUE`), anomalous
 rows, and `DESCRIBE service_health`.
 **Why.** They prove acceptance criteria but aren't walkthrough steps; the drift test (Phase
-6) and `reset --with-labs` read only top-level `sql/*.sql`.
+6) and `reset --with-labs` (removed by D-051) read only top-level `sql/*.sql`.
 **Impact.** None for attendees.
+**Amended by D-050 and D-051.** `service_health_describe.sql` now shows the types declared
+in the DDL, not derived ones. `reset --with-labs` no longer exists.
 
 ### D-027 · DECISION · `.avsc` copies aligned with the schemas Confluent registered
 **What.** Two Phase 1 assumptions about the registered schemas were wrong; checked
@@ -650,6 +670,9 @@ what the team is told first. Scoring the headline keeps one number per incident.
 **Impact.** `scripts/evaluation/decisions.py`, rendered by `evaluate`; new flags
 `--decision-rows`, `--dump-decisions`, `--decisions-topic`, `--no-decisions`. The decision
 half is skipped silently when `remediation_decisions` doesn't exist yet.
+**Amended by D-050.** The table always exists (Terraform creates it), so the decision half is
+skipped, with a message, when `remediation_decisions` exists but is empty, not only when it
+is missing.
 
 ### D-033 · DEVIATION · Agent SQL follows the docs, not the reference, on three points
 **Status.** **Confirmed live on 2026-11-12**: both agents and both INSERT statements were
@@ -730,6 +753,9 @@ an explicit target — untyped rather than typed.
 `HealthRow` gained `ready_replicas` and `max_replicas`, which the decision half needs to
 recompute the replica suggestion. The walkthrough (Phase 6) must describe the three-line
 format, not the brief's six.
+**Amended by D-050.** The 8-column table is created by the platform team's Terraform
+(`sql/sink_remediation_decisions.sql`, with `IF NOT EXISTS`, delete cleanup and 24 h
+retention); lab 4.3 keeps only the two INSERTs. Its columns are unchanged.
 
 ### D-035 · DEVIATION · Ops wall is dark-only
 **What.** Brief §7.3 asks for "readable in light and dark mode"; the dashboard ships
@@ -765,6 +791,11 @@ offset* in a single chart per metric, which is the thing the dashboard exists to
 **Impact.** `scripts/opswall/static/{opswall.css,opswall.js}` implement this shape;
 `scripts/opswall/state.py` emits axis-relative seconds for every span so the renderer
 doesn't do arithmetic with absolute timestamps.
+**Amended by D-054.** The lower half is no longer the flagged windows in data time: it is one
+block per anomaly run, from the `detected_at` of its first window to the write time of the
+agent's first decision for it. The decision pins are gone from the chart (the block's tooltip
+names the action), so is the warm-up band, and the state computes the verdicts and the summary
+the page used to count.
 
 ### D-037 · DECISION · New `service_incidents` topic, two records per incident
 **What.** Simulator ground truth is published to a Kafka topic (`service_incidents`),
@@ -1042,3 +1073,200 @@ since Phase 2): no key columns, `service_name` stays in the value where ops-wall
 `platform-team/modules/developer/statements.tf`. An environment where the old statement
 already created the table must drop it before re-applying (`CREATE TABLE IF NOT EXISTS`
 won't change an existing table).
+
+### D-050 · DECISION · Terraform creates `service_health` and `remediation_decisions`; lab 2.4 is an INSERT
+**What.** Attendees created the two lab output tables themselves: `service_health` with a
+CTAS in lab 2.4, `remediation_decisions` with a `CREATE TABLE` in lab 4.3. That cost lab
+time on table plumbing, left the ops wall with no topics to read until the labs were done,
+and made improving the detection a drop-and-replay (a plain re-run of the INSERT appends a
+second copy of the history).
+**Options.** (a) The platform team's Terraform runs `CREATE TABLE IF NOT EXISTS` for both,
+the same pattern as the source tables; (b) a `confluent_kafka_topic` plus a registered
+schema, with Flink inferring the table.
+**Choice.** (a), decided with the user in `.scratch/terraform-lab-tables/`. (b) needs new
+per-developer Kafka and Schema Registry keys (Global keys do not cover Standard clusters),
+gives an inferred table with an extra leading `key` column that breaks a positional INSERT,
+and defaults to `read-committed`. Both tables: append-only, read-uncommitted, `delete`
+cleanup (it is what lets the reset tools empty a topic), 24 h retention, earliest offset,
+`avro-registry` values, `DISTRIBUTED INTO 1 BUCKETS`, no custom watermark. `service_health`
+has the 22 columns of the 2.3 status query, with both status columns declared `STRING`;
+`remediation_decisions` keeps its 8. Lab 2.4 is `INSERT INTO service_health` followed by
+the 2.3 status query verbatim; lab 4.3 keeps only the two agent INSERTs. The two DDL files
+are `sql/sink_service_health.sql` and `sql/sink_remediation_decisions.sql` (renamed from
+`4.3_remediation_decisions.sql`), each the single source of truth for its copy in
+`statements.tf`; the sync test now covers all five tables.
+**Why.** The labs are about the queries. Pre-created tables also let the ops wall open at
+the start of a session.
+**Impact.** `platform-team/modules/developer/statements.tf` (two statements chained after
+`service_incidents`, the model depends on the last), `outputs.tf`, the module tests, and
+the README (it now lists 12 resources per person; its old count of 9 was already stale
+since `service_incidents`). `tests/test_sql_pipeline.py` checks the DDL's column list
+against `SERVICE_HEALTH_COLUMNS`. `evaluate` says "run the INSERT" instead of "create it".
+The readiness check lists five tables. The sync test's helper now finds the statement by a
+line that starts with `CREATE TABLE`, because a header comment that mentioned it had made a
+copied heredoc start in the comment.
+**Pending (live check).** The `service_health` types other than the status columns are
+derived, not observed, and so is `INSERT INTO ... WITH ... SELECT` being accepted. The
+first `terraform apply` is the check: run lab 2.4's INSERT (it must start RUNNING with
+rows appearing), `DESCRIBE EXTENDED service_health`, and if a type must change `DROP TABLE
+service_health`, fix `sql/` and `statements.tf` together, and apply again (`IF NOT EXISTS`
+never changes an existing table). If the CC grammar rejects `INSERT ... WITH`, move the
+shared CTEs into nested subqueries in 2.4.
+**Amended by D-054.** `service_health` has 23 columns: `detected_at TIMESTAMP_LTZ(3) NOT NULL` is the
+last. `remediation_decisions` keeps its 8.
+
+### D-051 · DECISION · `reset` empties the output topics instead of dropping their tables; `--with-labs` is removed
+**What.** `reset` dropped `service_health` and `remediation_decisions`, which Terraform now
+owns: a dropped table would not come back (Terraform's statement stays COMPLETED), and
+deleting their Schema Registry subjects would break them too.
+**Choice.** `reset` keeps its guard against a running `ops-sim`, stops all running
+statements (and now waits until they are gone), drops the two agents (`CREATE AGENT` has no
+`IF NOT EXISTS`), and deletes the generator's state file. It empties five topics with
+delete-records: the three source topics and the two output topics. `--keep-source` keeps
+only the three source topics; the output topics are always emptied, because they would hold
+duplicates once their INSERTs run again. A missing topic is reported as a problem. The
+`--with-labs` option, `create_lab_objects`, `LAB_SQL`, `LAB_TABLES`, the subject deletion
+and every comment that promised a rebuild are removed, at the user's request. Nothing
+rebuilds the labs now: run the INSERTs and create the agents again. Whether a replacement
+is needed is decided at the end of this work, not here.
+**Why.** One tool must leave the platform team's tables in place, and fewer lines of code
+mean less to maintain.
+**Impact.** `scripts/reset.py`, `scripts/common/flink.py` (the wait helper replaces the
+rebuild code), `scripts/common/topics.py` (the emptying code and the topic lists, shared
+with `reset-health`), `tests/test_reset.py` against a fake Flink session and a fake Kafka
+admin (the `install_fakes` fixture in `tests/conftest.py`). Wording that said the SQL files exist so
+`--with-labs` can submit them is reworded.
+**Addition not in the spec.** `reset` now waits (up to 60 s) for the statements it deleted to
+be gone before it empties anything, like `reset-health`: it used to rely on the table drops
+and the agent drops taking long enough, and a still-running INSERT would leave stray rows in
+the topics it has just emptied. A statement that stays up is reported as a problem.
+
+### D-052 · DECISION · `uv run reset-health`: a clean slate for the detection and the agents
+**What.** An attendee who improves their `service_health` query and re-runs the INSERT
+appends a second copy of the replayed history; there was no easy way back to a clean slate.
+**Choice.** A new command, for attendees. It deletes every running statement whose SQL is
+`INSERT INTO service_health ...` or `INSERT INTO remediation_decisions ...` (the second form
+catches both agents however they are named), matched on the SQL text (leading `--` and
+`/* */` comments, backticks, catalog and database prefixes, and letter case are ignored;
+SELECTs and INSERTs into other tables are not targets). Statements are deleted, not paused,
+with the same call as `reset`: attendees work in the Confluent Cloud workspace, where the SQL
+stays and Run starts it again. It prints each statement's name and SQL (before deleting it),
+waits until the targets are gone (a missing entry or a terminal phase counts; 60 s), and
+only then empties the two topics. If a statement stays up it exits nonzero and empties
+nothing; a missing topic exits nonzero too. With nothing running it just empties the topics.
+It leaves the source topics, other statements, the agents' definitions and local files alone,
+asks no confirmation and re-runs nothing. It ends with the restart order: the
+`service_health` INSERT first, the agent INSERTs only once the wall's charts reach the
+right-hand edge again, because a fresh `service_health` INSERT replays up to 24 h of history
+and agents started meanwhile would call the model for every replayed anomaly; and a hint to
+press "Refresh data" on the ops wall (D-053).
+**Why.** One command, safe by construction: no INSERT can write into a topic while it is
+being emptied, and the other statements an attendee has open keep running.
+**Impact.** `scripts/reset_health.py` and its entry in `pyproject.toml`;
+`tests/test_reset_health.py` (the matcher in both directions, the order of deletes and
+empties, a stuck statement, nothing running, the printed guidance).
+**Pending (live check).** Statement delete, delete-records and the matching against real
+statement listings were only tested against fakes. Check in your environment: with the labs'
+INSERTs running, `reset-health` deletes exactly those, empties both topics, leaves other
+statements running, and Run on the INSERTs fills the tables again with no duplicates.
+
+### D-053 · DECISION · "Refresh data" on the ops wall restarts the feed behind it
+**What.** After `reset-health` empties the output topics (D-052), a running ops wall still
+held up to 10 minutes of old charts and pins in memory, and a consumer stayed attached to a
+topic that had been deleted and recreated. The only cure was restarting the wall.
+**Choice.** A "Refresh data" button in the page header, no confirmation. It calls
+`POST /refresh` (a POST: it changes state), which asks the `Feed` — the new owner of the
+feed threads — to restart: stop and join the running threads, `OpsWallState.clear()`
+(six pre-seeded services, no history, pins or connection errors, `generation` + 1), then
+start a new set. Live: every consumer is attached afresh from its usual start
+(`service_deployments` from the beginning, the other three from about 10 minutes back).
+Mock: a new `MockDriver` on a fresh aligned start, so the loop plays again from its first
+scene. One lock serialises restarts, so overlapping clicks cannot start two sets of
+consumers. Every snapshot carries `generation`; the button shows "Refreshing…" from the
+click until a snapshot of the new generation arrives, never for less than 1 s, and ignores
+clicks meanwhile.
+**Options.** (a) Clear the state only: leaves the stale consumers attached to a recreated
+topic. (b) Seek the existing consumers: more code, same result. (c) Restart the whole feed
+(chosen): the same code path as startup, so a refresh is by construction what a fresh wall
+would show.
+**Impact.** `scripts/opswall/` (`feed.py` new; `state.py` `clear()`/`generation`;
+`server.py` `POST /refresh`; `app.py`; `mock.py` `start_threads` replaces the unused
+`run_until_interrupt`; `consumer.py` stops promptly on the stop event; the header button in
+`static/`). Tests: `tests/test_opswall_{state,server,feed}.py`. No JS test setup exists, so
+the button is a manual check. Refreshing loses nothing: all data comes back from Kafka.
+
+### D-054 · DECISION · The ops wall draws each anomaly from detection to the agent's answer
+**What.** The lower half of each chart drew the windows `service_health` flagged, in the
+time of the data, until the anomaly faded or a fix landed. It hid the real-time delay (the
+window has to close, the watermark has to pass), looked the same whether or not an agent ever
+answered, said "missed" for every incident until a detection overlapped it, and did all its
+counting in the browser, untested. Decided with the user in a grilling session on 2026-11-13;
+spec in `.scratch/opswall-detected-answered/spec.md`.
+**Choice.**
+- `service_health` gains a 23rd and last column, `detected_at TIMESTAMP_LTZ(3) NOT NULL`:
+  `CURRENT_TIMESTAMP` in the final SELECT, evaluated per row in a streaming query and filled
+  on every row. It is the table's one `TIMESTAMP_LTZ`, an instant, on purpose. The first
+  version cast it to `TIMESTAMP(3)` on the assumption that the session time zone is UTC (the
+  documented default), but the Cloud Console workspace submits every statement with
+  `sql.local-time-zone` set to the browser's zone: the first live run (2026-11-14, statement
+  properties read over REST) had `GMT+01:00`, so the column held local wall-clock time, the
+  wall read it as UTC, and every detection sat an hour in the future (a "+60m 15s" time to
+  detect that kept growing, "answered 0s later", blocks never removed). The workspace shows
+  `detected_at` in the attendee's zone while the window columns are UTC; the 2.3 comment says
+  so, and `sql/checks/service_health_anomalies.sql` runs in UTC with a `SET`. `PROCTIME()` is
+  not supported on Confluent Cloud. It is in the 2.3 status query too, so lab 2.4 stays the
+  2.3 query behind one line. `remediation_decisions` keeps its 8 columns; the agent INSERTs
+  read `service_health` by name and `evaluate` reads by name, so neither changes.
+- The times the wall uses: a flagged window's `detected_at`; an answer's Kafka record
+  timestamp (Confluent Cloud's sink sets it to the write time, measured live on
+  `service_health` even during a replay); an incident's `started_at`/`ended_at`. A
+  `CURRENT_TIMESTAMP` column in the agent INSERTs was rejected: whether it is evaluated before
+  or after `AI_RUN_AGENT` returns is not documented.
+- A **run** is consecutive flagged windows for one service and one trigger (latency high,
+  traffic high, traffic low); one window without that flag ends it. Only windows whose
+  `window_end` is on the chart count, which keeps a restarted INSERT's replay (every replayed
+  row has `detected_at` = now) off the wall.
+- Its **block** opens at the `detected_at` of the run's first window (no `detected_at`, no
+  block), grows toward now, and closes at the write time of the first decision for any window
+  of the run (matched on service, `window_end` and trigger), whatever the action: `OBSERVE`
+  and `INVALID` close it too. The chart draws only the block, no icons: the spec's pin at the
+  closing edge was dropped after the first live run, at the user's request ("we should just
+  show the window"). The block's tooltip names the answer (action and target, the agent's
+  reason) and counts all the run's decisions by action. Unanswered 30 s after the run's last
+  `detected_at`, the block is removed.
+- A block **belongs** to an incident on the same service and metric (bad deploy: latency;
+  surge or drop: traffic) when the run's first window overlaps the incident, counting up to
+  30 s after it ended; an incident can own several blocks; a block owned by none is a false
+  alarm. An incident is **answered** once one of its blocks closed, **missed** when it ended
+  more than 30 s ago and none closed, **pending** (plain purple) until then. Time to detect and
+  time to answer are measured on its first block.
+- The tile: "Anomaly detected: …, waiting for the agent" while a block is open; the fix
+  ("Rolled back to vX", "Scaled out to N replicas", "Traced to upstream") for 120 s after a
+  fix decision; "Healthy" otherwise. "Detector warming up" and the band texts are gone; Rate
+  and Errors still come from the newest row.
+- `OpsWallState.snapshot()` computes all of it (blocks, ownership, verdicts, the summary
+  counts and medians, the tile); the page only draws. The detection spans, the warm-up band
+  and the decision list are gone from the snapshot; `generation` stays.
+**Why.** One chart then tells the whole real-time story: the gap from the purple box to the
+block is the time to detect, the block's width is the agent's time to answer, and with the
+agents not running yet, blocks appear and disappear, which says exactly that.
+**Deferred.** Showing anomalies nobody answered for longer than the 30 s before their block is
+removed. The mock (`ops-wall --mock`, D-047) is out of date: it writes no `detected_at`, so it
+shows incident boxes but no blocks, and its scenes were tuned for the old rules. Its outdated
+tests are skipped ("mock not updated for D-054") until
+`.scratch/opswall-detected-answered/issues/01-mock-draws-blocks.md` is done.
+**Impact.** `sql/2.3_anomaly_status.sql`, `sql/2.4_service_health.sql`,
+`sql/sink_service_health.sql` and its copy in `platform-team/modules/developer/statements.tf`;
+`sql/checks/service_health_anomalies.sql` shows `detected_at` and the delay (in UTC, with a
+`SET`); the checks README. `scripts/opswall/state.py` (rewritten snapshot), `static/opswall.js`
+(draws the snapshot, no counting, no pins; the legend loses the pin shapes),
+`static/index.html` and `static/opswall.css` (warm-up hatch and styles gone). Tests: `tests/test_opswall_state.py` (rewritten around the scenarios above),
+`tests/test_opswall_ingest.py` (a synthetic `detected_at` on the real Phase 4 rows, which
+predate the column, and a `timestamp-millis` round trip through the real Avro pair), `tests/test_opswall_server.py`, `tests/test_opswall_mock.py` (six
+skipped), `tests/test_sql_pipeline.py`, `tests/test_evaluate_detection.py` (a 23-column row
+scores as before). Rolling out needs `DROP TABLE service_health`, a `terraform apply` (the
+statement is `CREATE TABLE IF NOT EXISTS`), then the INSERT restarted. **Pending (live
+check):** the real detection delay and answer time (the 6 s and 8 s in the spec are
+estimates; the first live run read 15 s to detect once the zone offset is taken out), and
+that `CURRENT_TIMESTAMP` is evaluated in the final projection (`EXPLAIN` on the live
+statement shows it). The `TIMESTAMP_LTZ` column needs the table dropped and applied again.

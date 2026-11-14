@@ -32,6 +32,7 @@ dependencies = [
 deploy = "deploy:main"
 destroy = "scripts.common.destroy:main"
 reset = "scripts.reset:main"
+reset-health = "scripts.reset_health:main"
 setup-rtce = "scripts.setup_rtce:main"
 evaluate = "scripts.evaluate:main"
 ops-sim = "opsgen.cli:main"

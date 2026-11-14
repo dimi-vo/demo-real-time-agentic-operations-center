@@ -10,8 +10,8 @@ This Terraform module builds **each developer's workshop stack**:
 
 - **a new, empty environment**, named after their email (see [Environment names](#environment-names)), with the Stream Governance Advanced package, and a role binding that makes the developer **EnvironmentAdmin** on it through their own user account;
 - **a Standard, single-zone Kafka cluster**, `RIVER-OOPS-DEMO-CLUSTER`, on AWS in `region` (default `us-east-1`, the same for everyone). The environment's Schema Registry comes up with it;
-- **a Flink compute pool**, `RIVER-OOPS-DEMO-pool`, that scales on demand up to `flink_max_cfu` CFUs (default 10), sized for the statements that run the whole workshop (the `service_health` CTAS, two agent `INSERT`s, and ad-hoc queries);
-- **the workshop's two source tables and AI model:** `service_requests` (append-only request log) and `service_deployments` (upsert, keyed by `service_name`) — both empty until the developer runs `uv run ops-sim` — and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`).
+- **a Flink compute pool**, `RIVER-OOPS-DEMO-pool`, that scales on demand up to `flink_max_cfu` CFUs (default 10), sized for the statements that run the whole workshop (the `service_health` `INSERT`, two agent `INSERT`s, and ad-hoc queries);
+- **the workshop's tables and AI model:** three source tables, `service_requests` (append-only request log), `service_deployments` (upsert, keyed by `service_name`) and `service_incidents` (the simulator's answer key), all empty until the developer runs `uv run ops-sim`; two output tables, `service_health` and `remediation_decisions`, which the developer fills with `INSERT` statements in the labs (so the developer never writes a `CREATE TABLE`, and the ops wall can read all four of its topics from the start); and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`).
 
 There is **no static/seed table**: unlike some workshops, this one builds all of its
 data live from the generator, so there is nothing to seed and nothing to count.
@@ -153,7 +153,7 @@ rm terraform.tfplan
 ```
 
 **`terraform plan`** ends with `Plan: N to add, 0 to change, 0 to destroy.`, where **N
-is 9 per person**:
+is 12 per person**:
 
 1. A random name suffix
 2. One environment
@@ -163,7 +163,10 @@ is 9 per person**:
 6. A 60-second pause
 7. Flink statement: create the `service_requests` table
 8. Flink statement: create the `service_deployments` table
-9. Flink statement: create the `llm_textgen_model` model
+9. Flink statement: create the `service_incidents` table
+10. Flink statement: create the `service_health` table
+11. Flink statement: create the `remediation_decisions` table
+12. Flink statement: create the `llm_textgen_model` model
 
 It fails before creating anything if your key/secret is wrong, an email isn't a user,
 the same person appears twice, or an email's local part has nothing to name an
@@ -179,7 +182,7 @@ terraform output -raw handout        # each person's environment name, ID and Co
 confluent flink statement list --environment <env-id> --cloud aws --region <region>
 ```
 
-All three statements (named `tf-…`) should be `COMPLETED`.
+All six statements (named `tf-…`) should be `COMPLETED`.
 
 ### If the apply stops
 
@@ -208,7 +211,7 @@ terraform apply terraform.tfplan
 rm terraform.tfplan
 ```
 
-Check the plan says `0 to change, 0 to destroy`, with **9 to add per new person**.
+Check the plan says `0 to change, 0 to destroy`, with **12 to add per new person**.
 Each stack belongs to its exact email string, so **removing an email destroys that
 person's whole stack**, and **changing an entry (even its case) replaces it** with a
 new, empty one.
@@ -247,7 +250,7 @@ environment name and the Console URL; the deploy finds the environment by itself
 |---|---|
 | `Your platform team hasn't provisioned <name> (<id>) yet` | Their stack is incomplete, most likely a stopped apply. Re-run `plan -out` / `apply` / `rm` (see [If the apply stops](#if-the-apply-stops)). |
 | `Your Global key sees no environment you're directly bound to.` | Their email is missing from `developer_emails`, or they signed in with another account. Check the [handout](#11-developer-access). |
-| `Your environment is missing … (service_requests / service_deployments / llm_textgen_model)` | A statement didn't complete; re-run the apply. |
+| `✗ table <name> is missing — ask your platform team to re-run their apply` (or `✗ model llm_textgen_model …`), from the readiness check at the end of `uv run deploy`; `<name>` can be any of the five tables, including `service_health` and `remediation_decisions` | A statement didn't complete; re-run the apply. |
 
 A developer who sees `Confluent Cloud refused a new Global key` already holds the 2
 Global keys a user may own — they delete one under **API keys → My account**.
@@ -299,7 +302,7 @@ or use an encrypted backend (add a `backend` block before the first `init`).
 | `variables.tf` | Key/secret, `developer_emails` + validations, `region`, `flink_max_cfu`, `csp_hosted_model` |
 | `main.tf` | User + key-owner lookups, name suffixes, one `modules/developer` per email |
 | `outputs.tf` | The `handout` table and the `validation` links |
-| `modules/developer/` | One developer's stack: environment, binding, cluster, pool, and the two source tables + model (`statements.tf`) |
+| `modules/developer/` | One developer's stack: environment, binding, cluster, pool, the three source tables, the two output tables and the model (`statements.tf`) |
 | `tests/` | Offline `terraform test` checks (every provider mocked) |
 
 </details>

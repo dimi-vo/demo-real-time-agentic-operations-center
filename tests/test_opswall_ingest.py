@@ -11,7 +11,8 @@ every record, so it never exercised the live decoder. Two differences matter (D-
 The service_health and remediation_decisions fixtures are real rows read from Confluent
 Cloud in the Phase 4 live run (the payments bad deploy, 2026-11-12 09:45-09:47), minus
 the columns dropped since (D-043, D-044). The dump stored the decoder's datetimes as ISO
-text; `_as_decoded` turns them back. The other two topics go through the real
+text; `_as_decoded` turns them back. The real rows predate `detected_at` (D-054), so
+`_fixture` adds a synthetic one to each health row. The other two topics go through the real
 AvroSerializer/AvroDeserializer pair against the repo's schemas in an in-memory Schema
 Registry, keys included.
 """
@@ -19,7 +20,7 @@ Registry, keys included.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -37,11 +38,19 @@ from scripts.opswall.state import OpsWallState, _to_seconds
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "opswall"
-TIMESTAMP_COLUMNS = ("window_start", "window_end")
+TIMESTAMP_COLUMNS = ("window_start", "window_end", "detected_at")
+# SYNTHETIC: the Phase 4 rows were read before service_health had detected_at (D-054). Each
+# health row gets one this long after its window_end, an estimate of the real delay (the
+# 5-second source watermark plus processing).
+SYNTHETIC_DETECTION_DELAY = 6.0
 
 
 def _epoch(text: str) -> float:
     return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+
+
+def _naive(epoch: float) -> datetime:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None)
 
 
 def _as_decoded(record: dict) -> dict:
@@ -49,13 +58,22 @@ def _as_decoded(record: dict) -> dict:
     out = dict(record)
     for col in TIMESTAMP_COLUMNS:
         if isinstance(out.get(col), str):
-            out[col] = datetime.fromtimestamp(_epoch(out[col]), tz=timezone.utc).replace(tzinfo=None)
+            out[col] = _naive(_epoch(out[col]))
     return out
+
+
+def _with_synthetic_detected_at(record: dict) -> dict:
+    """detected_at is a TIMESTAMP_LTZ (timestamp-millis): the decoder hands over an aware datetime."""
+    detected = _epoch(record["window_end"]) + SYNTHETIC_DETECTION_DELAY
+    return {**record, "detected_at": datetime.fromtimestamp(detected, tz=timezone.utc)}
 
 
 def _fixture(name: str) -> list[dict]:
     lines = (FIXTURES / name).read_text().splitlines()
-    return [_as_decoded(json.loads(line)) for line in lines if line.strip()]
+    records = [json.loads(line) for line in lines if line.strip()]
+    if name == "service_health.jsonl":
+        records = [_with_synthetic_detected_at(r) for r in records]
+    return [_as_decoded(r) for r in records]
 
 
 def _service(st: OpsWallState, name: str, now: float) -> dict:
@@ -78,8 +96,12 @@ def test_a_naive_datetime_is_read_as_utc_wall_clock():
 HEALTH = _fixture("service_health.jsonl")
 DECISIONS = _fixture("remediation_decisions.jsonl")
 NOW = _epoch("2026-11-12T09:47:30Z")
-# The dump has no Kafka timestamps; a decision lands a few seconds after its window.
-DECISION_LAG = 8.0
+# The dump has no Kafka timestamps; a decision is written a few seconds after the detection.
+ANSWER_LAG = 8.0
+
+
+def _written_at(decision: dict) -> float:
+    return _to_seconds(decision["window_end"]) + SYNTHETIC_DETECTION_DELAY + ANSWER_LAG
 
 
 def _live_payments_wall() -> OpsWallState:
@@ -87,24 +109,28 @@ def _live_payments_wall() -> OpsWallState:
     for row in HEALTH:
         st.apply_health(row)
     for d in DECISIONS:
-        st.apply_decision(d, kafka_ts=_to_seconds(d["window_end"]) + DECISION_LAG)
+        st.apply_decision(d, kafka_ts=_written_at(d))
     return st
 
 
 def test_real_health_rows_reach_the_wall():
     payments = _service(_live_payments_wall(), "payments", NOW)
-    assert payments["status"] != "warming"
     last = HEALTH[-1]
     assert payments["rateRps"] == last["request_count"] / 10.0
-    assert payments["detectedLatency"], "the HIGH latency windows must draw a detection"
+    assert payments["blocks"], "the HIGH latency windows must draw a block"
 
 
 def test_the_first_rollback_closes_the_real_detection():
-    payments = _service(_live_payments_wall(), "payments", NOW)
-    rollbacks = [d for d in payments["decisions"] if d["action"] == "ROLLBACK"]
-    assert len(rollbacks) == len(DECISIONS) == 5
-    first_span = payments["detectedLatency"][0]
-    assert first_span["end"] == pytest.approx(rollbacks[0]["at"])
+    """4 flagged windows, one normal, one more: two blocks, and all 5 rollbacks counted."""
+    st = _live_payments_wall()
+    payments = _service(st, "payments", NOW)
+    first, second = payments["blocks"]
+    left = NOW - st.axis_seconds
+    first_flag = next(r for r in HEALTH if r["latency_status"] == "HIGH")
+    assert first["start"] == pytest.approx(_to_seconds(first_flag["detected_at"]) - left)
+    assert first["end"] == pytest.approx(_written_at(DECISIONS[0]) - left)
+    assert (first["action"], first["target"]) == ("ROLLBACK", "2.9.4")
+    assert first["decisions"]["ROLLBACK"] + second["decisions"]["ROLLBACK"] == len(DECISIONS) == 5
 
 
 # --- service_deployments and service_incidents through the real Avro path ----------
@@ -171,3 +197,46 @@ def test_a_live_incident_record_draws_its_ground_truth(registry):
     assert truth["start"] == pytest.approx(1_800_000_000.0 - axis_left)
     assert truth["end"] == pytest.approx(1_800_000_040.0 - axis_left)
     assert truth["open"] is False
+
+
+# --- detected_at, the one instant in service_health (D-054) ------------------------
+
+# The two time columns that matter, as Confluent Cloud registers them: TIMESTAMP(3) as
+# local-timestamp-millis, TIMESTAMP_LTZ(3) as timestamp-millis (the Flink serialization
+# reference). The rest of the row is left out; the wall reads by name.
+HEALTH_TIME_SCHEMA = json.dumps({
+    "type": "record", "name": "record", "namespace": "org.apache.flink.avro.generated",
+    "fields": [
+        {"name": "service_name", "type": ["null", "string"], "default": None},
+        {"name": "window_end", "type": {"type": "long", "logicalType": "local-timestamp-millis"}},
+        {"name": "latency_status", "type": "string"},
+        {"name": "traffic_status", "type": "string"},
+        {"name": "detected_at", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    ],
+})
+
+
+def test_detected_at_is_read_as_an_instant_through_the_avro_path():
+    """A TIMESTAMP_LTZ arrives as an aware datetime and must land at its instant, whatever
+    time zone the INSERT ran in: the workspace runs statements in the browser's zone, and a
+    TIMESTAMP(3) cast put every detection an hour in the future on GMT+01:00."""
+    sr = SchemaRegistryClient.new_client({"url": "mock://"})
+    sr.register_schema("service_health-value", Schema(HEALTH_TIME_SCHEMA, "AVRO"))
+    window_end = 1_800_000_000.0
+    detected = window_end + 6.0
+    record = {
+        "service_name": "auth", "window_end": _naive(window_end),
+        "latency_status": "HIGH", "traffic_status": "NORMAL",
+        # what the statement computed in a GMT+01:00 session: the same instant, shown at +01:00
+        "detected_at": datetime.fromtimestamp(detected, tz=timezone(timedelta(hours=1))),
+    }
+    value = _produce(sr, "service_health", MessageField.VALUE, record)
+    decoded = decode_record(value, None, "service_health", make_deserializer(sr))
+    assert decoded["detected_at"].tzinfo is not None, "timestamp-millis decodes to an aware datetime"
+
+    st = OpsWallState()
+    st.apply_health(decoded)
+    now = detected + 2.0
+    [block] = _service(st, "auth", now)["blocks"]
+    assert block["start"] == pytest.approx(detected - (now - st.axis_seconds))
+    assert block["open"] is True

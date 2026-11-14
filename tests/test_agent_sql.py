@@ -24,7 +24,7 @@ SQL = ROOT / "sql"
 
 AGENT_FILES = {RELEASE_AGENT: "4.2_release_agent.sql", CAPACITY_AGENT: "4.2_capacity_agent.sql"}
 INSERT_FILES = {RELEASE_AGENT: "4.3_insert_release_agent.sql", CAPACITY_AGENT: "4.3_insert_capacity_agent.sql"}
-TABLE_FILE = "4.3_remediation_decisions.sql"
+TABLE_FILE = "sink_remediation_decisions.sql"
 
 # Brief section 5.5, cut down in D-034.
 OUTPUT_LINES = ("Action:", "Target:", "Reason:")
@@ -78,7 +78,7 @@ def test_prompt_is_a_single_quoted_string_without_apostrophes(agent):
     start = sql.index("USING PROMPT '") + len("USING PROMPT '")
     end = sql.index("'\nWITH (", start)
     assert "'" not in sql[start:end], "an apostrophe would close the prompt literal early"
-    assert sql.rstrip().endswith(");"), "one statement per file, so --with-labs can submit it as is"
+    assert sql.rstrip().endswith(");"), "one statement per file: an attendee pastes one file per statement"
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
@@ -144,6 +144,13 @@ def test_table_declares_the_columns_in_order(table_sql):
 def test_table_is_append_only_and_readable_before_commit(table_sql):
     assert "'changelog.mode' = 'append'" in table_sql
     assert "'kafka.consumer.isolation-level' = 'read-uncommitted'" in table_sql
+
+
+def test_table_is_created_by_the_platform_team_and_can_be_emptied(table_sql):
+    """D-050: Terraform runs this DDL, so it must be re-runnable; `reset` and `reset-health`
+    empty the topic with delete-records, which needs delete cleanup."""
+    assert "CREATE TABLE IF NOT EXISTS `remediation_decisions`" in table_sql
+    assert "'kafka.cleanup-policy' = 'delete'" in table_sql
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))

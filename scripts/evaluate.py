@@ -11,7 +11,9 @@ and prints:
 - per service: false positives per hour outside incidents, and the fresh-start noise
   in the first 5 minutes.
 
-Decision half (Phase 4): if `remediation_decisions` exists, it also reads that and prints:
+Decision half (Phase 4): if `remediation_decisions` has rows (the platform team creates the
+table, so it exists from the start and stays empty until the agent INSERTs run), it also
+reads that and prints:
 
 - per agent: how many decisions, how many carry a valid action, routing errors;
 - per incident: the recommended action against the expected one, with the target;
@@ -140,7 +142,10 @@ def _load_rows(args, root: Path) -> list[dict]:
         return _read_jsonl(args.rows)
     records = _read_table(args.topic, args.creds, root)
     if records is None:
-        raise SystemExit(f"`{args.topic}` doesn't exist yet. Create it with sql/2.4_service_health.sql.")
+        raise SystemExit(
+            f"`{args.topic}` doesn't exist yet. Ask your platform team to re-apply, "
+            f"then run the INSERT in sql/2.4_service_health.sql."
+        )
     if args.dump:
         _dump(records, args.dump)
     return records
@@ -165,17 +170,20 @@ def _load_incidents(args, root: Path) -> tuple[list[Incident], str]:
 
 
 def _load_decisions(args, root: Path) -> list[dict] | None:
-    """The decision rows, or None when the decision half doesn't apply."""
+    """The decision rows, or None when the decision half doesn't apply.
+
+    The table always exists (the platform team creates it, D-050), so an empty topic means
+    "the agents haven't answered yet" and is treated like a missing one."""
     if args.no_decisions:
         return None
     if args.decision_rows:
-        return _read_jsonl(args.decision_rows)
+        return _read_jsonl(args.decision_rows) or None
     if args.rows:  # offline health dump, no credentials in play
         return None
     records = _read_table(args.decisions_topic, args.creds, root)
-    if records is not None and args.dump_decisions:
+    if records and args.dump_decisions:
         _dump(records, args.dump_decisions)
-    return records
+    return records or None
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -204,8 +212,8 @@ def main(argv: list[str] | None = None) -> None:
     records = _load_decisions(args, root)
     if records is None:
         console.print(
-            f"\n[dim]No `{args.decisions_topic}` yet — the decision half is skipped. "
-            f"Create it with sql/4.3_remediation_decisions.sql and the two INSERT statements.[/dim]"
+            f"\n[dim]No decisions in `{args.decisions_topic}` yet — the decision half is skipped. "
+            f"Run the two agent INSERTs (sql/4.3_insert_*.sql) to fill it.[/dim]"
         )
         return
     decisions = [DecisionRow.from_record(r) for r in records]

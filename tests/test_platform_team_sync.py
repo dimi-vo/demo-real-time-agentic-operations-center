@@ -1,7 +1,7 @@
 """platform-team/ must work when copied out of the repo, so its developer module
-carries its own copies of the two source-table CREATE TABLE statements. This test
-keeps those copies byte-for-byte (normalized) in step with the single source of
-truth in sql/."""
+carries its own copies of the five CREATE TABLE statements (three source tables, two
+output tables). This test keeps those copies byte-for-byte (normalized) in step with
+the single source of truth in sql/."""
 
 import re
 from pathlib import Path
@@ -16,6 +16,8 @@ COPIED_TABLES = (
     ("service_requests", "sql/source_service_requests.sql"),
     ("service_deployments", "sql/source_service_deployments.sql"),
     ("service_incidents", "sql/source_service_incidents.sql"),
+    ("service_health", "sql/sink_service_health.sql"),
+    ("remediation_decisions", "sql/sink_remediation_decisions.sql"),
 )
 
 _HEREDOC = re.compile(r"<<-(\w+)\n(.*?)\n\s*\1$", re.DOTALL | re.MULTILINE)
@@ -29,8 +31,10 @@ def _normalize(sql: str) -> str:
 def _create_statement_from_sql(path: Path) -> str:
     """The CREATE TABLE statement from a sql/ file (drops the leading -- comments)."""
     text = path.read_text()
-    idx = text.index("CREATE TABLE")
-    return text[idx:]
+    # The statement starts on a line of its own; a comment may mention CREATE TABLE earlier.
+    match = re.search(r"^CREATE TABLE ", text, re.MULTILINE)
+    assert match, f"no CREATE TABLE statement in {path.name}"
+    return text[match.start() :]
 
 
 def _heredoc_tables() -> dict[str, str]:
@@ -54,8 +58,14 @@ def test_statements_tf_matches_sql_source(table, sql_path):
     )
 
 
-def test_all_source_tables_are_present():
-    assert set(_heredoc_tables()) == {"service_requests", "service_deployments", "service_incidents"}
+def test_all_five_tables_are_present():
+    assert set(_heredoc_tables()) == {
+        "service_requests",
+        "service_deployments",
+        "service_incidents",
+        "service_health",
+        "remediation_decisions",
+    }
 
 
 def test_model_statement_present():

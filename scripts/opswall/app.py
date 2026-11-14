@@ -16,6 +16,9 @@ Two feed modes:
   sequence (``scripts/opswall/mock.py``) so every rendering path is on screen
   on demand. Useful for dashboard development and for previewing without an
   environment.
+
+The "Refresh data" button in the page header restarts whichever feed is running (live:
+every consumer re-attached, mock: the loop from its beginning) after clearing the state.
 """
 
 from __future__ import annotations
@@ -24,12 +27,12 @@ import argparse
 import logging
 import sys
 import threading
-import time
 import webbrowser
 
 import uvicorn
 
 from scripts.common.credentials import load_card
+from scripts.opswall.feed import Feed
 from scripts.opswall.server import create_app
 from scripts.opswall.state import OpsWallState
 
@@ -57,44 +60,36 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     state = OpsWallState()
-    stop = threading.Event()
-    feeds: list[threading.Thread] = []
 
     if args.mock:
-        from scripts.opswall.mock import MockDriver, aligned_start
+        from scripts.opswall.mock import start_threads as start_mock
 
-        driver = MockDriver(state=state, start_wall=aligned_start(time.time()))
-        driver.seed_deployments()
-
-        def pump():
-            while not stop.is_set():
-                driver.tick(time.time())
-                time.sleep(0.25)
-
-        feeds.append(threading.Thread(target=pump, name="ops-wall-mock", daemon=True))
+        def starter(stop: threading.Event) -> list[threading.Thread]:
+            return start_mock(state, stop)
     else:
         path, card = load_card(args.creds)
         logger.info("Using credential card: %s", path)
         from scripts.opswall.consumer import start_threads
 
-        feeds.extend(start_threads(state=state, card=card, stop=stop))
+        def starter(stop: threading.Event) -> list[threading.Thread]:
+            return start_threads(state=state, card=card, stop=stop)
 
-    for t in feeds:
-        if not t.is_alive():
-            t.start()
+    # The feed owns the threads so the "Refresh data" button can restart them (D-053).
+    feed = Feed(state, starter)
+    feed.start()
 
     url = f"http://{args.host if args.host != '0.0.0.0' else 'localhost'}:{args.port}"
     logger.info("ops-wall live at %s  (Ctrl-C to stop)%s", url, "  [MOCK FEED]" if args.mock else "")
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
-    app = create_app(state)
+    app = create_app(state, feed)
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     except KeyboardInterrupt:
         pass
     finally:
-        stop.set()
+        feed.stop()
 
 
 if __name__ == "__main__":  # pragma: no cover

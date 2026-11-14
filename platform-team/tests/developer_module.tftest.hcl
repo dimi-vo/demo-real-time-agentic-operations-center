@@ -107,13 +107,16 @@ run "statements_signed_as_principal_in_the_developer_catalog" {
     condition = (
       contains(keys(output.flink_statements), "service_requests") &&
       contains(keys(output.flink_statements), "service_deployments") &&
+      contains(keys(output.flink_statements), "service_incidents") &&
+      contains(keys(output.flink_statements), "service_health") &&
+      contains(keys(output.flink_statements), "remediation_decisions") &&
       contains(keys(output.flink_statements), "llm_textgen_model")
     )
-    error_message = "the module must create the two source tables and the model"
+    error_message = "the module must create the three source tables, the two output tables and the model"
   }
 }
 
-run "the_two_source_tables_and_model_are_created" {
+run "the_source_tables_and_model_are_created" {
   command = plan
 
   module {
@@ -138,5 +141,45 @@ run "the_two_source_tables_and_model_are_created" {
   assert {
     condition     = can(regex("CREATE MODEL IF NOT EXISTS .*`llm_textgen_model`.*'confluent.model' = 'anthropic.claude-sonnet-4-6'", confluent_flink_statement.llm_textgen_model.statement))
     error_message = "llm_textgen_model must be created on the configured CSP Hosted model"
+  }
+}
+
+# The two lab output tables exist before the labs start: attendees only INSERT into them
+# (D-050). Both are append-only and readable before commit, like the source tables.
+run "the_two_output_tables_are_created" {
+  command = plan
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = (
+      can(regex("^CREATE TABLE IF NOT EXISTS `service_health`", confluent_flink_statement.create_service_health_table.statement)) &&
+      can(regex("'changelog.mode' = 'append'", confluent_flink_statement.create_service_health_table.statement)) &&
+      can(regex("'kafka.consumer.isolation-level' = 'read-uncommitted'", confluent_flink_statement.create_service_health_table.statement)) &&
+      can(regex("'kafka.cleanup-policy' = 'delete'", confluent_flink_statement.create_service_health_table.statement))
+    )
+    error_message = "service_health must be an append-only, read-uncommitted table with delete cleanup"
+  }
+
+  assert {
+    condition = (
+      can(regex("^CREATE TABLE IF NOT EXISTS `remediation_decisions`", confluent_flink_statement.create_remediation_decisions_table.statement)) &&
+      can(regex("'changelog.mode' = 'append'", confluent_flink_statement.create_remediation_decisions_table.statement)) &&
+      can(regex("'kafka.consumer.isolation-level' = 'read-uncommitted'", confluent_flink_statement.create_remediation_decisions_table.statement)) &&
+      can(regex("'kafka.cleanup-policy' = 'delete'", confluent_flink_statement.create_remediation_decisions_table.statement))
+    )
+    error_message = "remediation_decisions must be an append-only, read-uncommitted table with delete cleanup"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in [
+        confluent_flink_statement.create_service_health_table,
+        confluent_flink_statement.create_remediation_decisions_table,
+      ] : can(regex("DISTRIBUTED INTO 1 BUCKETS", s.statement)) && can(regex("'kafka.retention.time' = '24 h'", s.statement))
+    ])
+    error_message = "both output tables must use one bucket and 24 h retention, like the source tables"
   }
 }

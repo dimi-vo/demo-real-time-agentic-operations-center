@@ -262,3 +262,40 @@ def test_context_comes_from_the_matching_health_row():
 def test_a_decision_without_its_health_row_says_so():
     rep = _score([_dec("cart", 40)], [], [])
     assert "no matching service_health row" in rep.context(rep.outside[0])
+
+
+# --- the decisions table always exists now (D-050) ----------------------------------
+
+
+def _main_with_tables(monkeypatch, capsys, decisions):
+    """Run `evaluate` against fake Kafka reads: real health rows, no incidents."""
+    import json
+    from pathlib import Path
+
+    from scripts import evaluate
+
+    health = [
+        json.loads(line)
+        for line in (Path(__file__).parent / "fixtures/opswall/service_health.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    tables = {
+        evaluate.SERVICE_HEALTH: health,
+        evaluate.SERVICE_INCIDENTS: [],
+        evaluate.REMEDIATION_DECISIONS: decisions,
+    }
+    monkeypatch.setattr(evaluate, "_read_table", lambda topic, creds, root: tables[topic])
+    evaluate.main([])
+    return " ".join(capsys.readouterr().out.split())  # rich wraps long lines
+
+
+def test_an_empty_decisions_topic_skips_the_decision_half(monkeypatch, capsys):
+    out = _main_with_tables(monkeypatch, capsys, decisions=[])
+    assert "decision half is skipped" in out
+    assert "Run the two agent INSERTs" in out
+    assert "Create it with" not in out  # the table is the platform team's, nobody creates it in a lab
+
+
+def test_a_missing_decisions_topic_skips_the_decision_half_too(monkeypatch, capsys):
+    out = _main_with_tables(monkeypatch, capsys, decisions=None)
+    assert "decision half is skipped" in out

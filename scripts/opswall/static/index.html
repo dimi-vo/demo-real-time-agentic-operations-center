@@ -7,22 +7,15 @@
   <link rel="stylesheet" href="/static/opswall.css" />
 </head>
 <body>
-  <!-- Shared SVG defs: the warm-up hatch is referenced by every chart. -->
-  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-    <defs>
-      <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-        <rect width="6" height="6" fill="rgba(163,174,198,0.04)" />
-        <line x1="0" y1="0" x2="0" y2="6" stroke="rgba(163,174,198,0.16)" stroke-width="2" />
-      </pattern>
-    </defs>
-  </svg>
-
   <header class="top">
     <div>
       <h1>Ops wall</h1>
       <p class="sub">What the simulator injected, against what <code>service_health</code> detected and what the agent did about it. Last 10 minutes.</p>
     </div>
-    <div class="clock">Updated <time id="updated">—</time><span id="conn" class="conn">connecting…</span></div>
+    <div class="tools">
+      <div class="clock">Updated <time id="updated">—</time><span id="conn" class="conn">connecting…</span></div>
+      <button type="button" id="refresh" class="refresh" title="Clear the charts and read the topics again">Refresh data</button>
+    </div>
   </header>
 
   <p class="summary" id="summary">Waiting for the first snapshot…</p>

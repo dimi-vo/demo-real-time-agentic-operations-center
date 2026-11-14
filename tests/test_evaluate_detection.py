@@ -144,6 +144,26 @@ def test_record_roundtrip_through_jsonl(tmp_path):
     assert row.signals == ("LATENCY_HIGH",)
 
 
+def test_a_row_with_detected_at_is_read_and_scored_like_before():
+    """D-054: service_health's 23rd column, a naive datetime from fastavro like the other
+    time columns, changes nothing: evaluate reads the columns it needs by name."""
+    from datetime import datetime, timezone
+
+    def naive(t):
+        return datetime.fromtimestamp(t, tz=timezone.utc).replace(tzinfo=None)
+
+    rows = _series("cart", 60, {40: {"lat": "HIGH"}})
+    records = [
+        {**r.__dict__, "window_start": naive(r.window_start), "window_end": naive(r.window_end),
+         "detected_at": naive(r.window_end + 6)}
+        for r in rows
+    ]  # fmt: skip
+    read = [HealthRow.from_record(rec) for rec in records]
+    assert read == rows
+    r = _score(read, [_inc("cart", 40, 3, 50)]).incidents[0]
+    assert r.status == DETECTED and r.first_window == 1
+
+
 def test_padded_char_statuses_are_trimmed():
     rec = {"service_name": "cart", "window_start": iso(T0), "window_end": iso(T0 + 10),
            "latency_status": "HIGH      ", "traffic_status": "LOW       "}  # fmt: skip

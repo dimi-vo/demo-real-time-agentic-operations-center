@@ -1,10 +1,11 @@
 """The 2.x pipeline files build on each other, so their shared pieces must stay identical.
 
 The walkthrough has attendees grow one statement step by step (join, window, detect,
-CTAS). These tests keep the canonical files in sql/ in step with each other and with
-the brief: the same `enriched` and `windowed` CTEs everywhere, the 2.4 CTAS body equal
+INSERT). These tests keep the canonical files in sql/ in step with each other and with
+the brief: the same `enriched` and `windowed` CTEs everywhere, the 2.4 INSERT body equal
 to the 2.3 status query, the same detector config for both metrics, the fixed 10-second
-window, explicit earliest-offset hints, and the service_health column list.
+window, explicit earliest-offset hints, and the service_health column list (in the 2.3
+query and in the platform team's DDL).
 """
 
 import re
@@ -33,7 +34,7 @@ DETECTOR_OVER = (
     "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
 )
 
-# Brief sections 5.2-5.4, in order.
+# Brief sections 5.2-5.4, in order, then detected_at (D-054).
 SERVICE_HEALTH_COLUMNS = (
     "service_name", "window_start", "window_end",
     "request_count", "error_count", "error_rate", "avg_latency_ms", "max_latency_ms",
@@ -42,6 +43,7 @@ SERVICE_HEALTH_COLUMNS = (
     "latency_status", "expected_latency_ms", "latency_upper_bound",
     "traffic_status", "expected_request_count", "traffic_lower_bound", "traffic_upper_bound",
     "error_rate_breach",
+    "detected_at",
 )  # fmt: skip
 
 EARLIEST = "/*+ OPTIONS('scan.startup.mode'='earliest-offset') */"
@@ -88,15 +90,12 @@ def test_windowed_cte_is_the_22_query(name):
     assert _norm(inner) == _norm(select_22)
 
 
-def test_ctas_body_is_the_23_status_query():
-    ctas = _body("2.4_service_health.sql")
-    head = (
-        "CREATE TABLE `service_health`\n"
-        "WITH ('changelog.mode' = 'append', 'kafka.consumer.isolation-level' = 'read-uncommitted')\n"
-        "AS\n"
-    )
-    assert ctas.startswith(head)
-    assert _norm(ctas[len(head) :]) == _norm(_body("2.3_anomaly_status.sql"))
+def test_insert_body_is_the_23_status_query():
+    """D-050: the table is the platform team's, so 2.4 is the 2.3 query behind one line."""
+    insert = _body("2.4_service_health.sql")
+    head = "INSERT INTO `service_health`\n"
+    assert insert.startswith(head)
+    assert _norm(insert[len(head) :]) == _norm(_body("2.3_anomaly_status.sql"))
 
 
 @pytest.mark.parametrize("name", DETECTION_FILES)
@@ -151,6 +150,44 @@ def test_service_health_columns_in_order():
     items.append(cur)
     names = [re.findall(r"\w+", item)[-1] for item in items]
     assert tuple(names) == SERVICE_HEALTH_COLUMNS
+
+
+def test_service_health_ddl_declares_the_columns_in_order():
+    """The INSERT is positional and several adjacent columns share a type, so the platform
+    team's table must list the same 23 names in the same order as the query."""
+    ddl = (SQL / "sink_service_health.sql").read_text()
+    declared = re.findall(r"^  `(\w+)` ", ddl, re.MULTILINE)
+    assert tuple(declared) == SERVICE_HEALTH_COLUMNS
+
+
+def test_detected_at_is_the_instant_of_the_verdict():
+    """D-054: filled on every row with the current timestamp, kept a TIMESTAMP_LTZ. The
+    workspace runs statements in the browser's time zone, so a cast to TIMESTAMP(3) would
+    store local wall-clock time (seen live: an hour ahead on GMT+01:00). PROCTIME() is not
+    supported on Confluent Cloud."""
+    text = (SQL / "sink_service_health.sql").read_text()
+    ddl = _norm(text[text.index("CREATE TABLE") :])
+    assert "`detected_at` TIMESTAMP_LTZ(3) NOT NULL" in ddl
+    status = _norm(_body("2.3_anomaly_status.sql"))
+    assert status.endswith("CURRENT_TIMESTAMP AS detected_at FROM anomaly;")
+    assert "PROCTIME" not in status
+
+
+def test_service_health_ddl_declares_both_status_columns_as_string():
+    """A declared VARCHAR(n) would truncate; the query's CASE literals are VARCHAR(10) (D-025)."""
+    text = (SQL / "sink_service_health.sql").read_text()
+    ddl = _norm(text[text.index("CREATE TABLE") :])
+    assert "`latency_status` STRING NOT NULL" in ddl
+    assert "`traffic_status` STRING NOT NULL" in ddl
+    assert "VARCHAR" not in ddl
+
+
+def test_service_health_ddl_is_append_only_and_can_be_emptied():
+    ddl = (SQL / "sink_service_health.sql").read_text()
+    assert "CREATE TABLE IF NOT EXISTS `service_health`" in ddl
+    assert "'changelog.mode' = 'append'" in ddl
+    assert "'kafka.consumer.isolation-level' = 'read-uncommitted'" in ddl
+    assert "'kafka.cleanup-policy' = 'delete'" in ddl
 
 
 def test_regular_join_antipattern_reads_new_requests_only():

@@ -1,9 +1,12 @@
--- 2.4 The service_health CTAS: the 2.3 part 2 query, written continuously to a table.
--- One row per service per 10-second window. Reads both sources from the earliest
--- offset, so it trains on the history ops-sim has built: no reset needed.
-CREATE TABLE `service_health`
-WITH ('changelog.mode' = 'append', 'kafka.consumer.isolation-level' = 'read-uncommitted')
-AS
+-- 2.4 The service_health INSERT: the 2.3 part 2 query, written continuously to the table.
+-- `service_health` already exists: the platform team's Terraform created it with its 23
+-- columns (sql/sink_service_health.sql), so this one statement is all you write. One row
+-- per service per 10-second window, in the 2.3 column order (the INSERT is positional).
+-- Reads both sources from the earliest offset, so it replays the history ops-sim has built
+-- (up to 24 hours) and trains on it: no reset needed.
+-- Running it twice writes every window twice. To change the query and start clean, run
+-- `uv run reset-health`, then Run the new INSERT.
+INSERT INTO `service_health`
 WITH enriched AS (
   SELECT
     r.event_time,
@@ -85,5 +88,10 @@ SELECT
   traffic_result.forecast_value AS expected_request_count,
   traffic_result.lower_bound AS traffic_lower_bound,
   traffic_result.upper_bound AS traffic_upper_bound,
-  error_rate > 0.05 AS error_rate_breach
+  error_rate > 0.05 AS error_rate_breach,
+  -- When this row's verdict was made: an instant (TIMESTAMP_LTZ), evaluated per row. The
+  -- workspace shows it in your time zone, while the window columns are UTC; put
+  -- SET 'sql.local-time-zone' = 'UTC'; in front of the query to see both in UTC. Its gap to
+  -- window_end is the real-time delay: the window has to close and the watermark pass.
+  CURRENT_TIMESTAMP AS detected_at
 FROM anomaly;

@@ -2,7 +2,7 @@
 
 These are the values from the build brief (section 4.1), except the request rates (D-030,
 D-031): ~41 requests/s in total instead of ~86, so a statement that replays history (the
-service_health CTAS, a drop-and-recreate) does about half the work. The three services
+service_health INSERT, a restart after `reset-health`) does about half the work. The three services
 that can suffer an UPSTREAM_DROP (cart, checkout, payments) run at 6 requests/s: with
 fewer than ~60 requests per 10-second window, a drop to 20% can't be told apart from
 normal noise (measured live and in the offline sweep, scripts/tuning). web-gateway stays

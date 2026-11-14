@@ -4,8 +4,8 @@
 --
 -- llm_textgen_model is pre-deployed by the platform team's Terraform, so there is no
 -- CREATE CONNECTION and no CREATE MODEL here. The agent calls no tools: it reasons over
--- the text it is given, which keeps this file a single statement that `reset --with-labs`
--- can rebuild on its own.
+-- the text it is given, which keeps this file a single statement an attendee can paste
+-- and run on its own.
 --
 -- The prompt is one single-quoted SQL string: it must not contain an apostrophe
 -- (doubling them works, but it is easy to get wrong when editing).

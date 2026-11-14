@@ -83,5 +83,10 @@ SELECT
   traffic_result.forecast_value AS expected_request_count,
   traffic_result.lower_bound AS traffic_lower_bound,
   traffic_result.upper_bound AS traffic_upper_bound,
-  error_rate > 0.05 AS error_rate_breach
+  error_rate > 0.05 AS error_rate_breach,
+  -- When this row's verdict was made: an instant (TIMESTAMP_LTZ), evaluated per row. The
+  -- workspace shows it in your time zone, while the window columns are UTC; put
+  -- SET 'sql.local-time-zone' = 'UTC'; in front of the query to see both in UTC. Its gap to
+  -- window_end is the real-time delay: the window has to close and the watermark pass.
+  CURRENT_TIMESTAMP AS detected_at
 FROM anomaly;

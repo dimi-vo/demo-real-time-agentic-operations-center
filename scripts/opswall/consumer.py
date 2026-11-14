@@ -169,11 +169,13 @@ def _tail(
                 except KafkaException as exc:
                     state.record_error(topic, "ASSIGN_FAILED", str(exc))
                 if not assigned:
-                    time.sleep(2.0)
+                    stop.wait(2.0)  # wakes at once on a stop, so a refresh isn't held up
                     continue
                 logger.info("Tailing %s", topic)
                 state.clear_error(topic)
             msg = consumer.poll(POLL_TIMEOUT_SEC)
+            if stop.is_set():
+                break  # a refresh cleared the state: this record belongs to the old generation
             if msg is None:
                 continue
             if msg.error():
@@ -208,7 +210,8 @@ def _tail(
 
 
 def start_threads(state: OpsWallState, card: dict[str, str], stop: threading.Event) -> list[threading.Thread]:
-    """Start four daemon consumer threads and return them."""
+    """Start four daemon consumer threads and return them. Every call attaches each consumer
+    afresh from its usual starting point, which is what "Refresh data" relies on (D-053)."""
     sr = _schema_registry(card)
 
     # (topic, apply, assign, decode the key?, use the Kafka timestamp?). Only
