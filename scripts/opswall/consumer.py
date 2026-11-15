@@ -40,7 +40,7 @@ INCIDENTS_TOPIC = "service_incidents"
 STARTUP_BACKREAD_SECONDS = AXIS_SECONDS  # read ~10 minutes of history on connect
 POLL_TIMEOUT_SEC = 0.5
 
-BENIGN_ERROR_CODES = frozenset({
+IGNORED_ERROR_CODES = frozenset({
     KafkaError.UNKNOWN_TOPIC_OR_PART,
     KafkaError._UNKNOWN_TOPIC,
     KafkaError._UNKNOWN_PARTITION,
@@ -180,7 +180,7 @@ def _tail(
                 continue
             if msg.error():
                 err = msg.error()
-                if err.code() in BENIGN_ERROR_CODES:
+                if err.code() in IGNORED_ERROR_CODES:
                     continue
                 logger.warning("[%s] %s: %s", topic, err.name(), err)
                 state.record_error(topic, err.name(), err.str() or str(err))

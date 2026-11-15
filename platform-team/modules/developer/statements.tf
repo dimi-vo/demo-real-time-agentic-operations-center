@@ -1,5 +1,5 @@
 # The workshop's tables and model, created as the platform team: the three source tables
-# (service_requests, service_deployments, service_incidents), the two output tables the
+# (service_metrics, service_deployments, service_incidents), the two output tables the
 # labs fill with INSERT statements (service_health, remediation_decisions), and the model.
 # Each statement is signed with the Global key and runs as that key's owner (principal_id).
 #
@@ -16,7 +16,7 @@
 # The statements are chained with depends_on in one line (D-037), in the order of this
 # file, and the model comes last.
 
-resource "confluent_flink_statement" "create_service_requests_table" {
+resource "confluent_flink_statement" "create_service_metrics_table" {
   organization { id = data.confluent_organization.main.id }
   environment { id = confluent_environment.main.id }
   compute_pool { id = confluent_flink_compute_pool.main.id }
@@ -28,16 +28,12 @@ resource "confluent_flink_statement" "create_service_requests_table" {
   }
 
   statement = <<-EOT
-    CREATE TABLE IF NOT EXISTS `service_requests` (
-      `event_time` TIMESTAMP(3) COMMENT 'Wall-clock time of the request, within the current 1s tick; also the Kafka record timestamp',
-      `service_name` STRING COMMENT 'Which River Shop service served the request (foreign key to service_deployments)',
-      `instance_id` STRING COMMENT 'Serving instance: {service}-{version_hash}-{replica_suffix}, like a Kubernetes pod',
-      `http_method` STRING COMMENT 'HTTP method of the route (GET, POST, DELETE)',
-      `route` STRING COMMENT 'Templated route, e.g. GET /api/v1/products/{id}, so cardinality stays low',
-      `status_code` INT COMMENT 'HTTP status code (2xx success, 4xx client error, 5xx server error)',
-      `latency_ms` DOUBLE COMMENT 'Request latency in milliseconds',
-      `response_bytes` INT COMMENT 'Response body size in bytes (~200 for error responses)',
-      `trace_id` STRING COMMENT '32 random hex characters identifying the request trace',
+    CREATE TABLE IF NOT EXISTS `service_metrics` (
+      `event_time` TIMESTAMP(3) COMMENT 'End of the second this sample covers (tick + 999 ms); also the Kafka record timestamp',
+      `service_name` STRING COMMENT 'Which River Shop service the sample describes (foreign key to service_deployments)',
+      `traffic_count` INT COMMENT 'Requests served in that second',
+      `latency_ms` DOUBLE COMMENT 'Mean latency of the requests in that second, in milliseconds; set even when traffic_count is 0',
+      `error_count` INT COMMENT 'Failed requests in that second (display only)',
       WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
     )
     DISTRIBUTED INTO 1 BUCKETS
@@ -103,7 +99,7 @@ resource "confluent_flink_statement" "create_service_deployments_table" {
     "sql.current-database" = confluent_kafka_cluster.main.display_name
   }
 
-  depends_on = [confluent_flink_statement.create_service_requests_table]
+  depends_on = [confluent_flink_statement.create_service_metrics_table]
 }
 
 resource "confluent_flink_statement" "create_service_incidents_table" {
@@ -166,11 +162,8 @@ resource "confluent_flink_statement" "create_service_health_table" {
       `service_name` STRING COMMENT 'River Shop service this window describes',
       `window_start` TIMESTAMP(3) NOT NULL COMMENT 'Start of the 10-second tumbling window',
       `window_end` TIMESTAMP(3) NOT NULL COMMENT 'End of the window; with service_name, the row identity',
-      `request_count` BIGINT NOT NULL COMMENT 'Requests in the window (COUNT(*))',
-      `error_count` INT NOT NULL COMMENT 'Requests with status_code >= 500',
-      `error_rate` DOUBLE NOT NULL COMMENT 'error_count / request_count',
-      `avg_latency_ms` DOUBLE COMMENT 'Mean request latency in the window',
-      `max_latency_ms` DOUBLE COMMENT 'Slowest request in the window',
+      `traffic_count` INT COMMENT 'Requests in the window (SUM of the per-second traffic_count)',
+      `avg_latency_ms` DOUBLE COMMENT 'Mean of the per-second latency_ms in the window',
       `version` STRING COMMENT 'Version live at the end of the window (temporal join, LAST_VALUE)',
       `previous_version` STRING COMMENT 'Version before it; null until the first deploy',
       `last_change` STRING COMMENT 'INITIAL, DEPLOY or ROLLBACK',
@@ -181,10 +174,9 @@ resource "confluent_flink_statement" "create_service_health_table" {
       `expected_latency_ms` DOUBLE COMMENT 'Detector forecast for avg_latency_ms; null while warming up',
       `latency_upper_bound` DOUBLE COMMENT 'Upper bound of the latency band',
       `traffic_status` STRING NOT NULL COMMENT 'WARMING_UP, HIGH, LOW or NORMAL',
-      `expected_request_count` DOUBLE COMMENT 'Detector forecast for request_count',
+      `expected_traffic_count` DOUBLE COMMENT 'Detector forecast for traffic_count',
       `traffic_lower_bound` DOUBLE COMMENT 'Lower bound of the traffic band',
       `traffic_upper_bound` DOUBLE COMMENT 'Upper bound of the traffic band',
-      `error_rate_breach` BOOLEAN NOT NULL COMMENT 'error_rate above 5 percent',
       `detected_at` TIMESTAMP_LTZ(3) NOT NULL COMMENT 'When the detector produced this verdict (CURRENT_TIMESTAMP, an instant)'
     )
     DISTRIBUTED INTO 1 BUCKETS

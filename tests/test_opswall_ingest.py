@@ -10,8 +10,9 @@ the live decoder. Two differences matter (D-048):
 
 The service_health and remediation_decisions fixtures are real rows read from Confluent
 Cloud in the Phase 4 live run (the payments bad deploy, 2026-11-12 09:45-09:47), minus
-the columns dropped since (D-043, D-044). The dump stored the decoder's datetimes as ISO
-text; `_as_decoded` turns them back. The real rows predate `detected_at` (D-054), so
+the columns dropped since (D-043, D-044, D-058), with the two count columns renamed
+traffic_count and expected_traffic_count (D-058). The dump stored the decoder's datetimes
+as ISO text; `_as_decoded` turns them back. The real rows predate `detected_at` (D-054), so
 `_fixture` adds a synthetic one to each health row. The other two topics go through the real
 AvroSerializer/AvroDeserializer pair against the repo's schemas in an in-memory Schema
 Registry, keys included.
@@ -113,7 +114,7 @@ def _live_payments_wall() -> OpsWallState:
 def test_real_health_rows_reach_the_wall():
     payments = _service(_live_payments_wall(), "payments", NOW)
     last = HEALTH[-1]
-    assert payments["rateRps"] == last["request_count"] / 10.0
+    assert payments["rateRps"] == last["traffic_count"] / 10.0
     assert payments["blocks"], "the HIGH latency windows must draw a block"
 
 
@@ -222,7 +223,7 @@ def test_detected_at_is_read_as_an_instant_through_the_avro_path():
     window_end = 1_800_000_000.0
     detected = window_end + 6.0
     record = {
-        "service_name": "auth", "window_end": _naive(window_end),
+        "service_name": "payments", "window_end": _naive(window_end),
         "latency_status": "HIGH", "traffic_status": "NORMAL",
         # what the statement computed in a GMT+01:00 session: the same instant, shown at +01:00
         "detected_at": datetime.fromtimestamp(detected, tz=timezone(timedelta(hours=1))),
@@ -234,6 +235,6 @@ def test_detected_at_is_read_as_an_instant_through_the_avro_path():
     st = OpsWallState()
     st.apply_health(decoded)
     now = detected + 2.0
-    [block] = _service(st, "auth", now)["blocks"]
+    [block] = _service(st, "payments", now)["blocks"]
     assert block["start"] == pytest.approx(detected - (now - st.axis_seconds))
     assert block["open"] is True

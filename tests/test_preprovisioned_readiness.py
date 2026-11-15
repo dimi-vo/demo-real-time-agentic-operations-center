@@ -59,10 +59,10 @@ def test_all_present(monkeypatch, capsys, card_path):
 
 
 def test_one_table_missing(monkeypatch, capsys, card_path):
-    _patch(monkeypatch, tables=("service_requests",), model=True)
+    _patch(monkeypatch, tables=("service_metrics",), model=True)
     assert provision._verify_ready(card_path.parent, card_path) is False
     out = capsys.readouterr().out
-    assert "✓ table service_requests" in out
+    assert "✓ table service_metrics" in out
     assert "✗ table service_deployments is missing" in out
     assert "✗ table service_incidents is missing" in out
 
@@ -81,7 +81,7 @@ def test_table_check_network_error_is_also_a_question_mark(monkeypatch, capsys, 
     _patch(monkeypatch, tables_error=requests.ConnectionError("DNS fail"), model=True)
     assert provision._verify_ready(card_path.parent, card_path) is False
     out = capsys.readouterr().out
-    assert "? could not check table service_requests" in out
+    assert "? could not check table service_metrics" in out
     assert "DNS fail" in out
 
 

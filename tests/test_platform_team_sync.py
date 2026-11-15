@@ -13,7 +13,7 @@ STATEMENTS_TF = ROOT / "platform-team/modules/developer/statements.tf"
 
 # (table, the sql/ file its CREATE TABLE is the source of truth for)
 COPIED_TABLES = (
-    ("service_requests", "sql/source_service_requests.sql"),
+    ("service_metrics", "sql/source_service_metrics.sql"),
     ("service_deployments", "sql/source_service_deployments.sql"),
     ("service_incidents", "sql/source_service_incidents.sql"),
     ("service_health", "sql/sink_service_health.sql"),
@@ -60,7 +60,7 @@ def test_statements_tf_matches_sql_source(table, sql_path):
 
 def test_all_five_tables_are_present():
     assert set(_heredoc_tables()) == {
-        "service_requests",
+        "service_metrics",
         "service_deployments",
         "service_incidents",
         "service_health",

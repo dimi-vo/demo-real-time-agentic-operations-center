@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # (DDL, value .avsc, key .avsc or None)
 PAIRS = [
-    ("sql/source_service_requests.sql", "schemas/service_requests.avsc", None),
+    ("sql/source_service_metrics.sql", "schemas/service_metrics.avsc", None),
     ("sql/source_service_deployments.sql", "schemas/service_deployments.avsc", "schemas/service_deployments_key.avsc"),
     ("sql/source_service_incidents.sql", "schemas/service_incidents.avsc", None),
 ]
@@ -91,11 +91,14 @@ def test_avsc_matches_ddl(sql_path, avsc_path, key_path):
 
 
 def test_ddl_parsed_expected_columns():
-    reqs = _ddl_columns((ROOT / "sql/source_service_requests.sql").read_text())
-    assert reqs["event_time"] == "local-timestamp-millis"
-    assert reqs["latency_ms"] == "double"
-    assert reqs["status_code"] == "int"
-    assert len(reqs) == 9
+    metrics = _ddl_columns((ROOT / "sql/source_service_metrics.sql").read_text())
+    assert metrics == {  # D-058: one metrics sample per service per second
+        "event_time": "local-timestamp-millis",
+        "service_name": "string",
+        "traffic_count": "int",
+        "latency_ms": "double",
+        "error_count": "int",
+    }
     deps = _ddl_columns((ROOT / "sql/source_service_deployments.sql").read_text())
     assert deps["service_name"] == "string"
     assert "max_replicas" not in deps  # D-043: no autoscaling ceiling

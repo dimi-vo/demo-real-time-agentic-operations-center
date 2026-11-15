@@ -152,7 +152,7 @@ def describe(d: DecisionRow, health: HealthRow | None) -> str:
         if health.seconds_since_deploy is not None:
             body += f", {health.last_change or 'no change'} {health.seconds_since_deploy}s ago"
         return body
-    body = f"{_num(health.request_count)} req vs {_num(health.expected_request_count)} expected"
+    body = f"{_num(health.traffic_count)} req vs {_num(health.expected_traffic_count)} expected"
     if health.ready_replicas is not None:
         body += f", {health.ready_replicas} replicas"
     return body
@@ -168,7 +168,7 @@ def check_target(d: DecisionRow, health: HealthRow | None) -> bool | None:
     if d.action == SCALE_OUT:
         if health is None:
             return None
-        want = suggested_replicas(health.ready_replicas, health.request_count, health.expected_request_count)
+        want = suggested_replicas(health.ready_replicas, health.traffic_count, health.expected_traffic_count)
         return want is not None and d.target == str(want)
     return False if d.target else None
 

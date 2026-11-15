@@ -14,11 +14,10 @@ SELECT
   ROUND(expected_latency_ms, 1) AS expected_latency_ms,
   ROUND(latency_upper_bound, 1) AS latency_upper_bound,
   traffic_status,
-  request_count,
-  ROUND(expected_request_count, 1) AS expected_request_count,
+  traffic_count,
+  ROUND(expected_traffic_count, 1) AS expected_traffic_count,
   ROUND(traffic_lower_bound, 1) AS traffic_lower_bound,
   ROUND(traffic_upper_bound, 1) AS traffic_upper_bound,
-  ROUND(error_rate, 3) AS error_rate,
   version,
   last_change,
   seconds_since_deploy

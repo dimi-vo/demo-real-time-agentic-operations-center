@@ -1,4 +1,4 @@
-"""Incident scheduler and benign-deploy rules (section 4.5)."""
+"""Incident scheduler rules (section 4.5)."""
 
 import random
 from itertools import pairwise
@@ -107,7 +107,7 @@ def test_bad_deploy_lifecycle_and_rollback():
     assert (end.old_version, end.new_version) == (broken, good)
 
 
-def test_every_incident_is_40_s_on_window_boundaries():
+def test_every_incident_lasts_the_duration_on_window_boundaries():
     # Start off a boundary to prove the rounding: the windows are epoch-aligned, not
     # aligned to the generator's start.
     rng = random.Random(9)
@@ -120,33 +120,39 @@ def test_every_incident_is_40_s_on_window_boundaries():
     assert len(incs) >= 10
     for inc in incs:
         assert inc.degradation_start % 10 == 0, inc
-        assert inc.degradation_end - inc.degradation_start == 40, inc
+        assert inc.degradation_end - inc.degradation_start == Config().duration == 20, inc  # D-059
     assert {i.type for i in incs} == {BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP}
 
 
-def test_no_incidents_flag_still_deploys():
-    config = Config(no_incidents=True, benign_first=60, benign_min=120, benign_max=180)
-    events, _, _ = _run(config, seed=5, horizon=1200)
-    assert not _incidents(events)
-    assert any(e.kind == "benign_deploy" for e in events)
+def test_no_incidents_runs_an_hour_without_a_deploy():
+    # D-057: the only deploys are bad deploys. With --no-incidents the deployments stream
+    # is the bootstrap record and then the 5-s heartbeat, which never changes a version.
+    from opsgen.cli import _build_parser, _config_from_args
+    from opsgen.simulation import Simulation
+
+    sim = Simulation(5, start=0.0, config=_config_from_args(_build_parser().parse_args(["--no-incidents"])))
+    boot = {r["service_name"]: r for r in sim.bootstrap()}
+    heartbeats = 0
+    for k in range(3600):
+        _, deps, events = sim.tick(float(k))
+        assert events == [], events
+        for r in deps:
+            heartbeats += 1
+            assert r["last_change"] == "INITIAL", r
+            assert (r["version"], r["deployed_at"]) == (
+                boot[r["service_name"]]["version"],
+                boot[r["service_name"]]["deployed_at"],
+            ), r
+    assert heartbeats == 3 * (3600 // 5 - 1)  # every 5 s, except tick 0 (the bootstrap covers it)
 
 
-def test_benign_first_deploy_timing():
-    config = Config(no_incidents=True, benign_first=60, benign_min=180, benign_max=300)
-    events, _, _ = _run(config, seed=6, horizon=400)
-    first = next(e for e in events if e.kind == "benign_deploy")
-    assert 60 <= first.now <= 61
-
-
-def test_benign_deploy_respects_min_gap_per_service():
-    config = Config(no_incidents=True, benign_first=10, benign_min=20, benign_max=20, benign_min_gap=300)
-    events, _, _ = _run(config, seed=7, horizon=3600)
-    last_by_service: dict[str, float] = {}
-    for e in events:
-        if e.kind == "benign_deploy":
-            if e.service_name in last_by_service:
-                assert e.now - last_by_service[e.service_name] >= 300
-            last_by_service[e.service_name] = e.now
+def test_versions_change_only_on_bad_deploys_and_their_rollbacks():
+    events, _, _ = _run(Config(), seed=7, horizon=3 * 3600)
+    assert {e.kind for e in events} == {"bad_deploy", "incident_start", "incident_end"}
+    changes = [e for e in events if e.old_version is not None]
+    assert changes, "expected a bad deploy in three hours"
+    for e in changes:
+        assert e.incident is not None and e.incident.type == BAD_DEPLOY, e
 
 
 def test_choose_incident_repicks_when_a_type_has_no_candidate():
@@ -173,7 +179,7 @@ ONE_ANSWER = {BAD_DEPLOY: "ROLLBACK", TRAFFIC_SURGE: "SCALE_OUT", UPSTREAM_DROP:
 
 @pytest.mark.parametrize(("itype", "svc"), [(t, s) for t in INCIDENT_TYPES for s in CANDIDATES[t]])
 def test_every_incident_has_exactly_one_expected_action(itype, svc):
-    # D-043: the action depends on the type only. A surge on auth expects SCALE_OUT too.
+    # D-043: the action depends on the type only, whatever the service.
     eng = Engine(rng=random.Random(0), start=0.0, config=Config(quiet_period=0))
     eng._choose_incident = lambda now: (itype, svc)
     [inc] = _incidents(eng.tick(0.0, _deployments()))
@@ -181,9 +187,12 @@ def test_every_incident_has_exactly_one_expected_action(itype, svc):
 
 
 def test_incident_candidates_match_spec():
-    assert set(CANDIDATES[TRAFFIC_SURGE]) == {"web-gateway", "catalog", "auth"}
-    assert set(CANDIDATES[UPSTREAM_DROP]) == {"cart", "checkout", "payments"}
-    assert set(CANDIDATES[BAD_DEPLOY]) == set(service_names())
+    # D-056: three services. Surges only on web-gateway, drops on checkout and payments,
+    # bad deploys on all three.
+    assert set(service_names()) == {"web-gateway", "checkout", "payments"}
+    assert CANDIDATES[TRAFFIC_SURGE] == ("web-gateway",)
+    assert set(CANDIDATES[UPSTREAM_DROP]) == {"checkout", "payments"}
+    assert set(CANDIDATES[BAD_DEPLOY]) == {"web-gateway", "checkout", "payments"}
 
 
 def test_incident_numbering_continues_after_a_restart(tmp_path):

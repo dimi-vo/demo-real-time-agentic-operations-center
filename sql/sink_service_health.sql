@@ -6,9 +6,9 @@
 -- write the INSERT in sql/2.4_service_health.sql; ops-wall and `uv run evaluate`
 -- read it, and the two agent INSERTs in section 4 read it too. (D-050)
 --
--- The 23 columns are the 23 columns of the 2.3 status query, in the same order: the
+-- The 19 columns are the 19 columns of the 2.3 status query, in the same order: the
 -- INSERT is positional, and tests/test_sql_pipeline.py checks the two lists against
--- each other. Columns 16-17 and 19-21 are all DOUBLE, so a swapped pair would
+-- each other. Columns 13-14 and 16-18 are all DOUBLE, so a swapped pair would
 -- type-check silently; the test is what catches it.
 --
 -- detected_at, the last column, is when the detector produced the row's verdict:
@@ -19,8 +19,8 @@
 -- wall draws each anomaly from it (D-054).
 --
 -- Types: only the two status columns were ever observed on Confluent Cloud
--- (VARCHAR(10), D-025). The rest are derived from the SQL (COUNT is BIGINT, SUM of
--- INT is INT, window bounds are NOT NULL, detector fields are nullable during warm-up)
+-- (VARCHAR(10), D-025). The rest are derived from the SQL (SUM of a nullable INT is a
+-- nullable INT, window bounds are NOT NULL, detector fields are nullable during warm-up)
 -- and are proven by the first apply: if a type is wrong, DROP TABLE service_health,
 -- fix this file and statements.tf together, and apply again. IF NOT EXISTS never
 -- changes an existing table.
@@ -38,11 +38,8 @@ CREATE TABLE IF NOT EXISTS `service_health` (
   `service_name` STRING COMMENT 'River Shop service this window describes',
   `window_start` TIMESTAMP(3) NOT NULL COMMENT 'Start of the 10-second tumbling window',
   `window_end` TIMESTAMP(3) NOT NULL COMMENT 'End of the window; with service_name, the row identity',
-  `request_count` BIGINT NOT NULL COMMENT 'Requests in the window (COUNT(*))',
-  `error_count` INT NOT NULL COMMENT 'Requests with status_code >= 500',
-  `error_rate` DOUBLE NOT NULL COMMENT 'error_count / request_count',
-  `avg_latency_ms` DOUBLE COMMENT 'Mean request latency in the window',
-  `max_latency_ms` DOUBLE COMMENT 'Slowest request in the window',
+  `traffic_count` INT COMMENT 'Requests in the window (SUM of the per-second traffic_count)',
+  `avg_latency_ms` DOUBLE COMMENT 'Mean of the per-second latency_ms in the window',
   `version` STRING COMMENT 'Version live at the end of the window (temporal join, LAST_VALUE)',
   `previous_version` STRING COMMENT 'Version before it; null until the first deploy',
   `last_change` STRING COMMENT 'INITIAL, DEPLOY or ROLLBACK',
@@ -53,10 +50,9 @@ CREATE TABLE IF NOT EXISTS `service_health` (
   `expected_latency_ms` DOUBLE COMMENT 'Detector forecast for avg_latency_ms; null while warming up',
   `latency_upper_bound` DOUBLE COMMENT 'Upper bound of the latency band',
   `traffic_status` STRING NOT NULL COMMENT 'WARMING_UP, HIGH, LOW or NORMAL',
-  `expected_request_count` DOUBLE COMMENT 'Detector forecast for request_count',
+  `expected_traffic_count` DOUBLE COMMENT 'Detector forecast for traffic_count',
   `traffic_lower_bound` DOUBLE COMMENT 'Lower bound of the traffic band',
   `traffic_upper_bound` DOUBLE COMMENT 'Upper bound of the traffic band',
-  `error_rate_breach` BOOLEAN NOT NULL COMMENT 'error_rate above 5 percent',
   `detected_at` TIMESTAMP_LTZ(3) NOT NULL COMMENT 'When the detector produced this verdict (CURRENT_TIMESTAMP, an instant)'
 )
 DISTRIBUTED INTO 1 BUCKETS

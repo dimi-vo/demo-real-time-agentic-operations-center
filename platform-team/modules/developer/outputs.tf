@@ -16,7 +16,7 @@ output "cluster_id" {
 output "flink_statements" {
   value = {
     for key, s in {
-      service_requests      = confluent_flink_statement.create_service_requests_table
+      service_metrics       = confluent_flink_statement.create_service_metrics_table
       service_deployments   = confluent_flink_statement.create_service_deployments_table
       service_incidents     = confluent_flink_statement.create_service_incidents_table
       service_health        = confluent_flink_statement.create_service_health_table

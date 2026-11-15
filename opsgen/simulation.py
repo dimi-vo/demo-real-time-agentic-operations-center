@@ -1,4 +1,4 @@
-"""Ties the engine, deployment state and request generation into per-second ticks.
+"""Ties the engine, deployment state and metrics generation into per-second ticks.
 
 `Simulation` is clock-agnostic: the live driver feeds it `time.time()`, the
 `--simulate` driver feeds it a fast synthetic clock. It never sleeps, never touches
@@ -12,13 +12,13 @@ from __future__ import annotations
 import random
 
 from opsgen.deployments import DeploymentState
-from opsgen.distributions import latency_ms, poisson, response_bytes, status_code, trace_id
+from opsgen.distributions import binomial, mean_latency_ms, poisson
 from opsgen.engine import Config, Engine, Event
-from opsgen.instances import instance_ids
-from opsgen.services import SERVICES, pick_route
+from opsgen.services import SERVICES
 
 REEMIT_INTERVAL = 5  # seconds; the controller reconciliation loop re-emits all services
-TICK_DURATION = 1.0  # seconds per tick
+# A metrics record covers one tick and is stamped at its end: tick + 999 ms (D-058).
+SAMPLE_OFFSET_MS = 999
 
 
 def to_millis(epoch_seconds: float) -> int:
@@ -91,48 +91,34 @@ class Simulation:
             return self.start_ms + 1000 * k
         return round(t * 1000)
 
-    def _gen_requests(self, now: float) -> list[dict]:
-        # Every request of this tick gets a timestamp in [tick_ms, tick_ms + 999]: never
-        # the next tick's millisecond, where a deploy record for the next version may sit
-        # (truncating float seconds could produce exactly that collision; see D-028).
-        tick_ms = self.tick_ms(now)
+    def _gen_metrics(self, now: float) -> list[dict]:
+        """One metrics sample per service: the second that starts at `now`, summed up
+        (D-058). An incident changes the values, never the number of records.
+
+        The record is stamped at the end of its second (tick + 999 ms): after a deploy
+        record on the same tick (D-028), so the temporal join gives it the new version, and
+        never on the next tick's millisecond, where the next deploy record may sit."""
+        event_time = self.tick_ms(now) + SAMPLE_OFFSET_MS
         out: list[dict] = []
         for svc in SERVICES:
-            dep = self.deployments[svc.name]
             eff = self.engine.effect_for(svc.name, now)
             count = poisson(svc.rps * eff.lam_mult, self.traffic_rng)
-            if count == 0:
-                continue
-            insts = instance_ids(svc.name, dep.version, dep.ready_replicas)
-            is_auth = svc.name == "auth"
-            for _ in range(count):
-                route = pick_route(svc, self.traffic_rng)
-                code = status_code(route.success_code, is_auth, self.traffic_rng, eff.server_error_rate)
-                lat = latency_ms(svc.median_latency_ms * eff.latency_mult, self.traffic_rng)
-                is_err = code >= 400
-                rbytes = response_bytes(route.base_bytes, is_err, self.traffic_rng)
-                tid = trace_id(self.traffic_rng)
-                inst = self.traffic_rng.choice(insts)
-                offset_ms = min(999, int(self.traffic_rng.uniform(0, TICK_DURATION) * 1000))
-                out.append(
-                    {
-                        "event_time": tick_ms + offset_ms,
-                        "service_name": svc.name,
-                        "instance_id": inst,
-                        "http_method": route.method,
-                        "route": f"{route.method} {route.path}",
-                        "status_code": code,
-                        "latency_ms": round(lat, 3),
-                        "response_bytes": rbytes,
-                        "trace_id": tid,
-                    }
-                )
+            latency = mean_latency_ms(count, svc.median_latency_ms * eff.latency_mult, self.traffic_rng)
+            out.append(
+                {
+                    "event_time": event_time,
+                    "service_name": svc.name,
+                    "traffic_count": count,
+                    "latency_ms": round(latency, 3),
+                    "error_count": binomial(count, eff.error_rate, self.traffic_rng),
+                }
+            )
         return out
 
     # --- tick ------------------------------------------------------------------
 
     def tick(self, now: float) -> tuple[list[dict], list[dict], list[Event]]:
-        """Advance one tick. Returns (request_records, deployment_records, events)."""
+        """Advance one tick. Returns (metrics_records, deployment_records, events)."""
         events = self.engine.tick(now, self.deployments)
         changed = {e.service_name for e in events if e.new_version is not None}
         dep_records: list[dict] = []
@@ -145,8 +131,8 @@ class Simulation:
             for name in self.deployments:
                 if name not in emitted:
                     dep_records.append(self._dep_record(name, now))
-        requests = self._gen_requests(now)
-        return requests, dep_records, events
+        metrics = self._gen_metrics(now)
+        return metrics, dep_records, events
 
     def state_snapshot(self) -> dict:
         """The persistable state: each service's deployment (versions, deployed_at) and

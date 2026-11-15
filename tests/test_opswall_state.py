@@ -93,16 +93,18 @@ def test_unknown_service_is_silently_ignored():
     st.apply_health({"service_name": "nope", "window_end": _dt(NOW)})
     st.apply_decision({"service_name": "nope"})
     st.apply_incident({"service_name": "nope", "incident_id": "X"})
-    assert len(st.snapshot(now=NOW)["services"]) == 6
+    assert len(st.snapshot(now=NOW)["services"]) == 3
 
 
-def test_rate_and_errors_come_from_the_newest_health_row():
+def test_rate_comes_from_the_newest_health_row_and_errors_have_no_source():
+    # service_health has no error columns (D-058): Errors stays empty ("—") until the rail
+    # reads service_metrics (issue 07).
     st = OpsWallState()
-    _health(st, "cart", NOW - 20, request_count=500, error_count=5)
-    _health(st, "cart", NOW - 10, request_count=800, error_count=20)
-    s = _svc(st, "cart")
+    _health(st, "payments", NOW - 20, traffic_count=500)
+    _health(st, "payments", NOW - 10, traffic_count=800)
+    s = _svc(st, "payments")
     assert s["rateRps"] == pytest.approx(80.0)
-    assert s["errorRatePct"] == pytest.approx(2.5)
+    assert s["errorRatePct"] is None
 
 
 # --- incidents ----------------------------------------------------------------
@@ -123,11 +125,11 @@ def test_start_record_opens_the_box_end_record_closes_it():
 
 def test_start_record_after_end_is_ignored():
     st = OpsWallState()
-    end = {"service_name": "cart", "incident_id": "INC0001", "incident_type": "UPSTREAM_DROP",
+    end = {"service_name": "payments", "incident_id": "INC0001", "incident_type": "UPSTREAM_DROP",
            "event_time": _dt(NOW - 100), "started_at": _dt(NOW - 140), "ended_at": _dt(NOW - 100)}
     st.apply_incident(end)
     st.apply_incident({**end, "ended_at": None, "event_time": _dt(NOW - 140)})
-    [gt] = _svc(st, "cart")["groundTruth"]
+    [gt] = _svc(st, "payments")["groundTruth"]
     assert gt["open"] is False and gt["metric"] == "traffic"
 
 
@@ -249,9 +251,9 @@ def test_a_decision_for_another_trigger_or_no_run_is_ignored():
 
 def test_traffic_high_and_low_are_separate_blocks_with_their_direction():
     st = OpsWallState()
-    _health(st, "cart", T0 + 10, trf="HIGH")
-    _health(st, "cart", T0 + 20, trf="LOW")
-    blocks = _svc(st, "cart", T0 + 30)["blocks"]
+    _health(st, "payments", T0 + 10, trf="HIGH")
+    _health(st, "payments", T0 + 20, trf="LOW")
+    blocks = _svc(st, "payments", T0 + 30)["blocks"]
     assert [(b["metric"], b["direction"], b["trigger"]) for b in blocks] == [
         ("traffic", "up", "TRAFFIC_HIGH"), ("traffic", "down", "TRAFFIC_LOW")]
 
@@ -388,16 +390,16 @@ def test_the_summary_counts_verdicts_and_takes_medians_over_answered_incidents()
     _health(st, "checkout", T0 + 10, lat="HIGH")
     _decide(st, "checkout", T0 + 10, at=T0 + 24)
     # answered: a surge detected 26 s after it started, answered 12 s later
-    _incident(st, "catalog", T0, T0 + 40, incident_type="TRAFFIC_SURGE", iid="INC-B")
-    _health(st, "catalog", T0 + 20, trf="HIGH")
-    _decide(st, "catalog", T0 + 20, at=T0 + 38, action="SCALE_OUT", trigger="TRAFFIC_HIGH", target="5",
+    _incident(st, "web-gateway", T0, T0 + 40, incident_type="TRAFFIC_SURGE", iid="INC-B")
+    _health(st, "web-gateway", T0 + 20, trf="HIGH")
+    _decide(st, "web-gateway", T0 + 20, at=T0 + 38, action="SCALE_OUT", trigger="TRAFFIC_HIGH", target="5",
             agent="capacity_agent")
     # missed: detected, never answered
     _incident(st, "payments", T0, T0 + 40, iid="INC-C")
     _health(st, "payments", T0 + 10, lat="HIGH")
-    # pending: still running, nothing detected yet
-    _incident(st, "auth", NOW - 5, iid="INC-D")
-    # false alarm
+    # pending: still running, nothing detected yet (checkout's second incident)
+    _incident(st, "checkout", NOW - 5, iid="INC-D")
+    # false alarm: latency, so the surge on the same service doesn't own it
     _health(st, "web-gateway", T0 + 100, lat="HIGH")
     _decide(st, "web-gateway", T0 + 100, at=T0 + 114, action="OBSERVE", target=None)
 
@@ -425,12 +427,12 @@ def test_an_empty_wall_has_an_empty_summary():
 def test_trim_drops_entries_older_than_the_axis():
     st = OpsWallState()
     old = NOW - AXIS_SECONDS * 2
-    _incident(st, "cart", old, old + 40, incident_type="UPSTREAM_DROP")
-    _health(st, "cart", old, trf="LOW")
-    _decide(st, "cart", old, at=old + 10, action="INVESTIGATE_UPSTREAM", trigger="TRAFFIC_LOW")
-    _health(st, "cart", NOW - 10)
+    _incident(st, "payments", old, old + 40, incident_type="UPSTREAM_DROP")
+    _health(st, "payments", old, trf="LOW")
+    _decide(st, "payments", old, at=old + 10, action="INVESTIGATE_UPSTREAM", trigger="TRAFFIC_LOW")
+    _health(st, "payments", NOW - 10)
     st.trim(NOW)
-    s = _svc(st, "cart")
+    s = _svc(st, "payments")
     assert s["blocks"] == [] and s["groundTruth"] == []
     assert s["rateRps"] is None or s["rateRps"] >= 0
 
@@ -492,7 +494,7 @@ def test_concurrent_writes_do_not_raise():
     def writer():
         for _ in range(200):
             t = time.time()
-            _health(st, "cart", t, lat="HIGH", detected_at=t)
+            _health(st, "payments", t, lat="HIGH", detected_at=t)
 
     threads = [threading.Thread(target=writer) for _ in range(4)]
     for t in threads:

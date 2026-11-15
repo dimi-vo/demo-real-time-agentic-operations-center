@@ -75,8 +75,7 @@ class HealthRow:
     window_end: float  # epoch seconds
     latency_status: str
     traffic_status: str
-    request_count: int | None = None
-    error_count: int | None = None
+    traffic_count: int | None = None
     detected_at: float | None = None  # when the detector produced the verdict; None on older rows
 
 
@@ -173,8 +172,7 @@ class OpsWallState:
             window_end=w,
             latency_status=record.get("latency_status") or "NORMAL",
             traffic_status=record.get("traffic_status") or "NORMAL",
-            request_count=record.get("request_count"),
-            error_count=record.get("error_count"),
+            traffic_count=record.get("traffic_count"),
             detected_at=_to_seconds(record.get("detected_at")),
         )
         with self._lock:
@@ -244,7 +242,7 @@ class OpsWallState:
             self._connection_errors.pop(topic, None)
 
     def clear(self) -> None:
-        """Back to the state a new wall starts in: six pre-seeded services (tier and replicas,
+        """Back to the state a new wall starts in: three pre-seeded services (tier and replicas,
         nothing else), no connection errors, and the next ``generation``. The owner of the feed
         calls this while no consumer is running, then starts new ones (D-053)."""
         with self._lock:
@@ -298,10 +296,7 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
 
     status, status_text = _status(blocks, now)
     latest = health[-1] if health else None
-    rate = latest.request_count / WINDOW_SECONDS if latest and latest.request_count is not None else None
-    err = None
-    if latest and latest.request_count and latest.error_count is not None:
-        err = 100.0 * latest.error_count / max(1, latest.request_count)
+    rate = latest.traffic_count / WINDOW_SECONDS if latest and latest.traffic_count is not None else None
     return {
         "name": s.name,
         "tier": s.tier,
@@ -311,7 +306,9 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
         "lastChange": s.last_change,
         "secondsSinceDeploy": (now - s.deployed_at) if s.deployed_at else None,
         "rateRps": rate,
-        "errorRatePct": err,
+        # service_health has no error columns (D-058); the page shows "—" until the rail
+        # reads error_count from service_metrics (issue 07).
+        "errorRatePct": None,
         "status": status,
         "statusText": status_text,
         "groundTruth": [_incident_json(i, [b for b in blocks if b.incident is i], now, rel)

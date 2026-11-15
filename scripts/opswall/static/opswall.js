@@ -10,7 +10,7 @@
  *    counts of all its decisions, all shown in its tooltip (no icons on the chart)
  *  - the summary numbers and the tile status come ready-made as well
  *  All positions are axis-relative seconds (0 = left edge, axisSeconds = now). The DOM is
- *  rebuilt on every snapshot (six rows); a ResizeObserver redraws the charts.
+ *  rebuilt on every snapshot (one row per service); a ResizeObserver redraws the charts.
  */
 
 // ---------- WebSocket ----------

@@ -3,31 +3,28 @@
 -- lexicographic and picks the wrong version in a window that contains a deploy.
 WITH enriched AS (
   SELECT
-    r.event_time,
-    r.service_name,
-    r.status_code,
-    r.latency_ms,
+    m.event_time,
+    m.service_name,
+    m.traffic_count,
+    m.latency_ms,
     d.version,
     d.previous_version,
     d.deployed_at,
     d.last_change,
     d.ready_replicas,
     d.tier
-  FROM `service_requests` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */ r
+  FROM `service_metrics` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */ m
   JOIN `service_deployments` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
-    FOR SYSTEM_TIME AS OF r.event_time AS d
-    ON r.service_name = d.service_name
+    FOR SYSTEM_TIME AS OF m.event_time AS d
+    ON m.service_name = d.service_name
 )
 SELECT
   window_start,
   window_end,
   window_time,
   service_name,
-  COUNT(*) AS request_count,
-  SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) AS error_count,
-  CAST(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) AS DOUBLE) / COUNT(*) AS error_rate,
+  SUM(traffic_count) AS traffic_count,
   AVG(latency_ms) AS avg_latency_ms,
-  MAX(latency_ms) AS max_latency_ms,
   LAST_VALUE(version) AS version,
   LAST_VALUE(previous_version) AS previous_version,
   LAST_VALUE(last_change) AS last_change,

@@ -1,9 +1,10 @@
 """Per-service deployment state and the version/rollback semantics (brief section 4.3).
 
-Every deploy (benign or bad) increments the patch number and records the prior
-version; a rollback restores the prior version and records the one it rolled back
-from. Versions switch instantly — no mixed-version period — which keeps the temporal
-join demo crisp. `SCALE` is reserved for a later project and is never emitted here.
+Every deploy increments the patch number and records the prior version; a rollback
+restores the prior version and records the one it rolled back from. The only deploys
+are bad deploys, each rolled back when its incident ends (D-057). Versions switch
+instantly — no mixed-version period — which keeps the temporal join demo crisp.
+`SCALE` is reserved for a later project and is never emitted here.
 """
 
 from __future__ import annotations

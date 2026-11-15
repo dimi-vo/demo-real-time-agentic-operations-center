@@ -11,7 +11,7 @@ This Terraform module builds **each developer's workshop stack**:
 - **a new, empty environment**, named after their email (see [Environment names](#environment-names)), with the Stream Governance Advanced package, and a role binding that makes the developer **EnvironmentAdmin** on it through their own user account;
 - **a Standard, single-zone Kafka cluster**, `RIVER-OOPS-DEMO-CLUSTER`, on AWS in `region` (default `us-east-1`, the same for everyone). The environment's Schema Registry comes up with it;
 - **a Flink compute pool**, `RIVER-OOPS-DEMO-pool`, that scales on demand up to `flink_max_cfu` CFUs (default 10), sized for the statements that run the whole workshop (the `service_health` `INSERT`, two agent `INSERT`s, and ad-hoc queries);
-- **the workshop's tables and AI model:** three source tables, `service_requests` (append-only request log), `service_deployments` (upsert, keyed by `service_name`) and `service_incidents` (the simulator's answer key), all empty until the developer runs `uv run ops-sim`; two output tables, `service_health` and `remediation_decisions`, which the developer fills with `INSERT` statements in the labs (so the developer never writes a `CREATE TABLE`, and the ops wall can read all four of its topics from the start); and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`).
+- **the workshop's tables and AI model:** three source tables, `service_metrics` (append-only, one metrics sample per service per second), `service_deployments` (upsert, keyed by `service_name`) and `service_incidents` (the simulator's answer key), all empty until the developer runs `uv run ops-sim`; two output tables, `service_health` and `remediation_decisions`, which the developer fills with `INSERT` statements in the labs (so the developer never writes a `CREATE TABLE`, and the ops wall can read all four of its topics from the start); and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`).
 
 There is **no static/seed table**: unlike some workshops, this one builds all of its
 data live from the generator, so there is nothing to seed and nothing to count.
@@ -161,7 +161,7 @@ is 12 per person**:
 4. One Standard cluster
 5. One Flink compute pool
 6. A 60-second pause
-7. Flink statement: create the `service_requests` table
+7. Flink statement: create the `service_metrics` table
 8. Flink statement: create the `service_deployments` table
 9. Flink statement: create the `service_incidents` table
 10. Flink statement: create the `service_health` table
@@ -222,7 +222,7 @@ new, empty one.
 terraform output -raw validation
 ```
 
-It prints one Console link per developer to their `service_requests` topic's **schema**
+It prints one Console link per developer to their `service_metrics` topic's **schema**
 tab. Open each: the topic must exist and have a registered schema (the topics stay
 empty until the developer runs `uv run ops-sim`, so a registered schema — not
 messages — is what proves the `CREATE TABLE` ran). If a topic is missing, its

@@ -14,9 +14,7 @@ Pure functions over plain data, so they're unit-tested offline. The definitions
   section 11: "within 3 windows of onset"), else **late**. Otherwise **missed**.
 - **False positive.** A signal on a row outside every incident span of its service.
   It's tagged `echo` when it falls in the minute after one of that service's
-  incidents ended (ARIMA's forecast lagging the return to baseline), and
-  `after deploy` when the service deployed less than a minute earlier (a benign
-  deploy, which must not move the metrics).
+  incidents ended (ARIMA's forecast lagging the return to baseline).
 - **Restart artifacts.** When `ops-sim` stops and restarts, the windows on either side
   of the gap hold only part of the normal traffic, so the detectors rightly flag them.
   Signals in the last window before a gap and in the minute after it are counted as
@@ -40,11 +38,10 @@ WINDOW_SECONDS = 10.0
 DETECT_WITHIN_WINDOWS = 3
 FRESH_START_SECONDS = 300.0
 ECHO_SECONDS = 60.0
-AFTER_DEPLOY_SECONDS = 60
 RESTART_SECONDS = 60.0
 # Only ended incidents are scored (their end record has arrived), so the newest rows may
-# belong to one still in progress. An incident lasts 40 s (D-042; it was up to 80 s with
-# the old onset delay); rows ending 100 s before the newest row can't be part of one.
+# belong to one still in progress. An incident lasts 20 s (D-059; 40 s under D-042, up to
+# 80 s with the old onset delay); rows ending 100 s before the newest row can't be part of one.
 UNLOGGED_TAIL_SECONDS = 100.0
 
 LATENCY_HIGH = "LATENCY_HIGH"
@@ -68,12 +65,10 @@ class HealthRow:
     avg_latency_ms: float | None = None
     expected_latency_ms: float | None = None
     latency_upper_bound: float | None = None
-    request_count: int | None = None
-    expected_request_count: float | None = None
+    traffic_count: int | None = None
+    expected_traffic_count: float | None = None
     traffic_lower_bound: float | None = None
     traffic_upper_bound: float | None = None
-    error_rate: float | None = None
-    error_rate_breach: bool | None = None
     version: str | None = None
     last_change: str | None = None
     seconds_since_deploy: int | None = None
@@ -96,12 +91,10 @@ class HealthRow:
             avg_latency_ms=rec.get("avg_latency_ms"),
             expected_latency_ms=rec.get("expected_latency_ms"),
             latency_upper_bound=rec.get("latency_upper_bound"),
-            request_count=rec.get("request_count"),
-            expected_request_count=rec.get("expected_request_count"),
+            traffic_count=rec.get("traffic_count"),
+            expected_traffic_count=rec.get("expected_traffic_count"),
             traffic_lower_bound=rec.get("traffic_lower_bound"),
             traffic_upper_bound=rec.get("traffic_upper_bound"),
-            error_rate=rec.get("error_rate"),
-            error_rate_breach=rec.get("error_rate_breach"),
             version=rec.get("version"),
             last_change=rec.get("last_change"),
             seconds_since_deploy=rec.get("seconds_since_deploy"),
@@ -133,7 +126,7 @@ class HealthRow:
             )
         bound = self.traffic_upper_bound if signal == TRAFFIC_HIGH else self.traffic_lower_bound
         side = "upper" if signal == TRAFFIC_HIGH else "lower"
-        return f"{self.request_count} req vs expected {_num(self.expected_request_count)} ({side} {_num(bound)})"
+        return f"{self.traffic_count} req vs expected {_num(self.expected_traffic_count)} ({side} {_num(bound)})"
 
 
 def _num(v: float | None) -> str:
@@ -226,7 +219,7 @@ class IncidentResult:
 class FalsePositive:
     row: HealthRow
     signal: str
-    tag: str  # "echo", "after deploy" or ""
+    tag: str  # "echo" or ""
 
 
 @dataclass
@@ -285,14 +278,14 @@ def rescale_confidence(rows: list[HealthRow], base: float, target: float) -> lis
     k = z(target) / z(base)
     out = []
     for r in rows:
-        if r.warming_up or r.expected_latency_ms is None or r.expected_request_count is None:
+        if r.warming_up or r.expected_latency_ms is None or r.expected_traffic_count is None:
             out.append(r)
             continue
         up_l = r.expected_latency_ms + (r.latency_upper_bound - r.expected_latency_ms) * k
-        up_t = r.expected_request_count + (r.traffic_upper_bound - r.expected_request_count) * k
-        lo_t = r.expected_request_count - (r.expected_request_count - r.traffic_lower_bound) * k
+        up_t = r.expected_traffic_count + (r.traffic_upper_bound - r.expected_traffic_count) * k
+        lo_t = r.expected_traffic_count - (r.expected_traffic_count - r.traffic_lower_bound) * k
         lat = "HIGH" if r.avg_latency_ms > up_l else "NORMAL"
-        trf = "HIGH" if r.request_count > up_t else "LOW" if r.request_count < lo_t else "NORMAL"
+        trf = "HIGH" if r.traffic_count > up_t else "LOW" if r.traffic_count < lo_t else "NORMAL"
         out.append(replace(r, latency_status=lat, traffic_status=trf, latency_upper_bound=up_l,
                            traffic_upper_bound=up_t, traffic_lower_bound=lo_t))  # fmt: skip
     return out
@@ -403,6 +396,4 @@ def _tag(row: HealthRow, incidents: list[Incident]) -> str:
     for inc in incidents:
         if inc.effective_end <= row.window_start < inc.effective_end + ECHO_SECONDS:
             return "echo"
-    if row.seconds_since_deploy is not None and 0 <= row.seconds_since_deploy < AFTER_DEPLOY_SECONDS:
-        return "after deploy"
     return ""

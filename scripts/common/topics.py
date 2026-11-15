@@ -9,7 +9,7 @@ from __future__ import annotations
 
 # The three topics the generator writes to, and the two the labs' INSERTs write to. All five
 # are created by the platform team's Terraform (D-050).
-SOURCE_TOPICS = ("service_requests", "service_deployments", "service_incidents")
+SOURCE_TOPICS = ("service_metrics", "service_deployments", "service_incidents")
 OUTPUT_TOPICS = ("service_health", "remediation_decisions")
 
 

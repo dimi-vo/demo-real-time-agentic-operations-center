@@ -4,9 +4,9 @@
   uv run ops-sim --dry-run               # print raw events to stdout, no Kafka
   uv run ops-sim --dry-run --simulate 60 # fast synthetic clock, window summaries
   uv run ops-sim --dry-run --seed 42     # reproducible schedule and traffic
-  uv run ops-sim --no-incidents          # benign deploys only
+  uv run ops-sim --no-incidents          # baseline traffic only: no incidents, no deploys
 
-The scheduling overrides (quiet period, spacing, duration, cooldown, benign cadence)
+The scheduling overrides (quiet period, spacing, duration, cooldown)
 are in seconds and exist to make the workshop quick to develop against.
 """
 
@@ -32,7 +32,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="With --dry-run: run a synthetic clock for MINUTES without sleeping, printing per-window summaries",
     )
     p.add_argument("--seed", type=int, help="Seed the RNG so the whole schedule and traffic are reproducible")
-    p.add_argument("--no-incidents", action="store_true", help="Benign deploys only; never inject an incident")
+    p.add_argument("--no-incidents", action="store_true", help="Never inject an incident (so never deploy either)")
     p.add_argument("--creds", help="Path to the credential card (live mode; default: read from credentials.env)")
 
     g = p.add_argument_group("schedule overrides (seconds)")
@@ -41,9 +41,6 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument("--spacing-max", type=float, default=Config.spacing_max, help="Max gap after an incident ends")
     g.add_argument("--duration", type=float, default=Config.duration, help="Incident degradation duration")
     g.add_argument("--cooldown", type=float, default=Config.cooldown, help="Min gap between incidents on one service")
-    g.add_argument("--benign-first", type=float, default=Config.benign_first, help="When the first benign deploy fires")
-    g.add_argument("--benign-min", type=float, default=Config.benign_min, help="Min gap between benign deploys")
-    g.add_argument("--benign-max", type=float, default=Config.benign_max, help="Max gap between benign deploys")
     return p
 
 
@@ -54,9 +51,6 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         spacing_max=args.spacing_max,
         duration=args.duration,
         cooldown=args.cooldown,
-        benign_first=args.benign_first,
-        benign_min=args.benign_min,
-        benign_max=args.benign_max,
         no_incidents=args.no_incidents,
     )
 
@@ -92,7 +86,7 @@ def main(argv: list[str] | None = None) -> None:
     # continues both (incident ids must never repeat).
     initial = load_state(state_path(root))
     sim = Simulation(args.seed, start=aligned_start(time.time()), config=config, initial_state=initial)
-    print("Producing to service_requests, service_deployments and service_incidents. Ctrl-C to stop.")
+    print("Producing to service_metrics, service_deployments and service_incidents. Ctrl-C to stop.")
     run_realtime(sim, KafkaSink(card), root=root)
 
 

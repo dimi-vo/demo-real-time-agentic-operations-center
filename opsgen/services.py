@@ -1,39 +1,21 @@
-"""The six River Shop services and their routes — the one place their defaults live.
+"""The three River Shop services — the one place their defaults live.
 
-These are the values from the build brief (section 4.1), except the request rates (D-030,
-D-031): ~41 requests/s in total instead of ~86, so a statement that replays history (the
-service_health INSERT, a restart after `reset-health`) does about half the work. The three services
-that can suffer an UPSTREAM_DROP (cart, checkout, payments) run at 6 requests/s: with
-fewer than ~60 requests per 10-second window, a drop to 20% can't be told apart from
-normal noise (measured live and in the offline sweep, scripts/tuning). web-gateway stays
-the busiest service.
-There is no replica ceiling (D-043): a surge on any surge candidate, `auth` included,
-expects SCALE_OUT.
+These are the values from the build brief (section 4.1), minus the services D-056 removed,
+except the traffic means (D-059): 50/30/30 requests/s. Each second, a service's
+`service_metrics` record counts Poisson(`rps`) requests and averages their latencies around
+`median_latency_ms` (D-058), so the topic carries three records per second whatever the
+means, and replaying history costs the same at any traffic level. The means were chosen
+offline (scripts/tuning, `.scratch/simplify-demo/research/tune.py`): calmer data shortens
+the rests between incidents, rougher data cuts false alarms at a fresh start, and 50/30/30
+sits between the two while staying visibly noisy. The two services that can suffer an
+UPSTREAM_DROP (checkout, payments) need at least ~6 requests/s (D-031); web-gateway, the
+only TRAFFIC_SURGE service, stays the busiest. Every service can get a BAD_DEPLOY.
+There is no replica ceiling (D-043): a surge always expects SCALE_OUT.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class Route:
-    """One templated route. `weight` is relative (normalized per service when picked);
-    `base_bytes` is the nominal successful-response size before ±20% jitter."""
-
-    method: str
-    path: str
-    weight: float
-    base_bytes: int
-
-    @property
-    def success_code(self) -> int:
-        """Status for a successful response: 201 for POST, 204 for DELETE, else 200."""
-        if self.method == "POST":
-            return 201
-        if self.method == "DELETE":
-            return 204
-        return 200
 
 
 @dataclass(frozen=True)
@@ -43,9 +25,8 @@ class Service:
     owner_team: str
     initial_version: str
     median_latency_ms: float
-    rps: float  # Poisson mean requests per second (lambda); see D-030/D-031
+    rps: float  # traffic mean: Poisson mean of traffic_count per second (D-059)
     ready_replicas: int
-    routes: tuple[Route, ...]
 
 
 SERVICES: tuple[Service, ...] = (
@@ -55,55 +36,8 @@ SERVICES: tuple[Service, ...] = (
         owner_team="edge",
         initial_version="3.4.2",
         median_latency_ms=35,
-        rps=10,
+        rps=50,
         ready_replicas=4,
-        routes=(
-            Route("GET", "/", 60, 1200),
-            Route("GET", "/api/v1/home", 30, 3500),
-            Route("GET", "/static/{asset}", 10, 9000),
-        ),
-    ),
-    Service(
-        name="auth",
-        tier="CRITICAL",
-        owner_team="identity",
-        initial_version="2.1.7",
-        median_latency_ms=20,
-        rps=5,
-        ready_replicas=4,
-        routes=(
-            Route("POST", "/api/v1/login", 60, 420),
-            Route("POST", "/api/v1/token/refresh", 30, 260),
-            Route("GET", "/api/v1/session", 10, 540),
-        ),
-    ),
-    Service(
-        name="catalog",
-        tier="STANDARD",
-        owner_team="discovery",
-        initial_version="5.0.3",
-        median_latency_ms=60,
-        rps=8,
-        ready_replicas=3,
-        routes=(
-            Route("GET", "/api/v1/products", 60, 4200),
-            Route("GET", "/api/v1/products/{id}", 30, 1600),
-            Route("GET", "/api/v1/search", 10, 2800),
-        ),
-    ),
-    Service(
-        name="cart",
-        tier="STANDARD",
-        owner_team="shopping",
-        initial_version="1.8.0",
-        median_latency_ms=45,
-        rps=6,
-        ready_replicas=2,
-        routes=(
-            Route("GET", "/api/v1/cart", 60, 950),
-            Route("POST", "/api/v1/cart/items", 30, 320),
-            Route("DELETE", "/api/v1/cart/items/{id}", 10, 180),
-        ),
     ),
     Service(
         name="checkout",
@@ -111,12 +45,8 @@ SERVICES: tuple[Service, ...] = (
         owner_team="payments",
         initial_version="4.2.1",
         median_latency_ms=140,
-        rps=6,
+        rps=30,
         ready_replicas=3,
-        routes=(
-            Route("POST", "/api/v1/checkout", 60, 760),
-            Route("GET", "/api/v1/checkout/{id}", 40, 1180),
-        ),
     ),
     Service(
         name="payments",
@@ -124,12 +54,8 @@ SERVICES: tuple[Service, ...] = (
         owner_team="payments",
         initial_version="2.9.4",
         median_latency_ms=220,
-        rps=6,
+        rps=30,
         ready_replicas=2,
-        routes=(
-            Route("POST", "/api/v1/payments", 60, 480),
-            Route("GET", "/api/v1/payments/{id}", 40, 820),
-        ),
     ),
 )
 
@@ -138,8 +64,3 @@ SERVICES_BY_NAME: dict[str, Service] = {s.name: s for s in SERVICES}
 
 def service_names() -> list[str]:
     return [s.name for s in SERVICES]
-
-
-def pick_route(service: Service, rng) -> Route:
-    """Weighted choice of a route for this service."""
-    return rng.choices(service.routes, weights=[r.weight for r in service.routes], k=1)[0]

@@ -324,6 +324,11 @@ the fresh-start measurement. `--dump`/`--rows` save and re-score a run offline;
 **Impact.** `evaluate` needs the Kafka + SR keys from the card (it has them). Rows lag
 by up to one Flink checkpoint because of `read_committed`; the 100 s tail covers that.
 
+**Amended by D-057.** The *after deploy* tag is gone, and so is its column in `evaluate`'s
+false-positive table. With no benign deploys, every deploy is a bad deploy (inside its
+incident's span) or its rollback (at the incident's end, where the *echo* minute starts), so
+the tag could no longer fire.
+
 ### D-022 · DECISION (raise at Break 3) · 2.1 adds per-version count queries; the anti-pattern reads new requests only
 **What.** How the walkthrough makes the regular join's re-attribution visible (brief §5.1).
 **Options.** (a) Only the plain per-request regular join, as in F1; (b) additionally a
@@ -341,6 +346,11 @@ latest offset matters because a regular join keeps every request in state, and e
 all of that service's joined rows. From the earliest offset, with hours of history,
 that's millions of rows per re-emit on the attendee's pool.
 **Impact.** Two more short queries in 2.1 (user-visible flow; confirm at Break 3).
+
+**Amended by D-058.** A record is now one second of one service, so the per-version
+queries add up `SUM(traffic_count)` instead of counting rows; their columns are
+`traffic_count`, `first_sample` and `last_sample`. Both anti-pattern queries read
+`service_metrics` from the latest offset. The lesson is unchanged.
 
 ### D-023 · DECISION · Step structure and shared CTEs for 2.2–2.4
 **What.** How the 2.x solution files are cut.
@@ -377,6 +387,11 @@ are declared in `sql/sink_service_health.sql`. The ones above are still what the
 derived from, and the first `terraform apply` is the live check (only the two status
 columns were ever observed).
 
+**Amended by D-058.** No error expressions (`error_count`, `error_rate`) and no
+`MAX(latency_ms)`. `traffic_count = SUM(traffic_count)` is an INT (nullable, like its source
+column), cast to DOUBLE only inside the traffic detector; `avg_latency_ms = AVG(latency_ms)`
+is the unweighted mean of the window's ten per-second samples.
+
 ### D-025 · CONFIRMED · Warm-up is detected as `is_anomaly IS NULL`; status columns come out as STRING
 **Status (Phase 3, live).** `DESCRIBE service_health` shows `latency_status` as
 `VARCHAR(10)` (variable length, no blank padding). `WARMING_UP` appears in each service's
@@ -407,6 +422,9 @@ rows, and `DESCRIBE service_health`.
 **Impact.** None for attendees.
 **Amended by D-050 and D-051.** `service_health_describe.sql` now shows the types declared
 in the DDL, not derived ones. `reset --with-labs` no longer exists.
+
+**Amended by D-058.** The attribution check (`temporal_join_attribution.sql`) is deleted:
+a metrics sample has no `instance_id` to prove the version with.
 
 ### D-027 · DECISION · `.avsc` copies aligned with the schemas Confluent registered
 **What.** Two Phase 1 assumptions about the registered schemas were wrong; checked
@@ -451,6 +469,12 @@ for "closing the loop".
 `test_tick_timestamps_never_collide_with_the_next_tick`,
 `test_deploy_record_and_its_requests_share_the_new_version`,
 `test_incident_ends_on_a_tick_at_the_logged_ended_at`.
+
+**Amended by D-058.** A `service_metrics` record carries exactly `tick_ms + 999`, the end of
+the second it covers, instead of a random offset in 0–999 ms: still after the tick's deploy
+record and before the next tick's. The attribution check that found defect (1) is deleted.
+The tests are now `test_records_sit_at_the_end_of_their_tick` and
+`test_a_record_follows_the_deploy_record_of_its_tick`.
 
 ### D-029 · DECISION · ARIMA tuning history and final config (AR(1), minTrainingSize 12)
 **What.** Tuning `ML_DETECT_ANOMALIES` against the acceptance criteria (brief §5.3, §11),
@@ -540,6 +564,10 @@ topic head excluded):
 - Surges now flag `LATENCY_HIGH` in every window too (latency ×1.5 is sustained and AR(1)
   doesn't absorb it). Routing (Phase 4) sends those rows to the capacity agent anyway.
 
+**Amended by D-059.** `confidencePercentage` is 99.95 (tuned offline for the simplified
+demo's 20 s spikes and ~60 incidents/h). AR(1), 12 and 360 stay. Surges no longer touch
+latency, so the `LATENCY_HIGH` flags on surges above are gone.
+
 ### D-030 · DEVIATION · Request rates divided by ~3; slow outliers softened (chosen by the user at Break 3)
 **What.** `ops-sim` request rates and the latency outlier rule (brief §4.1, §4.2).
 **Why it came up.** The user saw the `service_health` statement hold the pool at 10 CFU
@@ -584,6 +612,14 @@ original rates gave payments. **Proposed fix (needs the user's decision):** cart
 payments at 6 requests/s, web-gateway 10, catalog 8, auth 5 (~41 msg/s, about half the
 brief's volume, web-gateway still the busiest). Alternatives: the brief's original rates, or
 accept missed drops on low-volume services.
+
+**Amended by D-056.** `auth`, `catalog` and `cart` are gone. The rates of the three kept
+services are unchanged (web-gateway 10, checkout 6, payments 6 since D-031).
+
+**Amended by D-058.** The rates are now the means of a per-second `traffic_count`. The
+topic carries three messages per second (one per service) whatever the rates, so the
+replay cost that motivated this decision no longer grows with them. The softened outliers
+apply to the per-request draws a sample's `latency_ms` averages.
 
 ### D-031 · DEVIATION · Drop services at 6 requests/s, aligned generator start, chosen with an offline tuning harness
 **Status.** **Confirmed live on 2026-11-12.** After a fresh `reset` at 09:31, the
@@ -639,6 +675,22 @@ at most 10 s), as the F1 race aligned its laps to 20-second boundaries. Outliers
 0.2% × 3 (D-030). The detector config is unchanged (D-029).
 **Impact.** Volume and replay work ~1.4× the D-030 rates, still about half the brief's. To be
 confirmed in one live run (fresh `reset` → `ops-sim` → `service_health`, then `evaluate`).
+
+**Amended by D-056.** Three services: the drop services are now two (`checkout` and
+`payments`, both still at 6 requests/s) and the total is ~22 requests/s instead of ~41. The
+tables above were measured on six services and are not re-run. `sweep.py`'s rate profiles
+keep only the kept services (brief ~39, D-030 ~13, 5/s ~19) and its drop columns are
+`chkout` and `paymt`.
+
+**Amended by D-058.** `sweep.py` builds each window from the per-second samples
+(`SUM(traffic_count)`, unweighted `AVG(latency_ms)`), and its `msg/s` column is `req/s`
+(messages are always three per second). The windows have the same statistics as the
+per-request ones (`.scratch/simplify-demo/research/ps_compare.out`), so the findings above
+carry over.
+
+**Amended by D-059.** The traffic means are 50/30/30 (the drop services well above the
+~6 requests/s floor found here). `sweep.py`'s current profile is ~110 requests/s and its
+`CURRENT` detector uses confidence 99.95.
 
 ---
 
@@ -889,6 +941,16 @@ the `_deploy_fired`/`_start_fired` flags are gone), `opsgen/cli.py`, `opsgen/dri
 draw changes the RNG sequence, so `--seed` schedules differ from earlier runs. The
 detector, request rates (D-030/D-031) and spacing are unchanged.
 
+**Amended by D-056.** The surge and drop lists are now one service (`web-gateway`) and two
+(`checkout`, `payments`). Under this schedule surges fall from about 26% to 17% of
+incidents, because `web-gateway`'s cooldown often blocks one.
+
+**Amended by D-057.** There are no benign deploys any more, so "Benign deploys stay
+unaligned" no longer applies: every deploy and rollback sits on a window boundary.
+
+**Amended by D-059.** The fixed duration is 20 s: an incident covers 2 whole windows. The
+detector flags a spike in its first window; more windows only add after-spike false alarms.
+
 ### D-043 · DEVIATION · One answer per incident type: `ESCALATE` and `max_replicas` removed
 **What.** The brief puts `auth` at its replica ceiling (ready = max = 4) so a surge on
 `auth` expects `ESCALATE`, and gives the release agent `ESCALATE` for "latency is high but
@@ -924,6 +986,10 @@ Replicas tile). `ESCALATE` is gone from both prompts, both INSERTs, the
 label) and the mock (the `auth` scene; issue 06 rebuilds the rest). Environments must be
 recreated: `service_deployments` changes shape.
 
+**Amended by D-056.** Three services: `BAD_DEPLOY` → `ROLLBACK` on all three,
+`TRAFFIC_SURGE` → `SCALE_OUT` on `web-gateway` only, `UPSTREAM_DROP` →
+`INVESTIGATE_UPSTREAM` on `checkout` and `payments`.
+
 ### D-044 · DECISION · `avg_response_bytes` and `desired_replicas` no longer carried through the pipeline
 **What.** The 2.2–2.4 statements computed `avg_response_bytes` and carried
 `desired_replicas` from the deployment record into `service_health`. Nothing downstream
@@ -940,6 +1006,10 @@ to something they will see later.
 `sql/2.3_anomaly_detection.sql`, `sql/2.3_anomaly_status.sql`,
 `sql/2.4_service_health.sql` (and so the `service_health` schema), and
 `tests/test_sql_pipeline.py`, which now guards against either column coming back.
+
+**Amended by D-058.** `response_bytes` is gone with the per-request records. The guard
+test now keeps `error_count` (display only) and `desired_replicas` out of labs 2.2–2.4,
+and checks that both stay in their source tables.
 
 ### D-045 · DECISION · No versions in the ground truth; `ROLLBACK` targets scored against `service_health`
 **What.** The ground truth carried `good_version` (topic and file) and `bad_version`
@@ -968,6 +1038,10 @@ mock. `bad_version` is gone from `incidents.jsonl`. `evaluate`: `HealthRow` gain
 `previous_version`; `check_target` loses its incident argument; `Incident` loses both
 versions; `IncidentResult.version_mismatches` and its report column are gone.
 `scripts/tuning/sweep.py` builds `Incident` without them. Amends D-021, D-032 and D-037.
+
+**Amended by D-058.** `temporal_join_attribution.sql` is deleted (a metrics sample has no
+`instance_id`). Version attribution is now checked per window only
+(`sql/checks/service_health_deploy_windows.sql`).
 
 ### D-046 · DECISION · `service_incidents` is the only answer key; `incidents.jsonl` removed
 **What.** The generator wrote the ground truth twice: the `service_incidents` topic
@@ -1296,3 +1370,329 @@ and nothing else. Docstrings in `scripts/opswall/` (`__init__`, `feed`, `state`)
 loses the mock refresh test. `tests/test_opswall_state.py` and `tests/test_opswall_server.py`
 feed `datetime`s where they passed epoch milliseconds. The D-054 follow-up issue is
 `wontfix`. Replaces D-047.
+
+### D-056 · DECISION · Three services: `web-gateway`, `checkout`, `payments`
+**What.** `ops-sim` ran six services, each with its own quirks: `auth`'s 401s, three
+services that could only get a surge (`web-gateway`, `catalog`, `auth`) and three that could
+only get a drop (`cart`, `checkout`, `payments`).
+**Options.** (a) Keep the six; (b) keep three and remove `cart`, `catalog` and `auth`
+completely (code, wall, tests, docs).
+**Choice.** (b), decided with the user in the simplify-demo grilling session
+(`.scratch/simplify-demo/spec.md`). The kept services keep every value they had: tier,
+owner team, initial version, latency median, replicas, routes and rates (10/6/6 requests/s;
+D-058 and D-059 change the data model and the means). Candidates:
+- `BAD_DEPLOY` → all three;
+- `TRAFFIC_SURGE` → `web-gateway` only;
+- `UPSTREAM_DROP` → `checkout` and `payments`.
+Client errors are all 404: `auth`'s 401s go with it.
+**Why.** The workshop showcases streaming and streaming agents, not a realistic shop. Three
+services are easier to follow on the wall and in the labs, and each removed service only
+added a quirk to explain.
+**What it changes in earlier decisions.**
+- D-030/D-031: the drop services are now two, both still at 6 requests/s; the total is ~22
+  requests/s instead of ~41.
+- D-043: a surge (`SCALE_OUT`) happens on `web-gateway` only.
+- D-042: its "3-service surge/drop lists" are now one and two services. Under its schedule
+  (one incident at a time, 7-min cooldown per service) the rate stays ~10.5 incidents/h, but
+  `web-gateway`'s cooldown often blocks a surge and the engine re-picks the type. Measured
+  with the generator over 96 simulated hours (16 seeds × 6 h): `BAD_DEPLOY` 51 → 54%,
+  `TRAFFIC_SURGE` 26 → 17%, `UPSTREAM_DROP` 24 → 29%. D-060 replaces this schedule with one
+  per service.
+**Impact.** `opsgen/services.py` (three entries, docstring), `opsgen/engine.py`
+(`CANDIDATES`), `opsgen/distributions.py` and `opsgen/simulation.py` (no `is_auth`:
+`status_code(success_code, rng, server_error_rate)`), the `opsgen/state.py` docstring. Fewer
+services draw from the RNGs, so `--seed` runs differ from earlier ones. Agent prompts
+(`sql/4.2_release_agent.sql`, `sql/4.2_capacity_agent.sql`): "three microservices", and the
+examples use kept services (the `SCALE_OUT` example is `web-gateway` on 4 replicas, Target
+12). `scripts/tuning/sweep.py` (rate profiles, drop columns). Comments in
+`sql/source_service_requests.sql` (outside the `CREATE TABLE`, so the Terraform copy is
+unchanged), `sql/checks/remediation_call_rate.sql` (180 `service_health` rows per 10 quiet
+minutes), `scripts/opswall/state.py`, `static/opswall.js` and the README. The wall's rows
+and `/healthz` `serviceCount` follow `SERVICES`; `evaluate` reads service names from the
+data. No change to Terraform, the schemas or the DDL. Tests: `CANDIDATES` is pinned in
+`opsgen/tests/test_engine.py`; the opsgen, tuning, wall, evaluate, agent-SQL and
+`reset-health` tests use the kept services and count three. The remaining `401`s in
+`scripts/preprovisioned/` and its tests are Confluent Cloud API answers, not `auth`.
+
+### D-057 · DECISION · No benign deploys
+**What.** `ops-sim` deployed a random healthy service every 3-5 minutes (first at 60 s): a
+patch-version bump that changed no metric, so the temporal join had versions to follow
+outside incidents. With frequent incidents, bad deploys and their rollbacks already change
+versions all the time. The only effect benign deploys had left was wrong rollbacks: the
+release agent answers `ROLLBACK` to `LATENCY_HIGH` when the last change is a `DEPLOY` less
+than 600 s old, so a latency false alarm within ten minutes of a benign deploy rolled back
+a healthy version.
+**Options.** (a) Keep them; (b) remove them.
+**Choice.** (b), decided with the user in the simplify-demo grilling session
+(`.scratch/simplify-demo/spec.md`). The deployments stream keeps the bootstrap record, the
+5-s heartbeat (it advances the temporal join's watermark), and each bad deploy's deploy and
+rollback. A rollback sets the last change to `ROLLBACK`, so after an incident ends the
+release agent answers `OBSERVE` to a latency false alarm, as it should.
+**Why.** They were one more kind of version change to explain, and their only remaining
+effect on the demo was a wrong answer.
+**Impact.** `opsgen/engine.py`: `Config` loses `benign_first`, `benign_min`, `benign_max`
+and `benign_min_gap`; `Engine` loses `next_benign_at`, `last_deploy_at` (only the benign
+picker read it), `_maybe_benign_deploy` and `_choose_benign_service`; the `benign_deploy`
+event kind and its console line (`opsgen/sinks.py`) are gone. `opsgen/cli.py` loses
+`--benign-first`, `--benign-min` and `--benign-max`; `--no-incidents` now means baseline
+traffic with no version change at all. Docstrings in `opsgen/__init__.py` and
+`opsgen/deployments.py`. Benign deploys drew from the scheduler's RNG, so `--seed`
+schedules differ from earlier runs; incident timing and the type mix are otherwise
+unchanged (the incident chooser never looked at deploys). `evaluate` drops the *after
+deploy* tag (D-021). `scripts/opswall/consumer.py` renames `BENIGN_ERROR_CODES` (Kafka
+errors it skips, unrelated) to `IGNORED_ERROR_CODES`. The release agent's prompt, the SQL,
+Terraform and the schemas are unchanged. Tests: an hour of `--no-incidents` sees only the
+heartbeat after the bootstrap (`opsgen/tests/test_engine.py`); version changes come only
+from bad deploys and their rollbacks; `--simulate` shows every deploy as a `BAD DEPLOY`;
+the tests that relied on a benign deploy force a bad one. Amends D-021 and D-042.
+
+### D-058 · DECISION · `service_metrics`: one record per service per second
+**What.** `ops-sim` wrote one `service_requests` record per HTTP request: instance, route,
+method, status code, latency, bytes and trace id. A traffic anomaly changed the number of
+records, and the detector's input (`COUNT(*)` per window) was an aggregate attendees never
+saw in the topic.
+**Options.** (a) Keep per-request records; (b) one metrics sample per service per second
+that sums up that second.
+**Choice.** (b), decided with the user in the simplify-demo grilling session
+(`.scratch/simplify-demo/spec.md`). The topic is `service_metrics`, and a record is:
+- `event_time`: tick + 999 ms, the end of the second it covers. Deploy records stay at the
+  tick (D-028), so on a deploy's tick the temporal join gives the record the new version;
+- `service_name`;
+- `traffic_count` (INT): Poisson(mean × the incident's traffic multiplier);
+- `latency_ms` (DOUBLE): the mean of `traffic_count` log-normal draws (median × the
+  incident's latency multiplier, sigma 0.3, the D-030 slow outliers); one draw when
+  `traffic_count` is 0, so it is always set;
+- `error_count` (INT): failed requests among `traffic_count` (0.5% normally, 12% in a bad
+  deploy). Display only: nothing detects or decides on it.
+
+Three records per second whatever the traffic: an incident changes the values, never the
+number of records. `instance_id`, `route`, `http_method`, `status_code`, `response_bytes`
+and `trace_id` are gone. The means (10/6/6) and spike sizes (surge ×3 traffic and ×1.5
+latency, drop ×0.2, bad deploy ×4 latency) are unchanged here; D-059 tunes them.
+
+Detection stays on 10-second windows: `SUM(traffic_count) AS traffic_count` and
+`AVG(latency_ms)`, the unweighted mean of the window's ten samples. `service_health`
+loses `error_count`, `error_rate`, `max_latency_ms` and `error_rate_breach`;
+`request_count` and `expected_request_count` become `traffic_count` and
+`expected_traffic_count` (19 columns, was 23). Lab 2.1 keeps its regular-vs-temporal join
+lesson, with counts as `SUM(traffic_count)`. Its proof check
+(`sql/checks/temporal_join_attribution.sql`) goes, because a sample has no `instance_id`
+to carry the version.
+**Why.** The workshop showcases streaming: attendees should see in the topic the values
+the detector works on, one step before the window. Offline, 10-second windows built from
+samples match the old per-request windows: the same means, the same count spread, and a
+latency spread ×1.05–1.11 (`.scratch/simplify-demo/research/ps_compare.out`). Detection
+behaves the same and earlier tuning numbers carry over. No detector or agent rule needed
+the error columns. The capacity prompt used Error Rate Breach only in its rule 3 (never
+`OBSERVE` on a breach), which rules 1 and 2 always pre-empt.
+**What it changes in earlier decisions.**
+- D-022: the per-version queries sum `traffic_count` (`first_sample`, `last_sample`).
+- D-024: no error expressions, no `MAX(latency_ms)`; `traffic_count` is an INT.
+- D-026, D-045: the attribution check is deleted.
+- D-028: records sit at tick + 999 ms, not at a random offset within the tick.
+- D-030, D-031: the rates are means of `traffic_count`; the topic carries three messages
+  per second whatever the rates. `sweep.py` builds windows from samples.
+- D-044: `response_bytes` is gone; the guard test keeps `error_count` out of labs 2.2–2.4.
+**Impact.**
+- `opsgen/`:
+  - `simulation.py`: `_gen_metrics` replaces `_gen_requests`.
+  - `distributions.py`: new `mean_latency_ms`, `binomial` and `ERROR_RATE`. Gone:
+    `status_code`, `response_bytes`, `trace_id` and the status-code mixes.
+  - `services.py` loses `Route`, `routes` and `pick_route`; `instances.py` is deleted.
+  - `engine.py`: `Effect.error_rate`, `BAD_DEPLOY_ERROR_RATE`.
+  - `driver.py`: the `--simulate` line reads `traffic= err= lat= ver=`, with no `inst=` hash.
+  - `sinks.py`, `kafka_io.py`: `emit_metrics` and the `service_metrics` topic; `cli.py`.
+- Schema and Terraform:
+  - `schemas/service_metrics.avsc`; `sql/source_service_metrics.sql` (same connector
+    options); `sql/sink_service_health.sql`.
+  - Both copies in `platform-team/modules/developer/statements.tf`. The resource is
+    renamed `create_service_metrics_table`, and its module output, `platform-team/outputs.tf`
+    and the `.tftest.hcl` files follow.
+  - `scripts/common/topics.py`, `scripts/preprovisioned/provision.py`.
+  - Environments must be recreated: `service_requests` becomes `service_metrics` and
+    `service_health` changes shape.
+- Labs: 2.1–2.4 (the metrics side's alias is `m`); the three `service_health` checks and
+  `sql/checks/README.md`.
+- Agents:
+  - The capacity INSERT sends `Traffic Count` and `Expected Traffic Count`, and computes
+    Suggested Replicas from `traffic_count`. Neither INSERT sends Error Rate Breach.
+  - The capacity prompt's rule 3 keeps `OBSERVE` for weak evidence, without the Error Rate
+    Breach conditions, and its `OBSERVE` example loses "with no error rate breach".
+  - The release prompt's `ROLLBACK` example loses "11 percent of requests failing".
+- `evaluate`: `HealthRow` loses the error fields; the count fields become `traffic_count`
+  and `expected_traffic_count`.
+- `scripts/tuning/`: `sweep.py` windows from samples, a `req/s` column; `calibrate.py`
+  column names.
+- The ops wall: Rate is `traffic_count / 10` from `service_health`. Errors shows "—" until
+  issue 07 reads `error_count` from `service_metrics`. The ingest fixture is the Phase 4
+  live dump with the dropped columns removed and the count columns renamed.
+- README and `platform-team/README.md` no longer call the topic a request log.
+- The traffic RNG draws differently, so `--seed` runs differ from earlier ones.
+- Tests:
+  - One record per service per second through a surge, a drop and a bad deploy, with the
+    values moving by `opsgen.engine`'s multipliers (so the test follows D-059's sizes).
+  - A record at tick + 999 ms, after the deploy record of its tick.
+  - Windows of samples against the old per-request windows (mean and spread).
+  - The new `.avsc`, DDL and `statements.tf` stay in step; the 19-column order;
+    `test_instances.py` is deleted.
+
+Amends D-022, D-024, D-026, D-028, D-030, D-031, D-044 and D-045.
+
+**Amended by D-059.** The means are 50/30/30 and the spike sizes surge ×5 traffic (no
+latency effect), drop ×0.1 and bad deploy ×4 latency.
+
+### D-059 · DECISION · Tuned data and reference detector: 20 s spikes, 50/30/30, confidence 99.95
+**What.** Workshop preparation: the data settings and **our** reference detector settings
+for the simplified demo (`.scratch/simplify-demo/spec.md`, issue 05), chosen offline with the
+replica for the issue-06 schedule (one schedule per service, incidents may overlap across
+services, 20 s between incidents on a service, per-type rests, first three one of each type,
+50/25/25; D-060). Attendees tune their own detectors later; that competition is out of scope.
+**Options.** Varied with `.scratch/simplify-demo/research/tune.py` (the per-second data
+model, the issue-06 schedule, an AR(p) replica with any refit interval, scored with
+`evaluate`'s code): spike length 20/30 s (10 and 40 s from the earlier search), traffic means,
+spike sizes, `confidencePercentage`, `minTrainingSize`, `maxTrainingSize`, `p`, the refit
+interval. A setup qualifies at **one grid step of margin** above its minimum rests (rest grid
+0/60/120/180/240/300/420/600/900/1200 s; the minimum is the smallest rest per type with
+≥ 99.5% recall) if that margin still allows **about 60 incidents/h**. Then the rests are raised
+to land on ~60/h, and the qualifying setup with the fewest false alarms wins.
+**Choice.**
+- **Spikes 20 s** (2 windows; was 40 s, D-042).
+- **Traffic means 50/30/30** requests/s (was 10/6/6).
+- **Sizes:** surge ×5 traffic and **no latency effect** (was ×3 and ×1.5 latency); drop ×0.1
+  (was ×0.2); bad deploy ×4 latency (unchanged). Each type now moves exactly one metric.
+- **Detector:** AR(1) (`p` 1, `d` 0, `q` 0), `minTrainingSize` 12, `maxTrainingSize` 360,
+  **`confidencePercentage` 99.95** (was 99.9), `enableStl` false.
+- **Rests for D-060** (per service and type, the same on every service): `BAD_DEPLOY` 390 s,
+  `TRAFFIC_SURGE` 300 s, `UPSTREAM_DROP` 300 s → **59 incidents/h**, mix about 44/19/37%.
+  The quiet period stays tied to `minTrainingSize` 12 (150 s, D-060).
+
+Candidates (replica; 200 seeds × 2 h each; 20 s spikes, 50/30/30, ×5/×0.1/×4, AR(1)
+12/360/99.9 unless stated; recall was 100% at the ~60/h rests in every row; "fresh start" is
+false alarms per service in the first 5 minutes of a run; "quiet data" is noise per
+service-hour with no incidents at all):
+
+| Setup | Min rests (BD/SURGE/DROP) | Margin rests | /h at margin | Rests at ~60/h | Echoes /svc-h | Fresh start /svc | Quiet data /svc-h |
+|---|---|---|---|---|---|---|---|
+| confidence 99.5 | 180/180/180 | 240/240/240 | 83 | 540/240/240 | 0.155 | 1.09 | 3.40 |
+| confidence 99.9 (the start) | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.013 | 0.94 | 0.81 |
+| **confidence 99.95** | 240/240/240 | 300/300/300 | **67** | **390/300/300** | **0.005** | **0.85** | **0.48** |
+| confidence 99.97 | 240/240/300 | 300/300/420 | 61 | (58/h at 330/300/420) | 0.014 | 0.75 | 0.28 |
+| confidence 99.99 | 240/300/300 | 300/420/420 | 58 | — | 0.001 | 0.60 | 0.11 |
+| 30 s spikes | 240/240/240 | 300/300/300 | 65 | 330/300/300 | 1.49 | 1.01 | — |
+| means 25/15/15 | 240/240/240 | 300/300/300 | 67 | 390/300/300 | 0.021 | 0.77 | 0.94 |
+| means 100/60/60 | 180/180/180 | 240/240/240 | 83 | 540/240/240 | 0.006 | 1.05 | 0.79 |
+| sizes ×3/×0.2/×3 | 180/240/240 | 240/300/300 | 75 | 390/300/300 | 0.013 | 0.89 | — |
+| sizes ×8/×0.05/×6 | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.015 | 0.98 | — |
+| `maxTrainingSize` 180 / 720 | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.014 / 0.013 | 0.94 | — |
+| `minTrainingSize` 6 (quiet 80 s) | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.006 | 0.68 | 0.81 |
+| `minTrainingSize` 6, 99.95 | 240/240/240 | 300/300/300 | 69 | 390/300/300 | 0.001 | 0.50 | 0.48 |
+| `minTrainingSize` 24 | 180/180/240 | 240/240/300 | 78 | 420/240/300 | 0.28 | 0.59* | — |
+| AR(2) | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.000 | 2.77 | 0.85 |
+| refit every 5 rows | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.008 | 1.30 | 0.84 |
+
+\* not comparable: the later warm-up moves the first incidents' echoes past the 5 minutes.
+Noise outside echoes was 0.000 per service-hour in every demo run: frequent incidents keep
+the bands wide.
+
+**Why.**
+- **The band comes from the spike windows in the model's history**, not from the data's
+  noise. Too few spike windows and the forecast after a spike is still pulled toward it (an
+  echo); too many and the band outgrows the next spike (a miss). Both limits scale with the
+  spike itself, so spike sizes and `maxTrainingSize` change almost nothing (table), and the
+  rests are what sets recall and frequency.
+- **20 s, not 10 or 30 s.** Detection is in the first window of every spike (100% of
+  detections here). Each extra window adds a spike→spike pair to the AR(1) fit, which pulls
+  the forecast after the spike toward the spike: 30 s spikes have ~100× the echoes of 20 s.
+  A 10 s spike has no echoes but is flagged only after it has ended (detection lands ~15 s
+  after the start), so 20 s is the shortest spike that is still on when it is flagged.
+- **Raise the bad-deploy rest, not the traffic rests, to get down to 60/h.** A bad deploy
+  can't echo (latency below the forecast is never flagged), while rarer traffic incidents
+  mean narrower traffic bands and more echoes. Balancing the mix to 50/25/25 instead
+  (300/300/450 at 99.95) gave 13× the echoes (0.066 per service-hour). The weights still decide
+  whenever two types are allowed at once; at these rests the rests set the mix.
+- **99.95 over 99.9:** it still qualifies with slack (67/h at margin against the 60/h target)
+  and has fewer false alarms of every kind (echoes 0.005 vs 0.013, fresh start 0.85 vs 0.94,
+  quiet-data noise 0.48 vs 0.81). The replica under-predicts post-incident false alarms
+  (D-031: Confluent's spread recovers faster after a jump), so live echoes are likely higher
+  than offline and live recall at least as good; a stricter band pays off live. 99.97 and 99.99
+  have no slack left (61 and 58/h at margin).
+- **Means 50/30/30:** calmer data (100/60/60) shortens the rests but raises fresh-start false
+  alarms; rougher data (25/15/15) does the opposite and needs longer rests. 50/30/30 keeps
+  visible noise (web-gateway's per-second traffic 50 ± 7) so the band can't collapse.
+- **`minTrainingSize` stays 12.** At 6, the first-incident echoes halve only if the
+  simulator's quiet period shrinks to 80 s, and the very first output window then flags noise
+  in 12% of service starts (offline, at 99.9), the failure D-029 saw live at 6. With our 150 s quiet
+  period, 6 gives 1.18 fresh-start false alarms per service against 0.84.
+
+**Validation of the choice** (400 seeds × 3 h, fresh seeds): 59.0 incidents/h, **0 misses in
+70,795** (31,200 bad deploys, 13,200 surges, 26,395 drops), all flagged in window 1, echoes
+0.003 per service-hour, no other noise, 0.85 fresh-start false alarms per service.
+**Margin:** the minimum rests are 240/240/240 (2 missed drops in 10,800); one grid step below
+(180/180/180) recall falls to 91.8% / 88.7% / 58.7%. The chosen rests sit one step above the
+minimum for the traffic types and 150 s above it for bad deploys.
+**Generator check:** windows from `opsgen.Simulation` at 50/30/30 match the harness's (means
+within 0.1%, spreads within 3%; `research/t_gen_vs_harness.out`).
+
+**Fresh-start echoes (found here; accepted).** The first surge and the first drop on each
+service echo almost every time: the model has seen a spike→spike pair but no spike→normal pair
+yet, so its AR slope is near 1 and the forecast for the window after the spike stays at the
+spike's level (`TRAFFIC_LOW` after a surge, `TRAFFIC_HIGH` after a drop). That is about 2.5
+false alarms per `ops-sim` start, all in its first 5 minutes; `evaluate` counts them as
+fresh-start noise, outside the false-positive rate. Nothing the replica varies removes them
+except 10 s spikes; stricter confidence and rougher data reduce them. The spec's steady-state
+"echoes near zero" holds (0.003 per service-hour).
+
+**Competition sanity check** (our data and rests, our 150 s quiet period, different detectors;
+200 seeds × 2 h):
+
+| Detector | Recall per type | Echoes /svc-h | Fresh start /svc | Quiet data /svc-h |
+|---|---|---|---|---|
+| ours: AR(1) 12/360/99.95 | 100 / 100 / 100% | 0.004 | 0.84 | 0.47 |
+| confidence 99 | 100% | 1.58 | 1.17 | 6.47 |
+| confidence 99.5 | 100% | 0.40 | 1.13 | 3.34 |
+| confidence 99.9 (D-029) | 100% | 0.014 | 0.94 | 0.85 |
+| confidence 99.99 | 100 / 100 / 99.94% | 0.000 | 0.61 | 0.13 |
+| Confluent's defaults as AR(1) (min 128, max 512, 99, refit 5) | 82 / 82 / 82% | 0.68 | — | 6.11 |
+| `minTrainingSize` 6 | 100% | 0.004 | 1.18 | 0.47 |
+| `maxTrainingSize` 60 | 100% | 0.31 | 0.84 | 0.91 |
+| AR(2) / AR(3) | 100% | 0.000 | 2.61 / 2.83 | 0.48 / 0.50 |
+
+Settings score visibly differently: false alarms span ×400, Confluent's default warm-up
+(128 windows, 21 minutes) misses every incident in it, and higher AR orders are noisy at a
+fresh start. Recall alone separates little, because the spikes are big: if the competition
+should also rank on recall, smaller spikes are the knob (×3/×0.2/×3 cost only one more grid
+step of surge rest). Confluent's real default is auto-ARIMA, which the replica can't model
+(D-029: it chases level changes, so more echoes).
+
+**Live shortlist (issue 08).**
+1. The choice: AR(1), 12/360, **99.95**.
+2. **99.99**, otherwise the same: the fewest false alarms offline (fresh start 0.61, quiet
+   data 0.13), with 5 missed drops in 8,793 at the chosen rests. It shows how much recall
+   margin the live model really has.
+3. **ARMA(1,1)** (`p` 1, `d` 0, `q` 1) at 99.95: the replica can't model `q`. The MA term
+   reacts to a spike's first residual, which might cancel the first-incident echo, the main
+   false alarm left. Untested live (D-029 skipped it for cost). Never `p` = `d` = `q` = 0: it
+   stalls live (D-029).
+Fallback: 99.9 (D-029, live-proven; 77/h at margin, rests 420/240/300 for 60/h). Not
+shortlisted: `d` 1 (follows level changes, D-029), STL (the data has no seasonality),
+`minTrainingSize` 6 and AR(2) (above).
+**What it changes in earlier decisions.**
+- D-029: `confidencePercentage` 99.9 → 99.95; the rest of the config is unchanged.
+- D-031: the traffic means are 50/30/30; `sweep.py`'s current profile and detector follow.
+- D-042: the fixed duration is 20 s (2 windows). Spacing and cooldown stay until D-060.
+- D-058: the spike sizes above; a surge no longer touches latency.
+**Impact.**
+- `opsgen/services.py` (means), `opsgen/engine.py` (`SURGE_LAMBDA_MULT` 5,
+  `DROP_LAMBDA_MULT` 0.1, `SURGE_LATENCY_MULT` removed, `Config.duration` 20).
+- `sql/2.3_anomaly_detection.sql`, `sql/2.3_anomaly_status.sql`,
+  `sql/2.4_service_health.sql`: `confidencePercentage` 99.95. Running statements must be
+  re-created to pick it up.
+- `scripts/tuning/`: the replica's default confidence, `calibrate.py`'s default, `sweep.py`'s
+  `CURRENT` and rate profiles.
+- Tests: the detector config, the incident duration, the CLI defaults, the surge's
+  untouched latency, the sweep's traffic level.
+- Until D-060 lands, the old single-slot schedule (spacing 240–360 s, cooldown 420 s) runs
+  with 20 s incidents; the rests above take effect with D-060.
+- Evidence: `.scratch/simplify-demo/research/tune.py` and its `t_*.out` outputs.
+
+Amends D-029, D-031, D-042 and D-058.

@@ -105,7 +105,7 @@ run "statements_signed_as_principal_in_the_developer_catalog" {
 
   assert {
     condition = (
-      contains(keys(output.flink_statements), "service_requests") &&
+      contains(keys(output.flink_statements), "service_metrics") &&
       contains(keys(output.flink_statements), "service_deployments") &&
       contains(keys(output.flink_statements), "service_incidents") &&
       contains(keys(output.flink_statements), "service_health") &&
@@ -124,8 +124,8 @@ run "the_source_tables_and_model_are_created" {
   }
 
   assert {
-    condition     = can(regex("CREATE TABLE IF NOT EXISTS `service_requests`", confluent_flink_statement.create_service_requests_table.statement))
-    error_message = "service_requests table statement missing"
+    condition     = can(regex("CREATE TABLE IF NOT EXISTS `service_metrics`", confluent_flink_statement.create_service_metrics_table.statement))
+    error_message = "service_metrics table statement missing"
   }
 
   assert {

@@ -177,7 +177,7 @@ def test_capacity_insert_computes_the_replica_suggestion_in_sql():
     [
         (3, 600, 200, 9),  # three times the load
         (3, 210, 200, 4),  # a nudge over: always at least one more replica
-        (4, 450, 150, 12),  # auth: no ceiling any more (D-043)
+        (4, 450, 150, 12),  # no ceiling any more (D-043)
         (2, 90, 30, 6),  # three times the load on two replicas
         (2, 90, 0, 3),  # an expected count of zero must not divide
         (2, 90, None, 3),  # nor a missing one

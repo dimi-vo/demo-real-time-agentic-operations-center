@@ -30,7 +30,7 @@ from scripts.preprovisioned import keys, lookup
 PREFIX = "DEMO"
 KEY_LOCATION = "Console → API keys → My account"
 MODEL_NAME = "llm_textgen_model"
-SOURCE_TABLES = ("service_requests", "service_deployments", "service_incidents")
+SOURCE_TABLES = ("service_metrics", "service_deployments", "service_incidents")
 # The labs fill these with INSERT statements; the platform team's Terraform creates them (D-050).
 OUTPUT_TABLES = ("service_health", "remediation_decisions")
 PLATFORM_TABLES = SOURCE_TABLES + OUTPUT_TABLES

@@ -24,9 +24,10 @@ PIPELINE_FILES = (
 )
 DETECTION_FILES = ("2.3_anomaly_detection.sql", "2.3_anomaly_status.sql", "2.4_service_health.sql")
 
-# D-014 tuned in D-029: AR(1), minTrainingSize 12 (tuning history in DECISIONS.md).
+# D-014 tuned in D-029 and D-059: AR(1), minTrainingSize 12, confidence 99.95 (tuning
+# history in DECISIONS.md).
 DETECTOR_CONFIG = (
-    "JSON_OBJECT('minTrainingSize' VALUE 12, 'maxTrainingSize' VALUE 360, 'confidencePercentage' VALUE 99.9, "
+    "JSON_OBJECT('minTrainingSize' VALUE 12, 'maxTrainingSize' VALUE 360, 'confidencePercentage' VALUE 99.95, "
     "'enableStl' VALUE FALSE, 'p' VALUE 1, 'd' VALUE 0, 'q' VALUE 0)"
 )
 DETECTOR_OVER = (
@@ -34,15 +35,15 @@ DETECTOR_OVER = (
     "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
 )
 
-# Brief sections 5.2-5.4, in order, then detected_at (D-054).
+# Brief sections 5.2-5.4, in order, then detected_at (D-054); no error columns and
+# traffic_count names since D-058.
 SERVICE_HEALTH_COLUMNS = (
     "service_name", "window_start", "window_end",
-    "request_count", "error_count", "error_rate", "avg_latency_ms", "max_latency_ms",
+    "traffic_count", "avg_latency_ms",
     "version", "previous_version", "last_change", "seconds_since_deploy",
     "ready_replicas", "tier",
     "latency_status", "expected_latency_ms", "latency_upper_bound",
-    "traffic_status", "expected_request_count", "traffic_lower_bound", "traffic_upper_bound",
-    "error_rate_breach",
+    "traffic_status", "expected_traffic_count", "traffic_lower_bound", "traffic_upper_bound",
     "detected_at",
 )  # fmt: skip
 
@@ -105,14 +106,14 @@ def test_two_detectors_same_config_same_window(name):
     assert body.count(_norm(DETECTOR_CONFIG)) == 2
     assert body.count(DETECTOR_OVER) == 2
     assert "ML_DETECT_ANOMALIES( avg_latency_ms, window_time," in body
-    assert "ML_DETECT_ANOMALIES( CAST(request_count AS DOUBLE), window_time," in body
+    assert "ML_DETECT_ANOMALIES( CAST(traffic_count AS DOUBLE), window_time," in body
 
 
 @pytest.mark.parametrize("name", PIPELINE_FILES)
 def test_both_sources_read_from_earliest_offset(name):
     body = _norm(_body(name))
-    assert f"`service_requests` {EARLIEST} r" in body
-    assert f"`service_deployments` {EARLIEST} FOR SYSTEM_TIME AS OF r.event_time AS d" in body
+    assert f"`service_metrics` {EARLIEST} m" in body
+    assert f"`service_deployments` {EARLIEST} FOR SYSTEM_TIME AS OF m.event_time AS d" in body
 
 
 @pytest.mark.parametrize("name", [*PIPELINE_FILES, "2.2_window_metrics.sql"])
@@ -154,7 +155,7 @@ def test_service_health_columns_in_order():
 
 def test_service_health_ddl_declares_the_columns_in_order():
     """The INSERT is positional and several adjacent columns share a type, so the platform
-    team's table must list the same 23 names in the same order as the query."""
+    team's table must list the same 19 names in the same order as the query."""
     ddl = (SQL / "sink_service_health.sql").read_text()
     declared = re.findall(r"^  `(\w+)` ", ddl, re.MULTILINE)
     assert tuple(declared) == SERVICE_HEALTH_COLUMNS
@@ -190,28 +191,49 @@ def test_service_health_ddl_is_append_only_and_can_be_emptied():
     assert "'kafka.cleanup-policy' = 'delete'" in ddl
 
 
-def test_regular_join_antipattern_reads_new_requests_only():
-    # A regular join keeps every request in state and re-emits all of a service's rows
-    # on every update of service_deployments (every 5 s re-emit); starting from the
+def test_regular_join_antipattern_reads_new_samples_only():
+    # A regular join keeps every metrics sample in state and re-emits all of a service's
+    # rows on every update of service_deployments (every 5 s re-emit); starting from the
     # latest offset keeps the demo small.
     for name in ("2.1_regular_join.sql", "2.1_regular_join_by_version.sql"):
         body = _norm(_body(name))
         assert "FOR SYSTEM_TIME AS OF" not in body
-        assert "`service_requests` /*+ OPTIONS('scan.startup.mode'='latest-offset') */ r" in body
+        assert "`service_metrics` /*+ OPTIONS('scan.startup.mode'='latest-offset') */ m" in body
 
 
 def test_temporal_join_solution_hints_both_sides():
     body = _norm(_body("2.1_temporal_join.sql"))
-    assert f"`service_requests` {EARLIEST} r" in body
-    assert f"`service_deployments` {EARLIEST} FOR SYSTEM_TIME AS OF r.event_time AS d" in body
+    assert f"`service_metrics` {EARLIEST} m" in body
+    assert f"`service_deployments` {EARLIEST} FOR SYSTEM_TIME AS OF m.event_time AS d" in body
+
+
+@pytest.mark.parametrize("name", ["2.1_regular_join_by_version.sql", "2.1_temporal_join_by_version.sql"])
+def test_per_version_counts_add_up_the_traffic(name):
+    # D-058: a record is a one-second sample, so a version's traffic is the SUM of its
+    # samples' traffic_count, not a COUNT of rows.
+    body = _norm(_body(name))
+    assert "SUM(m.traffic_count) AS traffic_count" in body
+    assert "COUNT(" not in body
+
+
+@pytest.mark.parametrize("name", ["2.2_window_metrics.sql", "2.2_window_aggregation.sql"])
+def test_windows_sum_the_traffic_and_average_the_latency(name):
+    # D-058: 10 per-second samples per window; no error metrics, no MAX(latency_ms).
+    body = _norm(_body(name))
+    assert "SUM(traffic_count) AS traffic_count" in body
+    assert "AVG(latency_ms) AS avg_latency_ms" in body
+    assert "COUNT(" not in body
+    assert "error" not in body
+    assert "MAX(latency_ms)" not in body
 
 
 def test_unread_columns_are_not_carried_through_the_pipeline():
-    """D-044: nothing downstream reads them, so attendees don't have to read them either.
-    The raw message fields stay in the source tables."""
-    for path in sorted((ROOT / "sql").glob("2.*.sql")):
+    """D-044, D-058: nothing downstream reads them, so attendees don't have to read them
+    either. The raw message fields stay in the source tables; error_count is display
+    only, so it stops at lab 2.1."""
+    for path in sorted((ROOT / "sql").glob("2.[2-4]_*.sql")):
         body = path.read_text()
-        assert "response_bytes" not in body, path.name
+        assert "error_count" not in body, path.name
         assert "desired_replicas" not in body, path.name
-    assert "`response_bytes`" in (ROOT / "sql/source_service_requests.sql").read_text()
+    assert "`error_count`" in (ROOT / "sql/source_service_metrics.sql").read_text()
     assert "`desired_replicas`" in (ROOT / "sql/source_service_deployments.sql").read_text()

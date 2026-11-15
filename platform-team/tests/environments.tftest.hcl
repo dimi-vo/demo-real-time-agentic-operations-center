@@ -64,7 +64,7 @@ run "handout_lists_every_developer" {
   }
 
   assert {
-    condition     = can(regex("service_requests/message-viewer", output.validation))
-    error_message = "the validation output must link to each service_requests topic"
+    condition     = can(regex("service_metrics/message-viewer", output.validation))
+    error_message = "the validation output must link to each service_metrics topic"
   }
 }

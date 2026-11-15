@@ -281,7 +281,7 @@ def _render(rep: DetectionReport, source: str, gt_source: str, n_incidents: int,
     console.print()
 
     t = Table(title="False positives (outside incidents) and fresh-start noise", title_justify="left")
-    cols = ("service", "scored h", "false pos.", "per hour", "of which echo", "after deploy", "fresh start", "restart")
+    cols = ("service", "scored h", "false pos.", "per hour", "of which echo", "fresh start", "restart")
     for col in cols:
         t.add_column(col, justify="right" if col != "service" else "left")
     worst_fp, worst_fresh = 0.0, 0
@@ -293,14 +293,12 @@ def _render(rep: DetectionReport, source: str, gt_source: str, n_incidents: int,
             s.service_name, f"{s.scored_hours:.2f}", str(len(s.false_positives)),
             "-" if per_h is None else _target(per_h, FP_TARGET_PER_HOUR, "{:.1f}"),
             str(sum(fp.tag == "echo" for fp in s.false_positives)),
-            str(sum(fp.tag == "after deploy" for fp in s.false_positives)),
             _target(len(s.fresh_start_noise), FRESH_START_TARGET, "{}"),
             str(len(s.restart_artifacts)),
         )  # fmt: skip
     console.print(t)
     console.print(
-        f"[dim]echo = within a minute after an incident on that service ended; after deploy = the "
-        f"service deployed less than a minute earlier. Fresh start = the first "
+        f"[dim]echo = within a minute after an incident on that service ended. Fresh start = the first "
         f"{FRESH_START_SECONDS / 60:.0f} minutes after the service's first window in the topic (only "
         f"meaningful if the topic starts at a fresh `reset` + `ops-sim`). restart = signals next to a gap in "
         f"the data (ops-sim stopped and restarted); not counted as false positives.[/dim]"

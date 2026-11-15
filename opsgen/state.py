@@ -1,9 +1,9 @@
 """Persist the generator's state so a restart continues from the current versions
 and incident numbering (brief section 4.5, D-046). Replicas are fixed per service and
-come from the catalog, so only versions / deployed_at / last_change are persisted per
-service, plus the last incident number used:
+come from `opsgen/services.py`, so only versions / deployed_at / last_change are persisted
+per service, plus the last incident number used:
 
-    {"services": {"cart": {"version": ..., ...}, ...}, "incident_counter": 7}
+    {"services": {"checkout": {"version": ..., ...}, ...}, "incident_counter": 7}
 """
 
 from __future__ import annotations

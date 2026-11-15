@@ -11,14 +11,14 @@
 -- compare "what happened" against "what we caught". Two records per incident:
 -- one at degradation_start (ended_at NULL) and one at degradation_end (both
 -- timestamps set), tied together by incident_id. Append-only so the ground-truth
--- history can be replayed. No key columns, exactly like service_requests: the
+-- history can be replayed. No key columns, exactly like service_metrics: the
 -- generator sends the raw service_name string as the message key, and service_name
 -- stays in the value, where ops-wall and evaluate read it. (DISTRIBUTED BY HASH would
 -- make service_name a key column, which Confluent Cloud requires first in the schema
 -- and registers as an Avro key the generator doesn't write; one bucket keeps the
 -- order anyway.)
 --
--- delete retention (not compaction) with 24h matches service_requests: an
+-- delete retention (not compaction) with 24h matches service_metrics: an
 -- append-only log is never compacted, and 24h caps storage per attendee.
 
 CREATE TABLE IF NOT EXISTS `service_incidents` (

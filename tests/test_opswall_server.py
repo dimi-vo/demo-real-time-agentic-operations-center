@@ -31,7 +31,7 @@ def test_healthz_reports_service_count_and_no_errors(client):
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "ok"
-    assert data["serviceCount"] == 6
+    assert data["serviceCount"] == 3
     assert data["connectionErrors"] == {}
 
 
@@ -64,7 +64,7 @@ def test_websocket_sends_a_snapshot_on_connect(client):
         payload = ws.receive_text()
         snap = json.loads(payload)
         assert snap["axisSeconds"] == 600
-        assert isinstance(snap["services"], list) and len(snap["services"]) == 6
+        assert isinstance(snap["services"], list) and len(snap["services"]) == 3
         assert snap["summary"]["injected"] == 0
         for s in snap["services"]:
             assert "blocks" in s and "groundTruth" in s
@@ -104,13 +104,13 @@ def test_refresh_returns_the_new_generation_and_the_next_snapshot_is_clean():
 
     app, state = _refreshable_app(starter)
     now = datetime.now(timezone.utc)
-    state.apply_health({"service_name": "cart",
+    state.apply_health({"service_name": "payments",
                         "window_end": (now - timedelta(seconds=20)).replace(tzinfo=None),  # TIMESTAMP(3)
                         "detected_at": now - timedelta(seconds=14),                        # TIMESTAMP_LTZ(3)
                         "latency_status": "HIGH", "traffic_status": "NORMAL"})
     state.record_error("service_health", "UNKNOWN_TOPIC", "gone")
     before = state.snapshot()
-    assert {s["name"]: s for s in before["services"]}["cart"]["blocks"]  # something to clear
+    assert {s["name"]: s for s in before["services"]}["payments"]["blocks"]  # something to clear
 
     with TestClient(app) as c:
         r = c.post("/refresh")
@@ -122,7 +122,7 @@ def test_refresh_returns_the_new_generation_and_the_next_snapshot_is_clean():
     assert snap["generation"] == r.json()["generation"]
     assert snap["connectionErrors"] == {}
     by_name = {s["name"]: s for s in snap["services"]}
-    assert by_name["cart"]["blocks"] == []                   # old history is gone
+    assert by_name["payments"]["blocks"] == []                   # old history is gone
     assert by_name["checkout"]["version"] == "2.0.0"         # and the new consumers re-seeded the wall
     assert len(seeded) == 2 and seeded[0].is_set() and not seeded[1].is_set()  # old set stopped, new set running
 

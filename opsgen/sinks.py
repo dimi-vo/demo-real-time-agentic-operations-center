@@ -22,8 +22,6 @@ def format_event(ev: Event, clock: str | None = None) -> str:
     """One human-readable line describing a schedule event. `clock` is an optional
     pre-formatted time label; if omitted, the event's wall-clock time is used."""
     when = clock if clock is not None else _hms(ev.now)
-    if ev.kind == "benign_deploy":
-        return f"[{when}] DEPLOY          {ev.service_name:<12} {ev.old_version} -> {ev.new_version} (benign)"
     if ev.kind == "bad_deploy":
         return f"[{when}] BAD DEPLOY      {ev.service_name:<12} {ev.old_version} -> {ev.new_version}"
     if ev.kind == "incident_start":
@@ -61,9 +59,9 @@ class DryRunSink:
         self.out = out if out is not None else sys.stdout
         self.log = log if log is not None else sys.stderr
 
-    def emit_requests(self, records: list[dict]) -> None:
+    def emit_metrics(self, records: list[dict]) -> None:
         for r in records:
-            self.out.write(json.dumps({"_stream": "service_requests", **r}) + "\n")
+            self.out.write(json.dumps({"_stream": "service_metrics", **r}) + "\n")
 
     def emit_deployments(self, records: list[dict]) -> None:
         for r in records:

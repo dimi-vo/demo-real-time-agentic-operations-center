@@ -3,9 +3,10 @@
 Mirrors the reference simulator: one `AvroSerializer` with `auto.register.schemas`
 off and `use.latest.version` on resolves whichever subject the `SerializationContext`
 names, so the latest schema Flink registered from the DDL is used for each of
-`service_requests-value`, `service_deployments-value` and `service_deployments-key`.
+`service_metrics-value`, `service_deployments-value`, `service_deployments-key` and
+`service_incidents-value`.
 
-- `service_requests` is append-only with no primary key: the Kafka message key is the
+- `service_metrics` is append-only with no primary key: the Kafka message key is the
   raw `service_name` string (no key schema), like the reference `car_telemetry`.
 - `service_deployments` is a keyed upsert table: the key is Avro-encoded against the
   registered `service_deployments-key` subject (primitive or record, inspected once),
@@ -28,7 +29,7 @@ from confluent_kafka.serialization import MessageField, SerializationContext
 
 from opsgen.sinks import format_event
 
-REQUESTS_TOPIC = "service_requests"
+METRICS_TOPIC = "service_metrics"
 DEPLOYMENTS_TOPIC = "service_deployments"
 INCIDENTS_TOPIC = "service_incidents"
 
@@ -72,7 +73,7 @@ class KafkaSink:
                 "sasl.password": need("AIOPS_KAFKA_API_SECRET"),
             }
         )
-        self._req_value_ctx = SerializationContext(REQUESTS_TOPIC, MessageField.VALUE)
+        self._metrics_value_ctx = SerializationContext(METRICS_TOPIC, MessageField.VALUE)
         self._dep_value_ctx = SerializationContext(DEPLOYMENTS_TOPIC, MessageField.VALUE)
         self._inc_value_ctx = SerializationContext(INCIDENTS_TOPIC, MessageField.VALUE)
         self._dep_key_fn = self._build_deployments_key_fn()
@@ -88,12 +89,12 @@ class KafkaSink:
 
         return key_fn
 
-    def emit_requests(self, records: list[dict]) -> None:
+    def emit_metrics(self, records: list[dict]) -> None:
         for r in records:
             self._producer.produce(
-                REQUESTS_TOPIC,
+                METRICS_TOPIC,
                 key=r["service_name"].encode("utf-8"),
-                value=self._serializer(r, self._req_value_ctx),
+                value=self._serializer(r, self._metrics_value_ctx),
                 timestamp=int(r["event_time"]),
             )
         self._producer.poll(0)
@@ -111,7 +112,7 @@ class KafkaSink:
     def emit_incident(self, record: dict) -> None:
         """One ground-truth incident record. service_incidents has no registered key
         subject — the message key is the raw service_name string, same shape as
-        service_requests. The Kafka record timestamp is event_time (ms)."""
+        service_metrics. The Kafka record timestamp is event_time (ms)."""
         self._producer.produce(
             INCIDENTS_TOPIC,
             key=record["service_name"].encode("utf-8"),

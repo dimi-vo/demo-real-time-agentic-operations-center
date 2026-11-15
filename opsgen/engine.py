@@ -1,4 +1,4 @@
-"""The schedule: benign deploys and incidents, as a per-service state machine.
+"""The schedule: incidents, as a per-service state machine.
 
 Ticked once per simulated second. `Engine.tick(now, deployments)` advances the
 schedule, mutates the `DeploymentState`s on deploys and rollbacks, and returns the
@@ -10,16 +10,14 @@ Rules (brief section 4.5, simplified by D-042):
 - Quiet period: no incidents in the first `quiet_period` seconds after start.
 - Spacing: the next incident starts `spacing` (uniform) after the previous one ended.
 - Every incident starts on a 10-second window boundary: the end of the quiet period and
-  every spacing are rounded up to one. With a fixed `duration` (40 s) an incident covers
-  exactly 4 whole windows and ends on a boundary too.
+  every spacing are rounded up to one. With a fixed `duration` (20 s, D-059) an incident
+  covers exactly 2 whole windows and ends on a boundary too.
 - Cooldown: a service can't have another incident within `cooldown` of its last ending.
 - Pick the type by weight, then a random eligible candidate; if the chosen type has
   no eligible candidate, re-pick among types that do; if none do, skip the slot.
 - BAD_DEPLOY fires a DEPLOY and starts degrading on the same tick; it ends with a
-  ROLLBACK and metrics return to baseline at that moment.
-- Benign deploys: first at `benign_first`, then every `benign` (uniform), on a random
-  service with no active incident that hasn't deployed in the last `benign_min_gap`.
-  They are not aligned to windows: they don't move the metrics.
+  ROLLBACK and metrics return to baseline at that moment. These are the only version
+  changes: there are no other deploys (D-057).
 """
 
 from __future__ import annotations
@@ -28,7 +26,8 @@ import math
 from dataclasses import dataclass, field
 
 from opsgen.deployments import DeploymentState
-from opsgen.services import SERVICES_BY_NAME, service_names
+from opsgen.distributions import ERROR_RATE
+from opsgen.services import service_names
 
 # Incident types, their weights, candidate services, trigger and expected action. Every
 # type has exactly one expected action, whatever the service (D-043).
@@ -40,18 +39,20 @@ INCIDENT_TYPES = (BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP)
 INCIDENT_WEIGHTS = {BAD_DEPLOY: 0.50, TRAFFIC_SURGE: 0.25, UPSTREAM_DROP: 0.25}
 CANDIDATES = {
     BAD_DEPLOY: tuple(service_names()),
-    TRAFFIC_SURGE: ("web-gateway", "catalog", "auth"),
-    UPSTREAM_DROP: ("cart", "checkout", "payments"),
+    TRAFFIC_SURGE: ("web-gateway",),
+    UPSTREAM_DROP: ("checkout", "payments"),
 }
 TRIGGER = {BAD_DEPLOY: "LATENCY_HIGH", TRAFFIC_SURGE: "TRAFFIC_HIGH", UPSTREAM_DROP: "TRAFFIC_LOW"}
 EXPECTED_ACTION = {BAD_DEPLOY: "ROLLBACK", TRAFFIC_SURGE: "SCALE_OUT", UPSTREAM_DROP: "INVESTIGATE_UPSTREAM"}
 
-# Metric effects during degradation.
+# Metric effects during degradation. They change a service_metrics record's values, never
+# the number of records (D-058). Each type moves exactly one metric (D-059): a surge leaves
+# latency alone. The sizes barely matter to the detector, whose band grows with the spike
+# windows it has trained on; they are big enough to read at a glance on the wall's charts.
 BAD_DEPLOY_LATENCY_MULT = 4.0
-BAD_DEPLOY_SERVER_ERROR_RATE = 0.12
-SURGE_LAMBDA_MULT = 3.0
-SURGE_LATENCY_MULT = 1.5
-DROP_LAMBDA_MULT = 0.2
+BAD_DEPLOY_ERROR_RATE = 0.12  # share of failed requests, for error_count (display only)
+SURGE_LAMBDA_MULT = 5.0
+DROP_LAMBDA_MULT = 0.1
 
 WINDOW_SECONDS = 10  # Flink's tumbling window; incidents start on its boundaries
 
@@ -69,22 +70,21 @@ class Config:
     quiet_period: float = 180.0
     spacing_min: float = 240.0
     spacing_max: float = 360.0
-    duration: float = 40.0  # D-042: fixed, so every incident covers 4 whole windows
+    # D-059 (was 40 s, D-042): fixed, so every incident covers 2 whole windows. The detector
+    # flags a spike in its first window; more windows only add after-spike false alarms.
+    duration: float = 20.0
     cooldown: float = 420.0  # D-042: was the brief's 900
-    benign_first: float = 60.0
-    benign_min: float = 180.0
-    benign_max: float = 300.0
-    benign_min_gap: float = 300.0  # a service won't get a benign deploy within this of its last deploy
     no_incidents: bool = False
 
 
 @dataclass
 class Effect:
-    """Metric multipliers applied to a service's traffic this tick. Neutral by default."""
+    """What an incident does to a service's metrics this tick: multipliers for the traffic
+    mean and the latency median, and the share of failed requests. Neutral by default."""
 
     lam_mult: float = 1.0
     latency_mult: float = 1.0
-    server_error_rate: float | None = None
+    error_rate: float = ERROR_RATE
 
 
 NEUTRAL = Effect()
@@ -102,9 +102,9 @@ class Incident:
 
     def effect(self) -> Effect:
         if self.type == BAD_DEPLOY:
-            return Effect(latency_mult=BAD_DEPLOY_LATENCY_MULT, server_error_rate=BAD_DEPLOY_SERVER_ERROR_RATE)
+            return Effect(latency_mult=BAD_DEPLOY_LATENCY_MULT, error_rate=BAD_DEPLOY_ERROR_RATE)
         if self.type == TRAFFIC_SURGE:
-            return Effect(lam_mult=SURGE_LAMBDA_MULT, latency_mult=SURGE_LATENCY_MULT)
+            return Effect(lam_mult=SURGE_LAMBDA_MULT)  # traffic only: latency untouched (D-059)
         return Effect(lam_mult=DROP_LAMBDA_MULT)
 
 
@@ -112,7 +112,7 @@ class Incident:
 class Event:
     """Something that happened this tick, for the console/log and the ground-truth file."""
 
-    kind: str  # "benign_deploy" | "bad_deploy" | "incident_start" | "incident_end"
+    kind: str  # "bad_deploy" | "incident_start" | "incident_end"
     now: float
     service_name: str
     old_version: str | None = None
@@ -128,14 +128,11 @@ class Engine:
 
     active: Incident | None = field(default=None, init=False)
     next_incident_at: float = field(default=0.0, init=False)
-    next_benign_at: float = field(default=0.0, init=False)
     last_incident_end: dict[str, float] = field(default_factory=dict, init=False)
-    last_deploy_at: dict[str, float] = field(default_factory=dict, init=False)
     incident_counter: int = field(default=0, init=False)  # last incident number used
 
     def __post_init__(self) -> None:
         self.next_incident_at = next_window_boundary(self.start + self.config.quiet_period)
-        self.next_benign_at = self.start + self.config.benign_first
 
     # --- effects ---------------------------------------------------------------
 
@@ -151,7 +148,6 @@ class Engine:
         events: list[Event] = []
         self._advance_active(now, deployments, events)
         self._maybe_start_incident(now, deployments, events)
-        self._maybe_benign_deploy(now, deployments, events)
         return events
 
     def _advance_active(self, now: float, deployments: dict[str, DeploymentState], events: list[Event]) -> None:
@@ -162,7 +158,6 @@ class Engine:
         if now >= inc.degradation_end:
             if inc.type == BAD_DEPLOY:
                 old, new = deployments[inc.service_name].rollback(now)
-                self.last_deploy_at[inc.service_name] = now
                 events.append(Event("incident_end", now, inc.service_name, old, new, inc))
             else:
                 events.append(Event("incident_end", now, inc.service_name, incident=inc))
@@ -203,20 +198,9 @@ class Engine:
         # A BAD_DEPLOY's deploy and its degradation start on the same tick (D-042).
         if itype == BAD_DEPLOY:
             old, new = deployments[svc].deploy(now)
-            self.last_deploy_at[svc] = now
             events.append(Event("bad_deploy", now, svc, old, new, inc))
         events.append(Event("incident_start", now, svc, incident=inc))
         self.active = inc
-
-    def _maybe_benign_deploy(self, now: float, deployments: dict[str, DeploymentState], events: list[Event]) -> None:
-        if now < self.next_benign_at:
-            return
-        svc = self._choose_benign_service(now)
-        if svc is not None:
-            old, new = deployments[svc].deploy(now)
-            self.last_deploy_at[svc] = now
-            events.append(Event("benign_deploy", now, svc, old, new))
-        self.next_benign_at = now + self._uniform(self.config.benign_min, self.config.benign_max)
 
     # --- choice helpers --------------------------------------------------------
 
@@ -238,16 +222,6 @@ class Engine:
         itype = self.rng.choices(types, weights=weights, k=1)[0]
         svc = self.rng.choice(available[itype])
         return itype, svc
-
-    def _choose_benign_service(self, now: float) -> str | None:
-        active_svc = self.active.service_name if self.active is not None else None
-        eligible = [
-            name
-            for name in SERVICES_BY_NAME
-            if name != active_svc
-            and now - self.last_deploy_at.get(name, float("-inf")) >= self.config.benign_min_gap
-        ]
-        return self.rng.choice(eligible) if eligible else None
 
     def _uniform(self, lo: float, hi: float) -> float:
         return self.rng.uniform(lo, hi)

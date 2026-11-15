@@ -49,7 +49,7 @@ def test_matches_every_way_of_writing_an_insert_into_an_output_table(sql):
         "INSERT INTO `service_health_backup` SELECT 1",
         "INSERT INTO my_service_health SELECT 1",
         "SELECT * FROM service_health",
-        "SELECT * FROM `service_health` WHERE service_name = 'cart'",
+        "SELECT * FROM `service_health` WHERE service_name = 'checkout'",
         "INSERT INTO other_table SELECT * FROM service_health",
         "INSERT INTO `service_health`.`other` SELECT 1",
         "DROP TABLE service_health",
@@ -110,7 +110,7 @@ def test_ignores_statements_that_have_already_finished(run):
 def test_empties_exactly_the_two_output_topics_after_the_statements_are_gone(run):
     h = run(
         statements=[statement("health", HEALTH), statement("agent", AGENT)],
-        topics=(*OUTPUT_TOPICS, "service_requests", "service_deployments", "service_incidents"),
+        topics=(*OUTPUT_TOPICS, "service_metrics", "service_deployments", "service_incidents"),
     )
     assert sorted(h.admin.emptied) == sorted(OUTPUT_TOPICS)  # never the source topics
     assert [kind for kind, _ in h.events] == ["deleted", "deleted", "emptied", "emptied"]

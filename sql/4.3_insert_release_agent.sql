@@ -43,7 +43,6 @@ LATERAL TABLE(AI_RUN_AGENT(
     '  Expected Upper Bound: ', CAST(ROUND(h.`latency_upper_bound`, 1) AS STRING), ' ms\n',
     'Last Change: ', COALESCE(h.`last_change`, 'N/A'),
     '  Seconds Since Deploy: ', CAST(h.`seconds_since_deploy` AS STRING), '\n',
-    'Previous Version: ', COALESCE(h.`previous_version`, 'N/A'), '\n',
-    'Error Rate Breach: ', CAST(h.`error_rate_breach` AS STRING), ' (true above 5 percent)'
+    'Previous Version: ', COALESCE(h.`previous_version`, 'N/A')
   )
 )) AS a(`agent_status`, `agent_response`);

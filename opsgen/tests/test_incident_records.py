@@ -67,7 +67,7 @@ class _RecordingSink:
         self.events, self.incidents = [], []
 
     def emit_deployments(self, rs): pass
-    def emit_requests(self, rs): pass
+    def emit_metrics(self, rs): pass
     def emit_event(self, ev): self.events.append(ev)
     def emit_incident(self, r): self.incidents.append(r)
     def flush(self): pass

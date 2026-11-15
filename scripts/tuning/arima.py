@@ -9,7 +9,7 @@ What it reproduces (each point checked against Confluent's recorded output by
 - bounds = forecast +/- z * sigma, with z from `confidence` (two-sided) and sigma the
   residual standard deviation of the fit; symmetric (confirmed live);
 - forecast and bounds rounded to whole numbers when the series is whole numbers
-  (Confluent does this for request_count).
+  (Confluent does this for traffic_count).
 
 The model is AR(p) with an intercept, fitted by ordinary least squares on lagged
 values (conditional least squares). Confluent's estimator isn't documented; calibration
@@ -27,7 +27,7 @@ from statistics import NormalDist
 class DetectorConfig:
     min_training: int = 12
     max_training: int = 360
-    confidence: float = 99.9
+    confidence: float = 99.95  # the labs' value (D-059)
     p: int = 1
     update_interval: int = 5
     warmup_extra: int = 1  # Confluent's first output comes after min_training + 1 points

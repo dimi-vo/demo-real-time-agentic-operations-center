@@ -9,7 +9,7 @@ SELECT
   previous_version,
   last_change,
   seconds_since_deploy,
-  request_count,
+  traffic_count,
   avg_latency_ms
 FROM `service_health`
 WHERE seconds_since_deploy <= 10;

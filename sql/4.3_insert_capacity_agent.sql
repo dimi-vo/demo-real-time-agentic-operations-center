@@ -34,19 +34,18 @@ LATERAL TABLE(AI_RUN_AGENT(
   CONCAT(
     'SERVICE ', h.`service_name`, ' (', h.`tier`, ')\n',
     'Trigger: ', CASE WHEN h.`traffic_status` = 'HIGH' THEN 'TRAFFIC_HIGH' ELSE 'TRAFFIC_LOW' END, '\n',
-    'Requests This Window: ', CAST(h.`request_count` AS STRING),
-    '  Expected: ', CAST(ROUND(h.`expected_request_count`, 0) AS STRING),
+    'Traffic Count: ', CAST(h.`traffic_count` AS STRING),
+    '  Expected Traffic Count: ', CAST(ROUND(h.`expected_traffic_count`, 0) AS STRING),
     '  Expected Band: ', CAST(ROUND(h.`traffic_lower_bound`, 0) AS STRING),
     ' to ', CAST(ROUND(h.`traffic_upper_bound`, 0) AS STRING), '\n',
     'Ready Replicas: ', CAST(h.`ready_replicas` AS STRING),
     '  Suggested Replicas: ', CAST(GREATEST(
       h.`ready_replicas` + 1,
       COALESCE(
-        CAST(CEIL(h.`ready_replicas` * CAST(h.`request_count` AS DOUBLE)
-                  / NULLIF(h.`expected_request_count`, 0)) AS INT),
+        CAST(CEIL(h.`ready_replicas` * CAST(h.`traffic_count` AS DOUBLE)
+                  / NULLIF(h.`expected_traffic_count`, 0)) AS INT),
         h.`ready_replicas` + 1
       )
-    ) AS STRING), '\n',
-    'Error Rate Breach: ', CAST(h.`error_rate_breach` AS STRING), ' (true above 5 percent)'
+    ) AS STRING)
   )
 )) AS a(`agent_status`, `agent_response`);
