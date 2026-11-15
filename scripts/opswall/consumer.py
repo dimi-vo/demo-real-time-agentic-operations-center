@@ -7,7 +7,9 @@ The dashboard reads five topics with the keys on the attendee's credential card:
 the state keeps, D-061).
 
 Each topic gets one thread with a dedicated consumer group id (so partitions
-aren't shared across threads and nothing is ever committed; we always tail).
+aren't shared across threads and nothing is ever committed; we always tail). The
+consumers read uncommitted records: Flink's transactional sinks commit about once a
+minute, and the wall shouldn't wait for that (D-063).
 Avro deserialization is per-topic, driven off the Schema Registry's latest
 version for each subject. ``service_deployments`` also decodes its key and merges
 ``service_name`` into the record, because Flink keeps the primary key out of the
@@ -85,7 +87,11 @@ def _build_consumer(card: dict[str, str], topic: str) -> Consumer:
         "group.id": f"ops-wall-{topic}-{uuid.uuid4().hex[:8]}",
         "enable.auto.commit": False,
         "auto.offset.reset": "latest",  # overridden by explicit assignment below
-        "isolation.level": "read_committed",
+        # Flink commits its sink transactions about once a minute; read_committed held
+        # service_health and remediation_decisions back that long. The appliers keep one
+        # record per natural key, so a row an aborted transaction wrote and the replay
+        # rewrote counts once (D-063).
+        "isolation.level": "read_uncommitted",
         "log_level": 0,  # silence librdkafka's own noise; we route via callbacks
     })
 

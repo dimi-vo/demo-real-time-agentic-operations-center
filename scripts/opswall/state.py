@@ -9,8 +9,9 @@ The appliers keep the raw facts: one health row per window, one decision per win
 and agent, one incident per id, one ``service_metrics`` sample per second.
 ``snapshot(now)`` derives everything the page shows from them, so the page only draws
 and the counting is tested here (D-054). Deriving
-at snapshot time also lets a late row or decision reshape what is drawn (the consumer
-reads ``read_committed``, and transactional commits can land out of order).
+at snapshot time also lets a late row or decision reshape what is drawn (records can land
+out of order, and the consumer reads ``read_uncommitted``, so a row an aborted Flink
+transaction wrote comes again when the statement replays, D-063).
 
 - A **run** is consecutive flagged windows of one service for one trigger (latency
   high, traffic high, traffic low), counting only windows whose ``window_end`` is on

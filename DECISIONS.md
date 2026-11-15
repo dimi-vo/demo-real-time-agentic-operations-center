@@ -1907,6 +1907,28 @@ keeps its key as the wall moves; two blocks never share one).
 
 Amends D-054 and D-061.
 
+### D-063 · FIX · The ops wall reads uncommitted records
+**What.** Health rows and agent decisions showed up on the wall up to about a minute after
+the Confluent Cloud UI showed them in the topic. The wall's consumers read
+`read_committed`. Flink's sinks are transactional and commit "approximately every minute"
+([delivery guarantees](https://docs.confluent.io/cloud/current/flink/concepts/delivery-guarantees.html)),
+so a committed reader waits up to one commit interval for each statement's rows. The UI
+shows uncommitted records. `remediation_decisions` also has two writers on its one
+partition: a committed reader can't get past the first record of either agent's open
+transaction, so one agent's committed decision can wait behind the other agent's
+transaction too.
+**Options.** (a) Keep `read_committed` and live with the lag; (b) `read_uncommitted` on the
+wall's consumers.
+**Choice.** (b). The cost is that the wall can read records from a transaction Flink later
+aborts and replays. Every applier already keeps one record per natural key (a health row
+per window, a decision per window and agent, a sample per second, an incident per id), and
+keeps the first detection and first write time, so a replayed row counts once. A replayed
+agent call may answer differently; the newer answer wins, as for a re-run INSERT.
+`uv run evaluate` (`scripts/common/topic_reader.py`) stays `read_committed`: it scores
+after the fact and its 100 s tail covers the lag (D-021).
+**Impact.** `scripts/opswall/consumer.py` (`_build_consumer`). Tests:
+`tests/test_opswall_ingest.py` (the consumer reads uncommitted records).
+
 ### D-064 · DECISION · Shorter source watermarks: a window closes on the tick at its end
 **What.** Every incident was detected 15 s after it started. Incidents start on a window
 boundary and are flagged in their first window (D-059), so 10 s of that is the window. The

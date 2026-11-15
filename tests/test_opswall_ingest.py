@@ -34,6 +34,7 @@ from confluent_kafka.serialization import MessageField, SerializationContext
 
 from scripts.opswall import consumer
 from scripts.opswall.consumer import (
+    DECISIONS_TOPIC,
     DEPLOYMENTS_TOPIC,
     INCIDENTS_TOPIC,
     METRICS_TOPIC,
@@ -252,6 +253,17 @@ def test_the_consumer_tails_service_metrics_from_about_11_minutes_back(monkeypat
     assert metrics["key_deserializer"] is None and metrics["use_kafka_ts"] is False
     assert metrics["assign"](object()) is True
     assert seeks == [(METRICS_TOPIC, 660.0)]  # the 10-minute chart plus the 60 s margin
+
+
+def test_the_consumer_reads_uncommitted_records(monkeypatch):
+    """Flink commits its sink transactions about once a minute, so a read_committed wall
+    showed service_health and remediation_decisions up to a minute late (D-063)."""
+    configs = []
+    monkeypatch.setattr(consumer, "Consumer", lambda conf: configs.append(conf))
+    card = {k: "x" for k in ("AIOPS_KAFKA_BOOTSTRAP", "AIOPS_KAFKA_API_KEY",
+                             "AIOPS_KAFKA_API_SECRET")}
+    consumer._build_consumer(card, DECISIONS_TOPIC)
+    assert configs[0]["isolation.level"] == "read_uncommitted"
 
 
 # --- detected_at, the one instant in service_health (D-054) ------------------------
