@@ -4,6 +4,8 @@ criteria)."""
 import io
 import json
 
+import pytest
+
 from opsgen.driver import run_simulate
 from opsgen.engine import Config
 from opsgen.simulation import Simulation
@@ -59,14 +61,42 @@ def test_simulate_summary_sums_the_window_records():
 
 
 def test_simulate_quiet_period_before_first_incident():
-    text = _simulate(minutes=60, quiet_period=180)
+    text = _simulate(minutes=60)
     starts = [ln for ln in text.splitlines() if "INCIDENT START" in ln]
     assert starts, "expected incidents over an hour"
-    # No incident starts before t=03:00.
+    # No incident starts before t=02:30, the detector's warm-up (D-060).
+    clocks = []
     for ln in starts:
         mmss = ln.split("[", 1)[1].split("]", 1)[0]
         mm, ss = (int(x) for x in mmss.split(":"))
-        assert mm * 60 + ss >= 180
+        clocks.append(mm * 60 + ss)
+    assert min(clocks) == Config().quiet_period == 150
+
+
+def test_simulate_banner_shows_the_schedule():
+    first = _simulate(minutes=1).splitlines()[0]
+    assert first == (
+        "# ops-sim --simulate 1min  (quiet=150s duration=20s gap=20s "
+        "rests: BAD_DEPLOY=390s TRAFFIC_SURGE=300s UPSTREAM_DROP=300s)"
+    )
+    assert _simulate(minutes=1, no_incidents=True).splitlines()[0] == "# ops-sim --simulate 1min  (no incidents)"
+
+
+def test_simulate_an_hour_has_overlapping_incidents():
+    # D-060: incidents on different services overlap. Track what is open per service.
+    open_now: dict[str, str] = {}
+    most = 0
+    for ln in _simulate(minutes=60).splitlines():
+        if not ln.startswith("[") or "INCIDENT" not in ln:
+            continue
+        _, kind, itype, svc = ln.split("]", 1)[1].split()[:4]  # INCIDENT START|END type service
+        if kind == "START":
+            assert svc not in open_now, ln  # never two at once on one service
+            open_now[svc] = itype
+            most = max(most, len(open_now))
+        else:
+            assert open_now.pop(svc) == itype, ln
+    assert most == 3
 
 
 def test_simulate_every_deploy_is_a_bad_deploy():
@@ -100,12 +130,15 @@ def test_no_incidents_simulate_has_no_incidents():
     assert "DEPLOY" not in text
 
 
-def test_cli_schedule_overrides_reach_the_config():
+def test_cli_has_no_timing_flags():
+    # D-060: timing lives in Config only. --seed, --no-incidents, --simulate and --dry-run stay.
     from opsgen.cli import _build_parser, _config_from_args
 
-    defaults = _config_from_args(_build_parser().parse_args([]))
-    assert defaults == Config()
-    assert (defaults.duration, defaults.cooldown) == (20.0, 420.0)
-    args = _build_parser().parse_args(["--duration", "30", "--cooldown", "600"])
-    config = _config_from_args(args)
-    assert (config.duration, config.cooldown) == (30.0, 600.0)
+    parser = _build_parser()
+    assert _config_from_args(parser.parse_args([])) == Config()
+    assert _config_from_args(parser.parse_args(["--no-incidents"])) == Config(no_incidents=True)
+    flags = {opt for action in parser._actions for opt in action.option_strings}
+    assert flags == {"-h", "--help", "--dry-run", "--simulate", "--seed", "--no-incidents", "--creds"}
+    for gone in ("--quiet-period", "--spacing-min", "--spacing-max", "--duration", "--cooldown"):
+        with pytest.raises(SystemExit):
+            parser.parse_args([gone, "30"])

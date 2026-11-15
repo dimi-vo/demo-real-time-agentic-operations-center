@@ -82,7 +82,7 @@ def test_driver_emits_two_records_per_incident(monkeypatch):
     sink = _RecordingSink()
 
     # Drive the loop by hand with a KeyboardInterrupt stop-gap after enough ticks
-    # to guarantee at least one incident at this seed's cadence (~3 minutes in).
+    # to guarantee incidents: the first ones start at 150 s (D-060).
     k_counter = {"k": 0}
     real_tick = sim.tick
 

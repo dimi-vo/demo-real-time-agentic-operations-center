@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from opsgen.engine import WINDOW_SECONDS, next_window_boundary
+from opsgen.engine import INCIDENT_TYPES, WINDOW_SECONDS, Config, next_window_boundary
 from opsgen.groundtruth import end_record, start_record
 from opsgen.services import service_names
 from opsgen.simulation import Simulation
@@ -42,6 +42,10 @@ def run_realtime(sim: Simulation, sink, root: Path | None = None) -> None:
     When `root` is given, the generator's state (versions, incident counter) is saved.
     `--dry-run` passes root=None, so a dry run writes nothing and stays reproducible.
     The first tick is at `sim.start`; callers pass an `aligned_start` and this waits for it.
+
+    The schedule itself is not saved: on a restart, the incidents in flight when it stopped
+    (up to one per service) never get their end record. Accepted (D-060): the wall keeps them
+    open for 11 minutes, and `evaluate` scores only incidents that ended.
     """
     wait_until(sim.start)
     sink.emit_deployments(sim.bootstrap())
@@ -78,6 +82,14 @@ def run_realtime(sim: Simulation, sink, root: Path | None = None) -> None:
         sys.stderr.write("\nStopped.\n")
 
 
+def schedule_settings(config: Config) -> str:
+    """The schedule's settings on one line, for the start banner (D-060)."""
+    if config.no_incidents:
+        return "no incidents"
+    rests = " ".join(f"{t}={config.rests[t]:g}s" for t in INCIDENT_TYPES)
+    return f"quiet={config.quiet_period:g}s duration={config.duration:g}s gap={config.gap:g}s rests: {rests}"
+
+
 def run_simulate(sim: Simulation, minutes: float, out=None) -> None:
     """Run a synthetic clock for `minutes` without sleeping, printing one summary line
     per service per 10-second window plus the deploy/incident log (brief section 4.5).
@@ -91,11 +103,7 @@ def run_simulate(sim: Simulation, minutes: float, out=None) -> None:
         return {n: {"traffic": 0, "errors": 0, "lat": 0.0, "records": 0} for n in names}
 
     agg = fresh()
-    out.write(
-        f"# ops-sim --simulate {minutes:g}min  "
-        f"(quiet={sim.config.quiet_period:g}s spacing={sim.config.spacing_min:g}-{sim.config.spacing_max:g}s "
-        f"duration={sim.config.duration:g}s cooldown={sim.config.cooldown:g}s)\n"
-    )
+    out.write(f"# ops-sim --simulate {minutes:g}min  ({schedule_settings(sim.config)})\n")
     for k in range(total):
         now = sim.start + k
         metrics, _deps, events = sim.tick(now)

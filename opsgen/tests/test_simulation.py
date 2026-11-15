@@ -36,6 +36,12 @@ def _sim(seed=0, config=None):
     return Simulation(seed, start=0.0, config=config or Config())
 
 
+def _force(sim, itype, svc):
+    """Make the engine's next choice `(itype, svc)`, and then no other."""
+    picks = iter([(itype, svc)])
+    sim.engine._choose_incident = lambda now: next(picks, None)
+
+
 def test_bootstrap_emits_every_service():
     sim = _sim()
     boot = sim.bootstrap()
@@ -80,7 +86,7 @@ def test_reemit_every_five_seconds():
 def test_deploy_emits_deployment_record_and_mutates_version():
     # Force a bad deploy on checkout at tick 0 (the only kind of deploy, D-057).
     sim = _sim(seed=4, config=Config(quiet_period=0))
-    sim.engine._choose_incident = lambda now: (BAD_DEPLOY, "checkout")
+    _force(sim, BAD_DEPLOY, "checkout")
     _, deps, events = sim.tick(0.0)
     deployed = [e for e in events if e.kind == "bad_deploy"]
     assert deployed, "expected a bad deploy at tick 0"
@@ -126,7 +132,7 @@ def test_an_incident_moves_the_values_not_the_record_count(itype, service, traff
     # D-058: one record per service per second, normal or not; the incident's multipliers
     # show in the values. 600 normal seconds, then 600 under the incident.
     sim = _sim(seed=12, config=Config(no_incidents=True))
-    sim.engine.active = _forced(itype, service, start=600.0, end=1200.0)
+    sim.engine.active[service] = _forced(itype, service, start=600.0, end=1200.0)
     before = _run(sim, range(600))[service]
     during = _run(sim, range(600, 1200))[service]
     assert len(before) == len(during) == 600
@@ -149,7 +155,7 @@ def test_a_second_without_traffic_still_has_a_latency():
     # A drop can leave a second with no requests; the record is still sent, with one
     # latency draw, so latency_ms is never null.
     sim = _sim(seed=5, config=Config(no_incidents=True))
-    sim.engine.active = _forced(UPSTREAM_DROP, "payments", start=0.0, end=600.0)
+    sim.engine.active["payments"] = _forced(UPSTREAM_DROP, "payments", start=0.0, end=600.0)
     records = _run(sim, range(600))["payments"]
     empty = [r for r in records if r["traffic_count"] == 0]
     assert empty, "expected some empty seconds at 30 x 0.1 requests/s"
@@ -159,7 +165,7 @@ def test_a_second_without_traffic_still_has_a_latency():
 def test_upstream_drop_never_zeroes_a_window():
     sim = _sim(seed=5, config=Config(no_incidents=True))
     # Force a drop on payments (the lowest-rps service) for a 10s window.
-    sim.engine.active = _forced(UPSTREAM_DROP, "payments", start=0.0, end=70.0)
+    sim.engine.active["payments"] = _forced(UPSTREAM_DROP, "payments", start=0.0, end=70.0)
     total = sum(r["traffic_count"] for r in _run(sim, range(10))["payments"])
     assert total > 0, "a dropped service must still count at least one request per window"
 
@@ -167,7 +173,7 @@ def test_upstream_drop_never_zeroes_a_window():
 def test_bad_deploy_degrades_from_its_own_tick():
     # D-042: no onset delay. The deploy fires on a window boundary, and the 10-second
     # window it opens is already fully degraded.
-    sim = _sim(seed=11, config=Config(quiet_period=10, spacing_min=30, spacing_max=30))
+    sim = _sim(seed=11)
     for k in range(3000):
         metrics, _, events = sim.tick(float(k))
         bad = next((e for e in events if e.kind == "bad_deploy"), None)
@@ -203,7 +209,7 @@ def test_a_record_follows_the_deploy_record_of_its_tick():
     # On that tick the deploy record is at the tick and checkout's record 999 ms later, so
     # the temporal join gives the record the new version.
     sim = Simulation(42, start=1_794_390_513.319599, config=Config(quiet_period=0))
-    sim.engine._choose_incident = lambda now: (BAD_DEPLOY, "checkout")
+    _force(sim, BAD_DEPLOY, "checkout")
     seen = []
     for k in range(100):
         metrics, deps, events = sim.tick(sim.start + k)

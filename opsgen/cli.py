@@ -6,8 +6,8 @@
   uv run ops-sim --dry-run --seed 42     # reproducible schedule and traffic
   uv run ops-sim --no-incidents          # baseline traffic only: no incidents, no deploys
 
-The scheduling overrides (quiet period, spacing, duration, cooldown)
-are in seconds and exist to make the workshop quick to develop against.
+There are no timing flags: the schedule (quiet period, spike length, gap and rests) lives
+in `Config` in opsgen/engine.py (D-060).
 """
 
 from __future__ import annotations
@@ -34,25 +34,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, help="Seed the RNG so the whole schedule and traffic are reproducible")
     p.add_argument("--no-incidents", action="store_true", help="Never inject an incident (so never deploy either)")
     p.add_argument("--creds", help="Path to the credential card (live mode; default: read from credentials.env)")
-
-    g = p.add_argument_group("schedule overrides (seconds)")
-    g.add_argument("--quiet-period", type=float, default=Config.quiet_period, help="Incident-free period at start")
-    g.add_argument("--spacing-min", type=float, default=Config.spacing_min, help="Min gap after an incident ends")
-    g.add_argument("--spacing-max", type=float, default=Config.spacing_max, help="Max gap after an incident ends")
-    g.add_argument("--duration", type=float, default=Config.duration, help="Incident degradation duration")
-    g.add_argument("--cooldown", type=float, default=Config.cooldown, help="Min gap between incidents on one service")
     return p
 
 
 def _config_from_args(args: argparse.Namespace) -> Config:
-    return Config(
-        quiet_period=args.quiet_period,
-        spacing_min=args.spacing_min,
-        spacing_max=args.spacing_max,
-        duration=args.duration,
-        cooldown=args.cooldown,
-        no_incidents=args.no_incidents,
-    )
+    return Config(no_incidents=args.no_incidents)
 
 
 def main(argv: list[str] | None = None) -> None:

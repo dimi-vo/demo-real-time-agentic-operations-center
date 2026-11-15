@@ -951,6 +951,13 @@ unaligned" no longer applies: every deploy and rollback sits on a window boundar
 **Amended by D-059.** The fixed duration is 20 s: an incident covers 2 whole windows. The
 detector flags a spike in its first window; more windows only add after-spike false alarms.
 
+**Amended by D-060.** The single slot is gone: every service runs its own schedule, so
+incidents on different services overlap (at most one per service). The spacing and the
+420 s cooldown are replaced by a 20 s gap per service and per-type rests (`BAD_DEPLOY` 390 s,
+`TRAFFIC_SURGE` 300 s, `UPSTREAM_DROP` 300 s); the first three incidents are one of each
+type; the quiet period is 150 s, tied to the detector's warm-up. Starts still sit on window
+boundaries. `--duration` and the other timing flags are removed: timing lives in `Config`.
+
 ### D-043 · DEVIATION · One answer per incident type: `ESCALATE` and `max_replicas` removed
 **What.** The brief puts `auth` at its replica ceiling (ready = max = 4) so a surge on
 `auth` expects `ESCALATE`, and gives the release agent `ESCALATE` for "latency is high but
@@ -1696,3 +1703,72 @@ shortlisted: `d` 1 (follows level changes, D-029), STL (the data has no seasonal
 - Evidence: `.scratch/simplify-demo/research/tune.py` and its `t_*.out` outputs.
 
 Amends D-029, D-031, D-042 and D-058.
+
+### D-060 · DECISION · Per-service schedules: overlap, per-type rests, first three one of each type
+**What.** `ops-sim` had one global incident slot: one incident at a time, the next one
+240–360 s after the last ended, and a 420 s cooldown per service. About 10 incidents an
+hour, and the first surge could take up to an hour to appear. Its timings were CLI flags.
+**Options.** (a) Keep the single slot with a shorter spacing: the slot caps the rate, and
+the cooldown blocks the same services over and over; (b) one schedule per service, with
+rests per service and type.
+**Choice.** (b), decided with the user in the simplify-demo grilling session
+(`.scratch/simplify-demo/spec.md`, issue 06):
+- **One schedule per service.** Incidents on different services may overlap; a service has
+  at most one at a time.
+- **Gap and rests.** A service's next incident starts at the next 10-second boundary once
+  **20 s** have passed since its last incident ended and at least one of its types is out of
+  its **rest**. Rests are per service and type, measured from the end of that type's last
+  incident on that service, the same on every service (D-059): `BAD_DEPLOY` **390 s**,
+  `TRAFFIC_SURGE` **300 s**, `UPSTREAM_DROP` **300 s**. At a boundary, every service that can
+  start one does.
+- **First three one of each type.** Until all three types have happened, only types not
+  seen yet are picked (order random). After that the type is drawn by `INCIDENT_WEIGHTS`
+  (50/25/25) among the types allowed now, then a random service allowed for it.
+- **Quiet period tied to the warm-up.** No incident before
+  `(minTrainingSize + 1) × WINDOW_SECONDS + WINDOW_SECONDS` after start (the detector scores
+  nothing for `minTrainingSize + 1` windows, plus one window of margin). That floor is 140 s
+  with lab 2.3's `minTrainingSize` 12; the quiet period is **150 s**, as decided in the
+  session, one more window of margin. A test reads `minTrainingSize` from
+  `sql/2.3_anomaly_status.sql` and fails if the quiet period drops below the floor.
+- **Spikes** are 20 s (D-059), start and end on window boundaries; a bad deploy deploys on
+  its first tick and rolls back at its end (D-042), unchanged.
+- **Timing lives in `Config` only.** `--quiet-period`, `--spacing-min`, `--spacing-max`,
+  `--duration` and `--cooldown` are removed; `--seed`, `--no-incidents`, `--simulate`,
+  `--dry-run` (and `--creds`) stay.
+**Why.** Each service has its own detector model (`PARTITION BY service_name`, D-009), so
+incidents on other services change nothing for it (`research/cross_service.py`); overlap
+costs no accuracy. What limits the rate is same-service, same-metric repeats: the model
+trains on its spike windows, and too many of them on one metric widen the band past the next
+spike. Per-type rests control exactly that, and D-059 tuned them to about 60 incidents an
+hour with every type caught. The first-three rule shows every incident type within the
+first minute of a run, where it used to take up to an hour for a surge. Tying the quiet
+period to the warm-up means every incident lands in windows the detector scores.
+**Measured** (`Engine` alone, seeded): **60 incidents in the first hour for each of 500
+seeds**, **58.5 an hour at steady state** (hours 2–3 of 200 three-hour runs), mix
+44/19/37% (bad deploy, surge, drop), the same as the issue-05 harness (`research/tune.py`'s
+`schedule`, D-059's 59/h). The harness loops over the free services in random order and draws
+a type for each; the engine draws a type, then a service. The two give the same rate, mix and
+per-service rates, and with the harness's 140 s quiet period the engine reproduces a
+type-first copy of it incident for incident (300 seeds × 3 h). The harness's quiet period
+was 140 s; at 150 s the numbers above are unchanged, so D-059's results carry over.
+**Impact.**
+- `opsgen/engine.py`: `RESTS`; `Config` loses `spacing_min`, `spacing_max` and `cooldown`,
+  gains `gap` (20) and `rests`, and `quiet_period` is 150 (was 180). `Engine.active` is a dict
+  by service; `effect_for` reads the service's own incident; `next_incident_at` and
+  `_uniform` are gone; `last_type_end` (by service and type) and `seen` are new; `_eligible`
+  excludes a service mid-incident and checks the gap and the type's rest; `_choose_incident`
+  applies the first-three rule and is called until no service can start one. All
+  scheduling randomness is still on the one scheduler rng, so `--seed` reproduces the
+  schedule, but schedules differ from earlier runs.
+- `opsgen/cli.py`: no timing flags. `opsgen/driver.py`: the `--simulate` banner prints
+  `quiet`, `duration`, `gap` and the rests (or "no incidents").
+- Ground truth and sinks are unchanged: records are per incident, and nothing assumed one
+  open incident. `evaluate` and the wall already work per service.
+- On a restart, incidents in flight lose their end record, now up to one per service.
+  Accepted (spec): the wall keeps them open for 11 minutes; `evaluate` skips them.
+- Tests (`opsgen/tests/`): overlap across services; at most one incident per service; ≥ 20 s
+  between incidents on a service; no same-type repeat within its rest; the first three one
+  of each type; starts on window boundaries; the warm-up floor; about 60 an hour; the chooser
+  (rests, gap, weights, first three); the banner; `ops-sim --help` has no timing flags.
+
+Amends D-042.
