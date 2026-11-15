@@ -453,6 +453,8 @@ def _incident_json(inc: IncidentEvent, owned: list[_Block], now: float, rel) -> 
 def _block_json(b: _Block, now: float, rel) -> dict:
     closer = b.closer
     return {
+        # Who the block is from one snapshot to the next, so the page keeps its node (D-062).
+        "key": f"{b.trigger.name}@{_ms(b.first_window_end)}",
         "start": rel(b.start),
         "end": rel(b.end if closer else now),
         "open": closer is None,

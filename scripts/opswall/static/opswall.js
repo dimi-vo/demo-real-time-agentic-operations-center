@@ -14,7 +14,8 @@
  *    counts of all its decisions, all shown in its tooltip (no icons on the chart)
  *  - the summary numbers and the tile status come ready-made as well
  *  All positions are axis-relative seconds (0 = left edge, axisSeconds = now). The DOM is
- *  rebuilt on every snapshot (one row per service); a ResizeObserver redraws the charts.
+ *  made once and updated in place by every snapshot (D-062): a row per service, a bar per
+ *  incident and per block, kept by key; a ResizeObserver redraws a chart whose width changes.
  */
 
 // ---------- WebSocket ----------
@@ -75,11 +76,39 @@ refreshBtn.addEventListener("click", async () => {
 
 // ---------- Helpers ----------
 const NS = "http://www.w3.org/2000/svg";
-function s(tag, attrs = {}, parent) {
-  const n = document.createElementNS(NS, tag);
-  for (const k in attrs) n.setAttribute(k, attrs[k]);
+function attrs(n, a) {
+  for (const k in a) n.setAttribute(k, a[k]);
+  return n;
+}
+function s(tag, a = {}, parent) {
+  const n = attrs(document.createElementNS(NS, tag), a);
   if (parent) parent.appendChild(n);
   return n;
+}
+// Writes that skip an unchanged value, so a still part of the page stays untouched (a text
+// selection in it survives, nothing is laid out again).
+const setText = (el, text) => { if (el.textContent !== text) el.textContent = text; };
+const setClass = (el, cls) => { if (el.className !== cls) el.className = cls; };
+const setHTML = (el, html) => { if (el._html !== html) { el._html = html; el.innerHTML = html; } };
+
+// The page is updated in place, never rebuilt (D-062): the node under the pointer or holding
+// the focus stays the same node from one snapshot to the next. sync() makes parent's children
+// one node per item, in the items' order: reused by key, created for a new key, removed with
+// its key. Keys must be unique among the items; parent holds nothing else.
+function sync(parent, items, keyOf, create, update) {
+  const prev = parent._keyed || new Map(), next = new Map();
+  for (const item of items) {
+    const k = keyOf(item);
+    next.set(k, prev.get(k) || create(item));
+  }
+  for (const [k, n] of prev) if (!next.has(k)) n.remove();
+  let at = parent.firstChild;
+  for (const item of items) {
+    const n = next.get(keyOf(item));
+    if (n === at) at = at.nextSibling; else parent.insertBefore(n, at);
+    update(n, item);
+  }
+  parent._keyed = next;
 }
 const dur = sec => {
   sec = Math.max(0, Math.round(sec));
@@ -235,8 +264,8 @@ function logScale(kind, values) {
   };
 }
 
-// The pointer over a line chart, kept across snapshots: the DOM is rebuilt on every one, so
-// each redraw puts the crosshair and the tooltip back where the pointer is.
+// The pointer over a line chart. The data moves under a still pointer every second, so each
+// redraw puts the crosshair and the tooltip on the second now under it.
 let lineHover = null;  // { key, x, y }
 function hideLineTip() {
   if (tip.dataset.owner === "line") tip.classList.remove("on");
@@ -249,29 +278,50 @@ document.addEventListener("pointermove", e => {
 });
 document.documentElement.addEventListener("pointerleave", () => { lineHover = null; hideLineTip(); });
 
-function drawLine(host, m) {
-  const w = Math.max(160, Math.floor(host.clientWidth));
+// A chart's <svg> and its layers (<g>s), made on its first draw and kept. A redraw empties the
+// layers that only show things and updates in place the nodes the pointer or the focus can be
+// on: the line chart's hit area, the lane's bars.
+function chartSvg(host, cls, layers) {
+  if (!host._svg) {
+    host._svg = s("svg", { class: cls }, host);
+    host._layers = Object.fromEntries(layers.map(name => [name, s("g", {}, host._svg)]));
+  }
+  return host._svg;
+}
+const sizeSvg = (svg, w, h) => attrs(svg, { width: w, height: h, viewBox: `0 0 ${w} ${h}` });
+// Measured on the first draw, then kept current by the ResizeObserver.
+function hostWidth(host) {
+  if (host._w == null) host._w = Math.floor(host.clientWidth);
+  return Math.max(160, host._w);
+}
+
+function drawLine(host) {
+  const m = host._m;
+  if (!m) return;
+  const w = hostWidth(host);
   const H = LINE_H, plotH = H - PLOT_TOP - 1;
   const X = t => (Math.max(0, Math.min(t, AXIS)) / AXIS) * w;
   const recs = m.records.filter(r => r.t >= 0 && r.t <= AXIS);
   const scale = logScale(m.kind, recs.map(r => r[m.kind]));
   const Y = v => PLOT_TOP + plotH * (1 - scale.frac(v));
 
-  host.innerHTML = "";
-  const svg = s("svg", { class: "chart line", width: w, height: H, viewBox: `0 0 ${w} ${H}` }, host);
+  const svg = chartSvg(host, "chart line", ["plot", "hover"]);
+  const { plot, hover } = host._layers;
+  sizeSvg(svg, w, H);
+  plot.replaceChildren();
   for (let i = 1; i < 10; i++) {
     const x = Math.round(X(i * AXIS / 10)) + 0.5;
-    s("line", { class: "grid", x1: x, x2: x, y1: PLOT_TOP, y2: H }, svg);
+    s("line", { class: "grid", x1: x, x2: x, y1: PLOT_TOP, y2: H }, plot);
   }
-  s("line", { class: "ceiling", x1: 0, x2: w, y1: PLOT_TOP + 0.5, y2: PLOT_TOP + 0.5 }, svg);
-  s("line", { class: "zero", x1: 0, x2: w, y1: H - 0.5, y2: H - 0.5 }, svg);
-  s("line", { class: "now", x1: w - 0.5, x2: w - 0.5, y1: PLOT_TOP, y2: H }, svg);
-  s("text", { class: "scale", x: 0, y: PLOT_TOP - 5 }, svg).textContent = recs.length ? scale.label : "No records yet";
+  s("line", { class: "ceiling", x1: 0, x2: w, y1: PLOT_TOP + 0.5, y2: PLOT_TOP + 0.5 }, plot);
+  s("line", { class: "zero", x1: 0, x2: w, y1: H - 0.5, y2: H - 0.5 }, plot);
+  s("line", { class: "now", x1: w - 0.5, x2: w - 0.5, y1: PLOT_TOP, y2: H }, plot);
+  s("text", { class: "scale", x: 0, y: PLOT_TOP - 5 }, plot).textContent = recs.length ? scale.label : "No records yet";
 
   // The start of each injected incident on this metric (INCIDENT_METRIC in the state).
   for (const t of m.truth) {
     const x = Math.round(X(t.start)) + 0.5;
-    s("line", { class: "onset", x1: x, x2: x, y1: PLOT_TOP, y2: H }, svg);
+    s("line", { class: "onset", x1: x, x2: x, y1: PLOT_TOP, y2: H }, plot);
   }
 
   // A missing second (the simulator stopped, a refresh) breaks the line instead of
@@ -281,13 +331,17 @@ function drawLine(host, m) {
     d += `${prev == null || r.t - prev > 1.5 ? "M" : "L"} ${X(r.t).toFixed(1)} ${Y(r[m.kind]).toFixed(1)} `;
     prev = r.t;
   }
-  if (d) s("path", { class: "series", d }, svg);
+  if (d) s("path", { class: "series", d }, plot);
 
   // Hover: a hit area over the whole chart; the crosshair snaps to the nearest second.
-  const cross = s("g", { class: "crosshair", visibility: "hidden" }, svg);
-  const cl = s("line", { class: "cross", y1: PLOT_TOP, y2: H }, cross);
-  const cd = s("circle", { class: "cross-dot", r: 3.5 }, cross);
-  const hit = s("rect", { class: "hit", x: 0, y: 0, width: w, height: H }, svg);
+  if (!hover.firstChild) {
+    const cross = s("g", { class: "crosshair", visibility: "hidden" }, hover);
+    s("line", { class: "cross", y1: PLOT_TOP, y2: H }, cross);
+    s("circle", { class: "cross-dot", r: 3.5 }, cross);
+    s("rect", { class: "hit", x: 0, y: 0, height: H }, hover);
+  }
+  const [cross, hit] = hover.children, [cl, cd] = cross.children;
+  hit.setAttribute("width", w);
   hit._key = m.key;
   hit._show = (clientX, clientY) => {
     if (!recs.length) return;
@@ -296,12 +350,13 @@ function drawLine(host, m) {
     while (i < j) { const mid = (i + j) >> 1; if (recs[mid].t < t) i = mid + 1; else j = mid; }
     const r = i > 0 && t - recs[i - 1].t < recs[i].t - t ? recs[i - 1] : recs[i];
     const x = X(r.t);
-    cl.setAttribute("x1", x); cl.setAttribute("x2", x);
-    cd.setAttribute("cx", x); cd.setAttribute("cy", Y(r[m.kind]));
+    attrs(cl, { x1: x, x2: x });
+    attrs(cd, { cx: x, cy: Y(r[m.kind]) });
     cross.setAttribute("visibility", "visible");
     const during = m.truth.find(g => r.t >= g.start && r.t <= g.end);
-    tip.innerHTML = `<strong>${valueText(m.kind, r[m.kind])}</strong>${ago(r.t)}` +
-      (during ? `<em>During the ${esc(human(during.type).toLowerCase())}.</em>` : "");
+    tipNode = null;
+    setHTML(tip, `<strong>${valueText(m.kind, r[m.kind])}</strong>${ago(r.t)}` +
+      (during ? `<em>During the ${esc(human(during.type).toLowerCase())}.</em>` : ""));
     tip.dataset.owner = "line";
     tip.classList.add("on");
     placeTip(clientX, clientY);
@@ -310,70 +365,71 @@ function drawLine(host, m) {
 }
 
 // ---------- Lane ----------
-function drawChart(host, m) {
-  const w = Math.max(160, Math.floor(host.clientWidth));
+const laneHeight = m => (isQuiet(m) ? 34 : 78);
+
+function drawChart(host) {
+  const m = host._m;
+  if (!m) return;
+  const w = hostWidth(host);
   const quiet = isQuiet(m);
-  const H = quiet ? 34 : 78, zero = H / 2, lane = quiet ? H / 2 : 32;
+  const H = laneHeight(m), zero = H / 2, lane = quiet ? H / 2 : 32;
   const X = t => (Math.max(0, Math.min(t, AXIS)) / AXIS) * w;
 
-  host.innerHTML = "";
-  const svg = s("svg", { class: "chart", width: w, height: H, viewBox: `0 0 ${w} ${H}` }, host);
+  const svg = chartSvg(host, "chart", ["back", "truths", "blocks", "front"]);
+  const { back, truths, blocks, front } = host._layers;
+  sizeSvg(svg, w, H);
+  back.replaceChildren();
+  front.replaceChildren();
 
   for (let i = 1; i < 10; i++) {
     const x = Math.round(X(i * AXIS / 10)) + 0.5;
-    s("line", { class: "grid", x1: x, x2: x, y1: 0, y2: H }, svg);
+    s("line", { class: "grid", x1: x, x2: x, y1: 0, y2: H }, back);
   }
+  s("line", { class: "zero", x1: 0, x2: w, y1: zero + 0.5, y2: zero + 0.5 }, back);
+  s("line", { class: "now", x1: w - 0.5, x2: w - 0.5, y1: 0, y2: H }, back);
+  if (quiet) s("text", { class: "quiet-label", x: 8, y: zero - 6 }, back).textContent = "No incidents or detections";
 
-  s("line", { class: "zero", x1: 0, x2: w, y1: zero + 0.5, y2: zero + 0.5 }, svg);
-  s("line", { class: "now", x1: w - 0.5, x2: w - 0.5, y1: 0, y2: H }, svg);
-
-  if (quiet) {
-    const t = s("text", { class: "quiet-label", x: 8, y: zero - 6 }, svg);
-    t.textContent = "No incidents or detections";
-    return;
-  }
-
-  // Upper half: the injected incidents. Pending stays plain purple; only missed is dashed.
-  for (const t of m.truth) {
-    const missed = t.verdict === "missed";
+  // Upper half: the injected incidents, a bar per incident id. Pending stays plain purple;
+  // only missed is dashed.
+  sync(truths, m.truth, t => t.incidentId, () => s("path", { tabindex: 0 }), (node, t) => {
     const x0 = X(t.start), x1 = X(t.end);
-    s("path", {
-      class: missed ? "missed" : "truth",
+    attrs(node, {
+      class: t.verdict === "missed" ? "missed" : "truth",
       d: bar(x0, zero - lane, x1 - x0, lane - 1, 3, t.end >= AXIS || t.open),
-      tabindex: 0, "data-tip": incidentTip(t),
-    }, svg);
-    if (missed && x1 - x0 > 52) {
-      const l = s("text", { class: "bar-label t", x: x0 + 7, y: zero - lane / 2 + 4 }, svg);
-      l.textContent = "Missed";
-    }
+      "data-tip": incidentTip(t),
+    });
+  });
+  for (const t of m.truth) {
+    const x0 = X(t.start), x1 = X(t.end);
+    if (t.verdict !== "missed" || x1 - x0 <= 52) continue;
+    s("text", { class: "bar-label t", x: x0 + 7, y: zero - lane / 2 + 4 }, front).textContent = "Missed";
   }
 
-  // Lower half: one block per anomaly run, from detection to the agent's answer.
-  for (const b of m.blocks) {
-    const fa = b.incidentId == null;
+  // Lower half: one bar per anomaly run (by its key), from detection to the agent's answer.
+  sync(blocks, m.blocks, b => b.key, () => s("path", { tabindex: 0 }), (node, b) => {
     const x0 = X(b.start), x1 = X(b.end);
-    s("path", {
-      class: fa ? "false-alarm" : "detect",
+    attrs(node, {
+      class: b.incidentId == null ? "false-alarm" : "detect",
       d: bar(x0, zero + 1, x1 - x0, lane - 1, 3, b.open),
-      tabindex: 0, "data-tip": blockTip(m, b),
-    }, svg);
-    if (fa && x1 - x0 > 76) {
-      const l = s("text", { class: "bar-label d", x: x0 + 7, y: zero + lane / 2 + 5 }, svg);
-      l.textContent = "No incident";
-    }
+      "data-tip": blockTip(m, b),
+    });
+  });
+  for (const b of m.blocks) {
+    const x0 = X(b.start), x1 = X(b.end);
+    if (b.incidentId != null || x1 - x0 <= 76) continue;
+    s("text", { class: "bar-label d", x: x0 + 7, y: zero + lane / 2 + 5 }, front).textContent = "No incident";
   }
 
   // Time to detect: from the incident's start to its first block's start.
   for (const t of m.truth) {
     if (t.verdict === "missed" || t.detectedAt == null || !(t.timeToDetect > 0)) continue;
     const x0 = X(t.start), x1 = X(t.detectedAt), y = zero + 10;
-    s("path", { class: "lag", d: `M ${x0} ${y - 4} V ${y + 4} M ${x0} ${y} H ${x1 - 3} M ${x1 - 3} ${y - 4} V ${y + 4}` }, svg);
-    const label = s("text", { class: "lag-label", y: y + 15 }, svg);
+    s("path", { class: "lag", d: `M ${x0} ${y - 4} V ${y + 4} M ${x0} ${y} H ${x1 - 3} M ${x1 - 3} ${y - 4} V ${y + 4}` }, front);
+    const label = s("text", { class: "lag-label", y: y + 15 }, front);
     label.textContent = `+${dur(t.timeToDetect)}`;
-    if (x1 - x0 >= 40) { label.setAttribute("x", (x0 + x1) / 2); label.setAttribute("text-anchor", "middle"); }
-    else { label.setAttribute("x", x0 - 5); label.setAttribute("text-anchor", "end"); }
+    if (x1 - x0 >= 40) attrs(label, { x: (x0 + x1) / 2, "text-anchor": "middle" });
+    else attrs(label, { x: x0 - 5, "text-anchor": "end" });
   }
-
 }
 
 // ---------- Rows ----------
@@ -390,40 +446,70 @@ function railNote(models) {
   return parts.join(" ");
 }
 
-function serviceRow(svc, hosts) {
-  const models = [metricModel(svc, "latency"), metricModel(svc, "traffic")];
+// A service's row: made once, then updated by every snapshot. Each chart host gets its
+// height before anything in the row is drawn or measured: a host at 0 px would shrink the
+// page for one layout, and the browser would clamp the scroll position to that.
+function createRow() {
   const row = document.createElement("article");
-  row.className = `row ${svc.status || "healthy"}`;
-  const rateStr = formatRate(svc.rateRps);
-  const errStr = formatPct(svc.errorRatePct);
-  const errHot = svc.errorRatePct != null && svc.errorRatePct >= 1 ? "hot" : "";
-  const note = railNote(models);
   row.innerHTML = `
     <div class="rail">
-      <div class="name-line"><h2>${svc.name}</h2><span class="tier">${svc.tier || ""}</span></div>
-      <div class="status ${svc.status || "healthy"}"><span class="dot"></span>${svc.statusText || ""}</div>
-      ${note ? `<p class="note">${note}</p>` : ""}
+      <div class="name-line"><h2></h2><span class="tier"></span></div>
+      <div class="status"><span class="dot"></span><span></span></div>
+      <p class="note"></p>
       <dl class="stats">
-        <div><dt>Version</dt><dd>v${svc.version || "—"}</dd></div>
-        <div><dt>Replicas</dt><dd>${svc.replicas != null ? svc.replicas : "—"}</dd></div>
-        <div><dt>Rate</dt><dd>${rateStr}</dd></div>
-        <div><dt>Errors</dt><dd class="${errHot}">${errStr}</dd></div>
+        <div><dt>Version</dt><dd></dd></div>
+        <div><dt>Replicas</dt><dd></dd></div>
+        <div><dt>Rate</dt><dd></dd></div>
+        <div><dt>Errors</dt><dd></dd></div>
       </dl>
     </div>
     <div class="metrics"></div>`;
+  const status = row.querySelector(".status");
+  const [version, replicas, rate, errors] = row.querySelectorAll(".stats dd");
+  row._ui = {
+    name: row.querySelector("h2"), tier: row.querySelector(".tier"),
+    status, statusText: status.lastElementChild, note: row.querySelector(".note"),
+    version, replicas, rate, errors, charts: [],
+  };
   const metrics = row.querySelector(".metrics");
-  for (const m of models) {
+  for (const kind of ["latency", "traffic"]) {
     const wrap = document.createElement("div");
     wrap.className = "metric";
-    wrap.innerHTML = `<div class="m-label">${m.kind === "latency" ? "Latency" : "Traffic"}</div>
+    wrap.innerHTML = `<div class="m-label">${kind === "latency" ? "Latency" : "Traffic"}</div>
       <div class="chart-host"><div class="line-host"></div><div class="lane-host"></div></div>`;
     const line = wrap.querySelector(".line-host"), lane = wrap.querySelector(".lane-host");
-    line._draw = () => drawLine(line, m);
-    lane._draw = () => drawChart(lane, m);
-    hosts.push(line, lane);
+    line.style.height = `${LINE_H}px`;
+    line._draw = () => drawLine(line);
+    lane._draw = () => drawChart(lane);
+    ro.observe(line);
+    ro.observe(lane);
+    row._ui.charts.push({ kind, line, lane });
     metrics.appendChild(wrap);
   }
   return row;
+}
+
+function updateRow(row, svc) {
+  const ui = row._ui, status = svc.status || "healthy";
+  const models = ui.charts.map(c => metricModel(svc, c.kind));
+  const note = railNote(models);
+  setClass(row, `row ${status}`);
+  setText(ui.name, svc.name);
+  setText(ui.tier, svc.tier || "");
+  setClass(ui.status, `status ${status}`);
+  setText(ui.statusText, svc.statusText || "");
+  setText(ui.note, note);
+  ui.note.hidden = !note;
+  setText(ui.version, `v${svc.version || "—"}`);
+  setText(ui.replicas, svc.replicas != null ? String(svc.replicas) : "—");
+  setText(ui.rate, formatRate(svc.rateRps));
+  setText(ui.errors, formatPct(svc.errorRatePct));
+  setClass(ui.errors, svc.errorRatePct != null && svc.errorRatePct >= 1 ? "hot" : "");
+  ui.charts.forEach((c, i) => {
+    c.line._m = c.lane._m = models[i];
+    c.lane.style.height = `${laneHeight(models[i])}px`;
+  });
+  for (const c of ui.charts) { c.line._draw(); c.lane._draw(); }
 }
 
 // ---------- Summary / axis / legend ----------
@@ -449,7 +535,7 @@ function renderSummary(S = {}) {
   if (S.missed) tail.push(`${b(S.missed, "miss")} missed`);
   if (S.falseAlarms) tail.push(`${b(S.falseAlarms)} ${S.falseAlarms === 1 ? "false alarm" : "false alarms"}`);
   if (tail.length) html += ` ${andList(tail)}.`;
-  document.getElementById("summary").innerHTML = html;
+  setHTML(document.getElementById("summary"), html);
 }
 
 function renderAxis() {
@@ -479,7 +565,10 @@ function renderLegend() {
 }
 
 // ---------- Tooltip ----------
+// A bar's tooltip follows the bar node, which outlives the snapshots: each one refreshes the
+// words (an answer arrived, the times moved) or hides the tooltip once the bar has left.
 const tip = document.getElementById("tip");
+let tipNode = null;  // the bar the tooltip is on; null when hidden or on a line chart
 function placeTip(x, y) {
   const r = tip.getBoundingClientRect();
   let left = x + 14, top = y + 16;
@@ -490,41 +579,49 @@ function placeTip(x, y) {
 }
 function showTip(node, x, y) {
   delete tip.dataset.owner;
-  tip.innerHTML = node.getAttribute("data-tip");
+  tipNode = node;
+  setHTML(tip, node.getAttribute("data-tip"));
   tip.classList.add("on");
   placeTip(x, y);
 }
+function hideTip() {
+  tipNode = null;
+  tip.classList.remove("on");
+}
+function refreshTip() {
+  if (!tipNode) return;
+  if (tipNode.isConnected) setHTML(tip, tipNode.getAttribute("data-tip"));
+  else hideTip();
+}
 const tipTarget = e => e.target.closest?.("[data-tip]");
 document.addEventListener("pointerover", e => { const n = tipTarget(e); if (n) showTip(n, e.clientX, e.clientY); });
-document.addEventListener("pointermove", e => { if (tip.classList.contains("on") && tipTarget(e)) placeTip(e.clientX, e.clientY); });
-document.addEventListener("pointerout", e => { if (tipTarget(e)) tip.classList.remove("on"); });
+document.addEventListener("pointermove", e => { if (tipNode && tipTarget(e)) placeTip(e.clientX, e.clientY); });
+document.addEventListener("pointerout", e => { if (tipTarget(e)) hideTip(); });
 document.addEventListener("focusin", e => {
   const n = tipTarget(e); if (!n) return;
   const r = n.getBoundingClientRect();
   showTip(n, r.left + r.width / 2, r.bottom);
 });
-document.addEventListener("focusout", () => tip.classList.remove("on"));
+document.addEventListener("focusout", hideTip);
 
 // ---------- Render ----------
-let ro = null;
+// One ResizeObserver for every chart host: a new width redraws that chart.
+const ro = new ResizeObserver(entries => {
+  for (const e of entries) {
+    const h = e.target, w = Math.floor(e.contentRect.width);
+    if (!h.isConnected) { ro.unobserve(h); continue; }
+    if (h._w !== w) { h._w = w; h._draw(); }
+  }
+});
+
 function render(D) {
   AXIS = D.axisSeconds || 600;
   renderAxis();
   renderLegend();
-  const rowsEl = document.getElementById("rows");
-  rowsEl.innerHTML = "";
-  const hosts = [];
-  for (const svc of D.services || []) rowsEl.appendChild(serviceRow(svc, hosts));
+  sync(document.getElementById("rows"), D.services || [], svc => svc.name, createRow, updateRow);
   renderSummary(D.summary || {});
-  document.getElementById("updated").textContent =
+  setText(document.getElementById("updated"),
     new Date((D.updatedAt || Date.now() / 1000) * 1000)
-      .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  if (ro) ro.disconnect();
-  ro = new ResizeObserver(entries => {
-    for (const e of entries) {
-      const h = e.target, w = Math.floor(e.contentRect.width);
-      if (h._w !== w) { h._w = w; h._draw(); }
-    }
-  });
-  hosts.forEach(h => ro.observe(h));
+      .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  refreshTip();
 }

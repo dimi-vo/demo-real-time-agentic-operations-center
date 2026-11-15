@@ -240,6 +240,15 @@ def test_phase4_payments_draws_two_answered_blocks_owned_by_the_incident():
     assert gt["detectedAt"] == pytest.approx(first["start"])
 
 
+def test_a_block_keeps_its_key_as_the_wall_moves_and_no_two_blocks_share_one():
+    st = OpsWallState()
+    _phase4_payments(st)
+    first, second = _svc(st, "payments")["blocks"]
+    assert first["key"] != second["key"]
+    later = _svc(st, "payments", NOW + 30)["blocks"]
+    assert [b["key"] for b in later] == [first["key"], second["key"]]
+    assert later[0]["start"] != first["start"]  # the positions moved, the keys didn't
+
 def test_a_block_before_its_answer_is_open_and_grows_with_now():
     st = OpsWallState()
     _incident(st, "checkout", T0)

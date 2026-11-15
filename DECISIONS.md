@@ -1356,6 +1356,9 @@ statement shows it). The `TIMESTAMP_LTZ` column needs the table dropped and appl
 **Amended by D-061.** Above each lane sits a line chart of the raw `service_metrics` value,
 one point per second, with a tick at each injected incident's start.
 
+**Amended by D-062.** The page no longer rebuilds its DOM on every snapshot: rows, bars and
+charts are kept and updated in place, keyed (block bars by the snapshot's new `key`).
+
 **Amended by D-064.** The 15 s to detect was the 10 s window plus 5 s of watermark: the
 deployments watermark only passed a window's end at the next 5-s heartbeat. With the
 shorter watermarks a window closes on the tick at its end, ~10 s after an incident starts.
@@ -1865,6 +1868,44 @@ from 660 s back; the Phase 4 health rows give no rate), `tests/test_opswall_feed
 feed trims on the wall clock until stopped, and again after a restart).
 
 Amends D-053, D-054 and D-058.
+
+**Amended by D-062.** The page no longer rebuilds its DOM on every snapshot: rows, bars and
+charts are kept and updated in place, keyed (block bars by the snapshot's new `key`).
+
+### D-062 · FIX · The ops wall updates its DOM in place instead of rebuilding it
+**What.** On every snapshot (4 Hz, `PUSH_INTERVAL_SEC`) the page emptied `#rows` and built
+every row again with empty chart hosts, which a ResizeObserver drew after the next layout.
+For that one layout every host was 0 px tall, the page about 800 px shorter, and the browser
+clamped the scroll position to it: the wall couldn't be scrolled, it flickered and jumped
+back to the top. The rebuild also threw away the bar holding the keyboard focus or under the
+pointer four times a second, so tabbing through bars and their tooltips didn't work.
+**Options.** (a) Keep the rebuild and give each host its height up front (fixes the scroll
+only); (b) update the DOM in place, keyed; (c) move the page to React or Preact, whose keyed
+reconciliation does (b), at the price of a build step or a vendored runtime (D-040: no CDN).
+**Choice.** (b), with (a)'s heights kept for a row's first draw. React was weighed and
+declined: the page is ~550 lines, and stable keys for the bars are needed either way.
+- **Keyed update.** `sync()` reuses a node by key, creates one for a new key and removes one
+  whose key is gone. Rows are keyed by service name, incident bars by `incidentId`, block
+  bars by a new snapshot field `key`, `"<trigger>@<first window_end in ms>"`: every other
+  block time is axis-relative and clamped, so the page couldn't tell a block apart from one
+  snapshot to the next.
+- **Charts.** Each chart's `<svg>` and its layers are made once. A redraw empties the layers
+  that only show things (grid, line, labels, time-to-detect marks) and updates the bars and
+  the line chart's hit area in place.
+- **Rail and summary.** Made once; a write is skipped when the text is unchanged.
+- **Tooltip.** It follows the bar node: each snapshot refreshes its text (an answer arrived)
+  or hides it when the bar has left the axis.
+**Measured.** Headless Chrome, a 1400×700 window, real `OpsWallState` snapshots at 4 Hz:
+before, scrolling stopped at 250 px (the shrunken page's maximum); after, it stayed at 400 px.
+A focused open block stays the same node and keeps the focus as it is answered; its tooltip
+turns from "Waiting for the agent" to "Answered…"; it hides when the block is gone; a line
+hover follows the data. The same snapshot renders pixel-identical to before.
+**Impact.** `static/opswall.js` (`sync`, `setText`/`setClass`/`setHTML`, `chartSvg`,
+`createRow`/`updateRow` replace `serviceRow`, one module-level ResizeObserver, `refreshTip`),
+`scripts/opswall/state.py` (the block's `key`). Tests: `tests/test_opswall_state.py` (a block
+keeps its key as the wall moves; two blocks never share one).
+
+Amends D-054 and D-061.
 
 ### D-064 · DECISION · Shorter source watermarks: a window closes on the tick at its end
 **What.** Every incident was detected 15 s after it started. Incidents start on a window
