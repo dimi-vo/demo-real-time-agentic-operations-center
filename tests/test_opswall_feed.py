@@ -6,6 +6,7 @@ No Kafka: the consumer starter is replaced by a fake that records what happens t
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -101,3 +102,47 @@ def test_stop_signals_the_running_threads():
     feed.start()
     feed.stop()
     assert stops[0].is_set()
+
+
+# --- trimming --------------------------------------------------------------------
+
+
+class _TrimCounter(OpsWallState):
+    def __init__(self) -> None:
+        super().__init__()
+        self.trims: list[float] = []
+
+    def trim(self, now: float) -> None:
+        self.trims.append(now)
+
+
+def _wait_for(cond, timeout=2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+
+def test_the_feed_trims_the_state_on_the_wall_clock_until_stopped():
+    state = _TrimCounter()
+    feed = Feed(state, lambda stop: [], trim_interval=0.01)
+    before = time.time()
+    feed.start()
+    _wait_for(lambda: len(state.trims) >= 3)
+    feed.stop()
+    assert len(state.trims) >= 3
+    assert all(before <= t <= time.time() for t in state.trims)
+    time.sleep(0.05)
+    stopped_at = len(state.trims)
+    time.sleep(0.05)  # five more intervals
+    assert len(state.trims) == stopped_at
+
+
+def test_a_restart_restarts_the_trimming():
+    state = _TrimCounter()
+    feed = Feed(state, lambda stop: [], trim_interval=0.01)
+    feed.start()
+    feed.restart()
+    seen = len(state.trims)
+    _wait_for(lambda: len(state.trims) > seen)
+    feed.stop()
+    assert len(state.trims) > seen

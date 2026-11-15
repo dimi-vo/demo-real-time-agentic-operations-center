@@ -54,6 +54,12 @@ def _incident(st, service, start, end=None, incident_type="BAD_DEPLOY", iid="INC
         st.apply_incident({**record, "event_time": _dt(end), "ended_at": _dt(end)})
 
 
+def _sample(st, service, event_time, traffic=50, latency=35.0, errors=0):
+    """One service_metrics record: one second of one service, stamped at its end (D-058)."""
+    st.apply_metric({"service_name": service, "event_time": _dt(event_time), "traffic_count": traffic,
+                     "latency_ms": latency, "error_count": errors})
+
+
 def _svc(st, name, now=NOW):
     return next(s for s in st.snapshot(now=now)["services"] if s["name"] == name)
 
@@ -93,18 +99,77 @@ def test_unknown_service_is_silently_ignored():
     st.apply_health({"service_name": "nope", "window_end": _dt(NOW)})
     st.apply_decision({"service_name": "nope"})
     st.apply_incident({"service_name": "nope", "incident_id": "X"})
+    _sample(st, "nope", NOW - 1)
     assert len(st.snapshot(now=NOW)["services"]) == 3
 
 
-def test_rate_comes_from_the_newest_health_row_and_errors_have_no_source():
-    # service_health has no error columns (D-058): Errors stays empty ("—") until the rail
-    # reads service_metrics (issue 07).
+# --- service_metrics samples (D-061) -------------------------------------------
+
+
+def test_the_samples_on_the_chart_reach_the_snapshot_oldest_first():
     st = OpsWallState()
-    _health(st, "payments", NOW - 20, traffic_count=500)
+    _sample(st, "checkout", NOW - 630.001)                 # kept, but left of the chart
+    _sample(st, "checkout", NOW - 2.001, traffic=31, latency=140.04, errors=1)
+    _sample(st, "checkout", NOW - 4.001, traffic=29)        # late: put in its place
+    _sample(st, "checkout", NOW - 3.001, traffic=1)
+    _sample(st, "checkout", NOW - 3.001, traffic=30)        # the same second again: newer wins
+    _sample(st, "checkout", NOW + 0.999)                    # covers the running second: waits
+    _sample(st, "payments", NOW - 1.001, traffic=7)
+    metrics = _svc(st, "checkout")["metrics"]
+    assert [m["t"] for m in metrics] == pytest.approx([_pos(NOW - 4.001), _pos(NOW - 3.001), _pos(NOW - 2.001)])
+    assert [m["traffic"] for m in metrics] == [29, 30, 31]
+    assert metrics[-1] == {"t": pytest.approx(_pos(NOW - 2.001)), "traffic": 31, "latency": 140.0, "errors": 1}
+    assert [m["traffic"] for m in _svc(st, "payments")["metrics"]] == [7]
+
+
+def test_a_sample_in_the_future_shows_once_its_second_is_over():
+    st = OpsWallState()
+    _sample(st, "checkout", NOW + 0.999)
+    assert _svc(st, "checkout")["metrics"] == []
+    assert len(_svc(st, "checkout", now=NOW + 1)["metrics"]) == 1
+
+
+def test_trim_drops_the_samples_older_than_the_axis_plus_the_margin():
+    st = OpsWallState()
+    _sample(st, "checkout", NOW - 670, traffic=1)
+    _sample(st, "checkout", NOW - 650, traffic=2)
+    st.trim(NOW)  # keeps the last 600 + 60 s
+    # A snapshot whose chart still reaches back 700 s would show the dropped one.
+    assert [m["traffic"] for m in _svc(st, "checkout", now=NOW - 100)["metrics"]] == [2]
+
+
+def test_rate_and_errors_come_from_the_samples_of_the_last_10_s():
+    st = OpsWallState()
+    _sample(st, "web-gateway", NOW - 20, traffic=1000, errors=1000)  # older than 10 s: left out
+    for k in range(10):
+        _sample(st, "web-gateway", NOW - 9.001 + k, traffic=40 + k, errors=k % 2)
+    s = _svc(st, "web-gateway")
+    assert s["rateRps"] == pytest.approx(44.5)                     # requests per second
+    assert s["errorRatePct"] == pytest.approx(100 * 5 / 445)       # % of the requests
+
+
+def test_rate_and_errors_follow_a_bad_deploy_and_a_drop():
+    st = OpsWallState()
+    for k in range(10):
+        _sample(st, "checkout", NOW - 9.001 + k, traffic=30, latency=560.0, errors=4)
+        _sample(st, "payments", NOW - 9.001 + k, traffic=k % 3)
+    assert _svc(st, "checkout")["errorRatePct"] == pytest.approx(100 * 4 / 30)
+    assert _svc(st, "payments")["rateRps"] == pytest.approx(0.9)
+
+
+def test_without_recent_samples_or_requests_rate_and_errors_are_empty():
+    st = OpsWallState()
+    assert (_svc(st, "checkout")["rateRps"], _svc(st, "checkout")["errorRatePct"]) == (None, None)
+    _sample(st, "checkout", NOW - 30)  # the simulator stopped 30 s ago
+    assert (_svc(st, "checkout")["rateRps"], _svc(st, "checkout")["errorRatePct"]) == (None, None)
+    _sample(st, "payments", NOW - 1, traffic=0)  # a second with no requests
+    assert (_svc(st, "payments")["rateRps"], _svc(st, "payments")["errorRatePct"]) == (0.0, None)
+
+
+def test_health_rows_alone_give_no_rate():
+    st = OpsWallState()
     _health(st, "payments", NOW - 10, traffic_count=800)
-    s = _svc(st, "payments")
-    assert s["rateRps"] == pytest.approx(80.0)
-    assert s["errorRatePct"] is None
+    assert _svc(st, "payments")["rateRps"] is None
 
 
 # --- incidents ----------------------------------------------------------------
@@ -431,10 +496,24 @@ def test_trim_drops_entries_older_than_the_axis():
     _health(st, "payments", old, trf="LOW")
     _decide(st, "payments", old, at=old + 10, action="INVESTIGATE_UPSTREAM", trigger="TRAFFIC_LOW")
     _health(st, "payments", NOW - 10)
+    _sample(st, "payments", old)
     st.trim(NOW)
     s = _svc(st, "payments")
     assert s["blocks"] == [] and s["groundTruth"] == []
-    assert s["rateRps"] is None or s["rateRps"] >= 0
+    assert _svc(st, "payments", now=old + 10)["metrics"] == []
+
+
+def test_trim_takes_an_incident_that_never_ended_off_the_wall_after_11_minutes():
+    # The simulator restarted mid-incident: no end record ever comes (D-060). Untrimmed, the
+    # incident stays open, pending and drawn across the whole lane for as long as the wall runs.
+    st = OpsWallState()
+    _incident(st, "checkout", NOW - 670, iid="ORPHAN")
+    _incident(st, "payments", NOW - 650, iid="RECENT", incident_type="UPSTREAM_DROP")
+    assert _svc(st, "checkout")["groundTruth"][0]["verdict"] == "pending"
+    st.trim(NOW)
+    assert _svc(st, "checkout")["groundTruth"] == []
+    assert [g["incidentId"] for g in _svc(st, "payments")["groundTruth"]] == ["RECENT"]
+    assert st.snapshot(now=NOW)["summary"]["pending"] == 1
 
 
 # --- clear (the "Refresh data" button, D-053) --------------------------------
@@ -446,6 +525,7 @@ def _fill(st):
     _incident(st, "checkout", NOW - 40, iid="INC-1")
     _health(st, "checkout", NOW - 20, lat="HIGH")
     _decide(st, "checkout", NOW - 20, at=NOW - 5)
+    _sample(st, "checkout", NOW - 1)
     st.record_error("service_health", "UNKNOWN_TOPIC", "gone")
 
 
@@ -453,7 +533,7 @@ def test_clear_reseeds_the_services_and_drops_history_blocks_and_errors():
     fresh = OpsWallState().snapshot(now=NOW)
     st = OpsWallState()
     _fill(st)
-    assert _svc(st, "checkout")["blocks"]  # something to clear
+    assert _svc(st, "checkout")["blocks"] and _svc(st, "checkout")["metrics"]  # something to clear
 
     st.clear()
 

@@ -1,9 +1,10 @@
 """Kafka → OpsWallState consumer threads, one per topic.
 
-The dashboard reads four topics with the keys on the attendee's credential card:
-``service_deployments`` (keyed upsert, from earliest), ``service_health`` and
-``remediation_decisions`` (from ~10 min ago by timestamp), ``service_incidents``
-(from ~10 min ago by timestamp).
+The dashboard reads five topics with the keys on the attendee's credential card:
+``service_deployments`` (keyed upsert, from earliest), ``service_health``,
+``remediation_decisions`` and ``service_incidents`` (from ~10 min ago by timestamp), and
+``service_metrics`` (from ~11 min ago by timestamp: the chart's 10 minutes plus the margin
+the state keeps, D-061).
 
 Each topic gets one thread with a dedicated consumer group id (so partitions
 aren't shared across threads and nothing is ever committed; we always tail).
@@ -28,7 +29,7 @@ from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroDeserializer
 from confluent_kafka.serialization import MessageField, SerializationContext
 
-from scripts.opswall.state import AXIS_SECONDS, OpsWallState
+from scripts.opswall.state import AXIS_SECONDS, RETAIN_MARGIN_SECONDS, OpsWallState
 
 logger = logging.getLogger("ops-wall.consumer")
 
@@ -36,8 +37,10 @@ DEPLOYMENTS_TOPIC = "service_deployments"
 HEALTH_TOPIC = "service_health"
 DECISIONS_TOPIC = "remediation_decisions"
 INCIDENTS_TOPIC = "service_incidents"
+METRICS_TOPIC = "service_metrics"
 
 STARTUP_BACKREAD_SECONDS = AXIS_SECONDS  # read ~10 minutes of history on connect
+METRICS_BACKREAD_SECONDS = AXIS_SECONDS + RETAIN_MARGIN_SECONDS  # ~11 minutes
 POLL_TIMEOUT_SEC = 0.5
 
 IGNORED_ERROR_CODES = frozenset({
@@ -210,7 +213,7 @@ def _tail(
 
 
 def start_threads(state: OpsWallState, card: dict[str, str], stop: threading.Event) -> list[threading.Thread]:
-    """Start four daemon consumer threads and return them. Every call attaches each consumer
+    """Start five daemon consumer threads and return them. Every call attaches each consumer
     afresh from its usual starting point, which is what "Refresh data" relies on (D-053)."""
     sr = _schema_registry(card)
 
@@ -226,6 +229,8 @@ def start_threads(state: OpsWallState, card: dict[str, str], stop: threading.Eve
          lambda c: _assign_from_timestamp(c, DECISIONS_TOPIC, STARTUP_BACKREAD_SECONDS), False, True),
         (INCIDENTS_TOPIC, state.apply_incident,
          lambda c: _assign_from_timestamp(c, INCIDENTS_TOPIC, STARTUP_BACKREAD_SECONDS), False, False),
+        (METRICS_TOPIC, state.apply_metric,
+         lambda c: _assign_from_timestamp(c, METRICS_TOPIC, METRICS_BACKREAD_SECONDS), False, False),
     ]
     threads = []
     for topic, apply, assign, uses_key, uses_ts in topics:

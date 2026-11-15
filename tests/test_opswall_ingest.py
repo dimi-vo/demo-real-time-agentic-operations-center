@@ -13,14 +13,17 @@ Cloud in the Phase 4 live run (the payments bad deploy, 2026-11-12 09:45-09:47),
 the columns dropped since (D-043, D-044, D-058), with the two count columns renamed
 traffic_count and expected_traffic_count (D-058). The dump stored the decoder's datetimes
 as ISO text; `_as_decoded` turns them back. The real rows predate `detected_at` (D-054), so
-`_fixture` adds a synthetic one to each health row. The other two topics go through the real
-AvroSerializer/AvroDeserializer pair against the repo's schemas in an in-memory Schema
-Registry, keys included.
+`_fixture` adds a synthetic one to each health row. The other three topics go through the
+real AvroSerializer/AvroDeserializer pair against the repo's schemas in an in-memory Schema
+Registry, keys included. The last section checks which topics the consumer tails, and from
+when, without a broker.
 """
 
 from __future__ import annotations
 
 import json
+import statistics
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,9 +32,11 @@ from confluent_kafka.schema_registry import Schema, SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroSerializer
 from confluent_kafka.serialization import MessageField, SerializationContext
 
+from scripts.opswall import consumer
 from scripts.opswall.consumer import (
     DEPLOYMENTS_TOPIC,
     INCIDENTS_TOPIC,
+    METRICS_TOPIC,
     decode_record,
     make_deserializer,
 )
@@ -113,9 +118,8 @@ def _live_payments_wall() -> OpsWallState:
 
 def test_real_health_rows_reach_the_wall():
     payments = _service(_live_payments_wall(), "payments", NOW)
-    last = HEALTH[-1]
-    assert payments["rateRps"] == last["traffic_count"] / 10.0
     assert payments["blocks"], "the HIGH latency windows must draw a block"
+    assert payments["rateRps"] is None, "the rate comes from service_metrics, not service_health (D-061)"
 
 
 def test_the_first_rollback_closes_the_real_detection():
@@ -131,7 +135,7 @@ def test_the_first_rollback_closes_the_real_detection():
     assert first["decisions"]["ROLLBACK"] + second["decisions"]["ROLLBACK"] == len(DECISIONS) == 5
 
 
-# --- service_deployments and service_incidents through the real Avro path ----------
+# --- service_deployments, service_incidents and service_metrics through the real Avro path
 
 
 @pytest.fixture
@@ -143,6 +147,7 @@ def registry() -> SchemaRegistryClient:
         ("service_deployments-key", "service_deployments_key.avsc"),
         ("service_deployments-value", "service_deployments.avsc"),
         ("service_incidents-value", "service_incidents.avsc"),
+        ("service_metrics-value", "service_metrics.avsc"),
     ):
         sr.register_schema(subject, Schema((ROOT / "schemas" / avsc).read_text(), "AVRO"))
     return sr
@@ -195,6 +200,58 @@ def test_a_live_incident_record_draws_its_ground_truth(registry):
     assert truth["start"] == pytest.approx(1_800_000_000.0 - axis_left)
     assert truth["end"] == pytest.approx(1_800_000_040.0 - axis_left)
     assert truth["open"] is False
+
+
+def test_live_metrics_records_reach_the_charts_and_the_rail(registry):
+    from opsgen.simulation import Simulation
+
+    start = 1_800_000_000.0
+    sim = Simulation(1, start=start)
+    deser = make_deserializer(registry)
+    st = OpsWallState()
+    sent = []
+    for k in range(10):
+        for rec in sim._gen_metrics(start + k):  # what ops-sim produces, one per service
+            value = _produce(registry, METRICS_TOPIC, MessageField.VALUE, rec)
+            st.apply_metric(decode_record(value, None, METRICS_TOPIC, deser))
+            sent.append(rec)
+
+    now = start + 10
+    checkout = _service(st, "checkout", now)
+    mine = [r for r in sent if r["service_name"] == "checkout"]
+    left = now - st.axis_seconds
+    assert [m["t"] for m in checkout["metrics"]] == pytest.approx([start + k + 0.999 - left for k in range(10)])
+    assert [m["traffic"] for m in checkout["metrics"]] == [r["traffic_count"] for r in mine]
+    assert [m["latency"] for m in checkout["metrics"]] == [round(r["latency_ms"], 1) for r in mine]
+    assert checkout["rateRps"] == pytest.approx(statistics.mean(r["traffic_count"] for r in mine))
+    errors, requests = sum(r["error_count"] for r in mine), sum(r["traffic_count"] for r in mine)
+    assert checkout["errorRatePct"] == pytest.approx(100 * errors / requests)
+
+
+# --- the topics the consumer tails ---------------------------------------------------
+
+
+def test_the_consumer_tails_service_metrics_from_about_11_minutes_back(monkeypatch):
+    """start_threads is what both a new wall and "Refresh data" call (D-053), so this is
+    also what a refresh re-attaches."""
+    tails, seeks = [], []
+    monkeypatch.setattr(consumer, "_schema_registry", lambda card: object())
+    monkeypatch.setattr(consumer, "make_deserializer", lambda sr: object())
+    monkeypatch.setattr(consumer, "_tail", lambda **kw: tails.append(kw))
+    monkeypatch.setattr(consumer, "_assign_from_timestamp",
+                        lambda c, topic, since: seeks.append((topic, since)) or True)
+    st = OpsWallState()
+    for t in consumer.start_threads(st, card={}, stop=threading.Event()):
+        t.join()
+
+    by_topic = {kw["topic"]: kw for kw in tails}
+    assert set(by_topic) == {"service_deployments", "service_health", "remediation_decisions",
+                             "service_incidents", "service_metrics"}
+    metrics = by_topic[METRICS_TOPIC]
+    assert metrics["apply"] == st.apply_metric
+    assert metrics["key_deserializer"] is None and metrics["use_kafka_ts"] is False
+    assert metrics["assign"](object()) is True
+    assert seeks == [(METRICS_TOPIC, 660.0)]  # the 10-minute chart plus the 60 s margin
 
 
 # --- detected_at, the one instant in service_health (D-054) ------------------------

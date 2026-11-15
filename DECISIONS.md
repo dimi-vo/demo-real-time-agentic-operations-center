@@ -1353,6 +1353,9 @@ estimates; the first live run read 15 s to detect once the zone offset is taken 
 that `CURRENT_TIMESTAMP` is evaluated in the final projection (`EXPLAIN` on the live
 statement shows it). The `TIMESTAMP_LTZ` column needs the table dropped and applied again.
 
+**Amended by D-061.** Above each lane sits a line chart of the raw `service_metrics` value,
+one point per second, with a tick at each injected incident's start.
+
 ### D-055 · DECISION · The ops-wall mock is removed
 **What.** `uv run ops-wall --mock` drove the wall from a scripted scene loop with no Kafka
 (D-047). It had drifted from the live wall: it writes no `detected_at`, so since D-054 it
@@ -1547,6 +1550,9 @@ Amends D-022, D-024, D-026, D-028, D-030, D-031, D-044 and D-045.
 
 **Amended by D-059.** The means are 50/30/30 and the spike sizes surge ×5 traffic (no
 latency effect), drop ×0.1 and bad deploy ×4 latency.
+
+**Amended by D-061.** The wall's Rate and Errors come from the last 10 s of
+`service_metrics` samples, not from `service_health`.
 
 ### D-059 · DECISION · Tuned data and reference detector: 20 s spikes, 50/30/30, confidence 99.95
 **What.** Workshop preparation: the data settings and **our** reference detector settings
@@ -1772,3 +1778,83 @@ was 140 s; at 150 s the numbers above are unchanged, so D-059's results carry ov
   (rests, gap, weights, first three); the banner; `ops-sim --help` has no timing flags.
 
 Amends D-042.
+
+### D-061 · DECISION · The wall charts raw `service_metrics` latency and traffic
+**What.** The wall drew each metric as a lane: the injected incidents up, the detections
+down. A viewer saw *that* an anomaly happened, never the data that made it one. The rail's
+Rate was the newest `service_health` window's `traffic_count / 10`, and Errors had no source
+since D-058 dropped the error columns.
+**Options.** What to chart: (a) the `service_health` windows (the detector's 10-s input,
+with its band and forecast), which need the attendee's labs and change with their detector
+settings; (b) the raw `service_metrics` records, one point per second. The y scale:
+(i) linear from 0, as issue 07 was written; (ii) logarithmic.
+**Choice.** (b) with (ii). The scale was the user's call when reviewing the mockup
+(`.scratch/mockups/wall-charts.html`, which keeps a Linear / Log toggle for comparison;
+`.scratch/simplify-demo/issues/07-wall-charts.md`).
+- **Consumer.** `service_metrics` is a fifth topic, read from 660 s back (the 10-minute axis
+  plus the state's 60 s margin) with the existing seek by timestamp. `start_threads`
+  attaches it with the others, so "Refresh data" (D-053) re-attaches it.
+- **State.** `apply_metric` keeps each service's samples (`event_time`, `traffic_count`,
+  `latency_ms`, `error_count`) in `event_time` order: a late one goes in its place, the same
+  second twice keeps the newer. `trim()` drops them with the rest.
+- **Trimming.** `OpsWallState.trim()` existed but nothing called it, so the state only grew,
+  and an incident whose end record never came (a simulator restart, D-060) stayed on the
+  wall for as long as it ran: a pending bar across the whole lane. The `Feed` now runs one
+  more thread next to the consumers that calls `trim(time.time())` every 10 s; it stops and
+  restarts with them ("Refresh data", D-053). The state keeps 11 minutes (the axis plus
+  60 s) whatever the length of the workshop, and such an incident leaves the wall after
+  11 minutes, as D-060 assumed.
+- **Snapshot.** The `metrics` per service: the samples with `event_time` on the axis
+  and not after `now`, as `{t, traffic, latency, errors}`, with `t` axis-relative and latency
+  rounded to 0.1 ms. A sample stamped in the second still running (tick + 999 ms, D-058)
+  waits for the next snapshot.
+- **Rail.** Rate is the mean `traffic_count` of the samples of the last 10 s (one sample is
+  one second, so requests per second); Errors is their `error_count` over their
+  `traffic_count`, in %. No sample in the last 10 s → "—" for both; no requests → "—" for
+  Errors. `HealthRow` loses `traffic_count`.
+- **Page.** Above each Latency and Traffic lane, a 56 px hand-drawn SVG chart on the lane's
+  `X()` axis: one point per sample, a plain line, no smoothing, broken over a gap of more
+  than 1.5 s instead of bridging it. The y scale is log, from a round number just below the
+  smallest visible value above 0 to one just above the largest (multiples of a fifth of the
+  power of ten), at least ×10 apart; a second with 0 requests sits on the bottom edge. A band
+  above the plot names the range (`28–280 rps · log`), so the label never covers data. A
+  thin purple tick marks each injected incident's start, only on its metric's chart
+  (`INCIDENT_METRIC`). No band, no forecast. Hover snaps a crosshair to the nearest second;
+  the tooltip gives the value, how long ago, and the incident the second falls in. The
+  hover is kept across the 4 Hz rebuilds of the DOM. The line is a new neutral token,
+  `--metric` `#7F8CA8`: OKLab ΔE 15.5 from `--truth` (`#A3AEC6` was 11.1, under the 15
+  floor). The legend gains "Value per second" and "Incident starts"; the subtitle and the
+  footer mention the raw lines. Only latency and traffic get charts.
+**Why.** Raw records show before any lab is done and the same whatever the attendee's
+detector settings, which matters once attendees tune their own detectors. The incidents are
+ratios (surge ×5, drop ×0.1, bad deploy ×4); on a log scale a ratio has the same height
+wherever the service's normal level sits, so a drop on a 30 rps service reads as clearly as
+a surge on a 50 rps one, and Poisson noise shrinks to a thin band. The ×10 minimum keeps a
+chart with no incident on it from blowing plain noise up. Rate and Errors read the stream
+the charts draw: only `service_metrics` has `error_count` (D-058), and the figures now move
+with the line next to them.
+**Measured.** Offline: the real `Simulation` (seed 7) fed into `OpsWallState` with
+Avro-shaped timestamps, served by the real app, rendered in headless Chrome. At every
+incident marker the first sample after it is changed and the last before it is not;
+medians in the 20 s before against during: surges ×5.27–5.30, drops ×0.06–0.13, bad
+deploys ×3.92–4.14. The snapshot carries about 1,800 samples (~95 KB, four times a second,
+local). Through Kafka and a running `ops-sim`: issue 08.
+**Impact.** `scripts/opswall/consumer.py` (`METRICS_TOPIC`, `METRICS_BACKREAD_SECONDS`, five
+topics), `scripts/opswall/feed.py` (the trim thread, `TRIM_INTERVAL_SECONDS`),
+`scripts/opswall/state.py` (`MetricSample`, `apply_metric`, `RATE_WINDOW_SECONDS`,
+`HEALTH_RETAIN_MARGIN` renamed `RETAIN_MARGIN_SECONDS`, the snapshot's `metrics`, Rate and
+Errors), `scripts/opswall/app.py` (docstring), `static/opswall.js` (line chart, log scale,
+hover, legend), `static/opswall.css` (`--metric`, the chart's styles, the metric gap; the
+dimmed label of a quiet metric is gone, since its line always has data),
+`static/index.html` (subtitle, footer). `platform-team/README.md`: the wall reads five
+topics. Each service row grows from about 200 px to about 310 px. Tests:
+`tests/test_opswall_state.py` (samples on the axis, oldest first, late and repeated ones;
+a future sample waits; `trim()` drops old samples and an incident that never ended; Rate
+and Errors over 10 s, through a
+bad deploy and a drop, and empty without samples or requests; health rows alone give no
+rate; `clear()` drops samples), `tests/test_opswall_ingest.py` (real `ops-sim` records
+through the Avro pair reach the charts and the rail; the consumer tails `service_metrics`
+from 660 s back; the Phase 4 health rows give no rate), `tests/test_opswall_feed.py` (the
+feed trims on the wall clock until stopped, and again after a restart).
+
+Amends D-053, D-054 and D-058.

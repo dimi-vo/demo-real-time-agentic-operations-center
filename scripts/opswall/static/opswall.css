@@ -40,6 +40,7 @@
 
   --truth: #B69CFF;
   --detect: #4FC3F7;
+  --metric: #7F8CA8;  /* the raw service_metrics line: neutral, and apart from --truth (D-061) */
 
   --crit: #FF6B6B;
   --warn: #FFC857;
@@ -179,11 +180,11 @@ body::before {
 .stats dd.hot { color: var(--warn); }
 
 /* Metrics */
-.metrics { display: grid; gap: 6px; min-width: 0; align-content: start; }
+.metrics { display: grid; gap: 14px; min-width: 0; align-content: start; }
 .metric { display: grid; grid-template-columns: var(--gutter) 1fr; column-gap: var(--gap); align-items: center; }
 .m-label { color: var(--text-2); font-size: 12.5px; text-align: right; }
-.metric.quiet .m-label { color: var(--text-3); }
 .chart-host { min-width: 0; }
+.chart-host .line-host { margin-bottom: 6px; }
 
 .chart { display: block; overflow: visible; }
 .chart .grid    { stroke: var(--line-soft); stroke-width: 1; }
@@ -201,6 +202,15 @@ body::before {
 .chart .quiet-label { fill: var(--text-3); font-size: 12px; }
 .chart [data-tip] { cursor: default; outline: none; }
 .chart [data-tip]:focus-visible { stroke: var(--text); stroke-width: 2; }
+
+/* The line chart above each lane (D-061) */
+.line .ceiling   { stroke: var(--line-soft); stroke-width: 1; }
+.line .scale     { fill: var(--text-3); font-size: 11px; }
+.line .series    { fill: none; stroke: var(--metric); stroke-width: 1.25; stroke-linejoin: round; stroke-linecap: round; }
+.line .onset     { stroke: var(--truth); stroke-width: 1.5; }
+.line .cross     { stroke: var(--text-2); stroke-width: 1; }
+.line .cross-dot { fill: var(--text); stroke: var(--ink-0); stroke-width: 2; }
+.line .hit       { fill: transparent; cursor: crosshair; }
 
 /* Tooltip */
 .tip {

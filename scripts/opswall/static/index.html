@@ -10,7 +10,7 @@
   <header class="top">
     <div>
       <h1>Ops wall</h1>
-      <p class="sub">What the simulator injected, against what <code>service_health</code> detected and what the agent did about it. Last 10 minutes.</p>
+      <p class="sub">The raw <code>service_metrics</code>, what the simulator injected, what <code>service_health</code> detected and what the agent did about it. Last 10 minutes.</p>
     </div>
     <div class="tools">
       <div class="clock">Updated <time id="updated">—</time><span id="conn" class="conn">connecting…</span></div>
@@ -31,7 +31,9 @@
   </main>
 
   <footer id="footer">
-    Hover or tab to any bar or marker for its times. When the live pipeline is quiet this reads as empty charts — that's fine, nothing is wrong.
+    Hover a line for that second's value; hover or tab to any bar for its times. The lines are the
+    simulator's raw output, so they show before any lab is done and whatever the detector settings.
+    When the pipeline is quiet the lanes stay empty — that's fine, nothing is wrong.
   </footer>
 
   <div class="tip" id="tip" role="tooltip"></div>

@@ -6,8 +6,9 @@ One ``OpsWallState`` is shared between the Kafka consumer threads, which call
 by one lock; the write methods are tiny so contention is negligible.
 
 The appliers keep the raw facts: one health row per window, one decision per window
-and agent, one incident per id. ``snapshot(now)`` derives everything the page shows
-from them, so the page only draws and the counting is tested here (D-054). Deriving
+and agent, one incident per id, one ``service_metrics`` sample per second.
+``snapshot(now)`` derives everything the page shows from them, so the page only draws
+and the counting is tested here (D-054). Deriving
 at snapshot time also lets a late row or decision reshape what is drawn (the consumer
 reads ``read_committed``, and transactional commits can land out of order).
 
@@ -25,6 +26,11 @@ reads ``read_committed``, and transactional commits can land out of order).
   time to answer are measured on its first block.
 - The tile: a block open → ``anomaly``; a fix within the last 120 s → ``remediated``;
   otherwise ``healthy``.
+- The **samples** are the raw ``service_metrics`` records, one per service per second
+  (D-058), kept for the axis plus a margin (``trim()``). The snapshot
+  carries the ones on the chart; the page draws them as the latency and traffic lines
+  (D-061). The rail's Rate (requests/s) and Errors (% of requests) come from the last 10 s
+  of them.
 
 State stores absolute epoch seconds everywhere. The snapshot turns positions into the
 axis-relative seconds the page draws with: ``t - (now - axis_seconds)``, clipped to
@@ -33,6 +39,7 @@ axis-relative seconds the page draws with: ``t - (now - axis_seconds)``, clipped
 
 from __future__ import annotations
 
+import bisect
 import statistics
 import threading
 import time
@@ -49,7 +56,10 @@ OWNERSHIP_GRACE_SECONDS = 30.0  # a run starting this long after its incident en
 MISSED_AFTER_SECONDS = 30.0     # an incident nobody answered is missed this long after it ended
 FIX_RECENT_SECONDS = 120.0      # the tile shows a fix this long
 FIX_ACTIONS = ("ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM")
-HEALTH_RETAIN_MARGIN = 60.0  # keep 60 s past the axis so a run straddling it stays whole
+# Keep this long past the axis: a run straddling the left edge stays whole, and a sample
+# stays until well after it scrolled off.
+RETAIN_MARGIN_SECONDS = 60.0
+RATE_WINDOW_SECONDS = 10.0  # the rail's Rate and Errors: the samples of the last 10 s
 
 
 @dataclass(frozen=True)
@@ -75,8 +85,16 @@ class HealthRow:
     window_end: float  # epoch seconds
     latency_status: str
     traffic_status: str
-    traffic_count: int | None = None
     detected_at: float | None = None  # when the detector produced the verdict; None on older rows
+
+
+@dataclass
+class MetricSample:
+    """One ``service_metrics`` record: one second of one service (D-058)."""
+    event_time: float  # epoch seconds; the end of the second it covers
+    traffic_count: int
+    latency_ms: float
+    error_count: int
 
 
 @dataclass
@@ -113,6 +131,7 @@ class ServiceState:
     health: list[HealthRow] = field(default_factory=list)
     incidents: list[IncidentEvent] = field(default_factory=list)
     decisions: list[DecisionMark] = field(default_factory=list)
+    samples: list[MetricSample] = field(default_factory=list)  # by event_time
 
 
 @dataclass
@@ -172,7 +191,6 @@ class OpsWallState:
             window_end=w,
             latency_status=record.get("latency_status") or "NORMAL",
             traffic_status=record.get("traffic_status") or "NORMAL",
-            traffic_count=record.get("traffic_count"),
             detected_at=_to_seconds(record.get("detected_at")),
         )
         with self._lock:
@@ -233,6 +251,28 @@ class OpsWallState:
                     return
             s.incidents.append(ev)
 
+    def apply_metric(self, record: dict) -> None:
+        """One ``service_metrics`` sample. Samples stay in ``event_time`` order (a late one is
+        put in its place; the same second twice keeps the newer)."""
+        name = record.get("service_name")
+        if not name or name not in self._services:
+            return
+        t = _to_seconds(record.get("event_time"))
+        traffic, latency = record.get("traffic_count"), record.get("latency_ms")
+        if t is None or traffic is None or latency is None:
+            return
+        sample = MetricSample(t, traffic, latency, record.get("error_count") or 0)
+        with self._lock:
+            samples = self._services[name].samples
+            if not samples or t > samples[-1].event_time:
+                samples.append(sample)
+            else:
+                i = bisect.bisect_left(samples, t, key=lambda m: m.event_time)
+                if i < len(samples) and samples[i].event_time == t:
+                    samples[i] = sample
+                else:
+                    samples.insert(i, sample)
+
     def record_error(self, topic: str, code: str, detail: str) -> None:
         with self._lock:
             self._connection_errors[topic] = {"code": code, "detail": detail, "ts": time.time()}
@@ -253,11 +293,14 @@ class OpsWallState:
     # ---- housekeeping ---------------------------------------------------------
 
     def trim(self, now: float) -> None:
-        """Drop entries whose anchor time is older than ``now - axis_seconds - margin``."""
-        cutoff = now - self.axis_seconds - HEALTH_RETAIN_MARGIN
+        """Drop entries whose anchor time is older than ``now - axis_seconds - margin``: an
+        incident by its end, or by its start while it is open (an incident whose end record
+        never came leaves the wall here). The feed calls this every 10 s."""
+        cutoff = now - self.axis_seconds - RETAIN_MARGIN_SECONDS
         with self._lock:
             for s in self._services.values():
                 s.health = [h for h in s.health if h.window_end >= cutoff]
+                s.samples = [m for m in s.samples if m.event_time >= cutoff]
                 s.decisions = [d for d in s.decisions if d.at >= cutoff]
                 s.incidents = [i for i in s.incidents
                                if (i.ended_at or i.started_at) >= cutoff]
@@ -295,8 +338,7 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
         b.incident = _owner(b, incidents, now)
 
     status, status_text = _status(blocks, now)
-    latest = health[-1] if health else None
-    rate = latest.traffic_count / WINDOW_SECONDS if latest and latest.traffic_count is not None else None
+    rate, error_pct = _rate_and_errors(s.samples, now)
     return {
         "name": s.name,
         "tier": s.tier,
@@ -306,15 +348,37 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
         "lastChange": s.last_change,
         "secondsSinceDeploy": (now - s.deployed_at) if s.deployed_at else None,
         "rateRps": rate,
-        # service_health has no error columns (D-058); the page shows "—" until the rail
-        # reads error_count from service_metrics (issue 07).
-        "errorRatePct": None,
+        "errorRatePct": error_pct,
         "status": status,
         "statusText": status_text,
         "groundTruth": [_incident_json(i, [b for b in blocks if b.incident is i], now, rel)
                         for i in incidents],
         "blocks": [_block_json(b, now, rel) for b in blocks],
+        "metrics": _samples_json(s.samples, left, now),
     }
+
+
+def _samples_json(samples: list[MetricSample], left: float, now: float) -> list[dict]:
+    """The samples on the chart, oldest first: ``t`` is the axis position of ``event_time``.
+    A sample stamped after ``now`` (it covers the second still running) waits for the next
+    snapshot. Latency is rounded to 0.1 ms, which is all the page shows."""
+    start = bisect.bisect_left(samples, left, key=lambda m: m.event_time)
+    return [{"t": round(m.event_time - left, 3), "traffic": m.traffic_count,
+             "latency": round(m.latency_ms, 1), "errors": m.error_count}
+            for m in samples[start:] if m.event_time <= now]
+
+
+def _rate_and_errors(samples: list[MetricSample], now: float) -> tuple[float | None, float | None]:
+    """Requests per second and the share of failed requests (%), over the samples of the
+    last ``RATE_WINDOW_SECONDS``. A sample is one second, so the rate is the mean
+    ``traffic_count``. No samples → no rate; no requests → no error share."""
+    start = bisect.bisect_right(samples, now - RATE_WINDOW_SECONDS, key=lambda m: m.event_time)
+    recent = samples[start:]
+    if not recent:
+        return None, None
+    requests = sum(m.traffic_count for m in recent)
+    errors = sum(m.error_count for m in recent)
+    return requests / len(recent), (100.0 * errors / requests if requests else None)
 
 
 def _blocks(health: list[HealthRow], decisions: list[DecisionMark], now: float) -> list[_Block]:

@@ -2,7 +2,11 @@
 
 /*  Ops wall — variant-E render code, driven by the live /ws snapshot (D-054).
  *
- *  The wall's state does all the counting; this page only draws what the snapshot says:
+ *  The wall's state does all the counting; this page only draws what the snapshot says.
+ *  Each service has a Latency and a Traffic metric; each metric is a line chart above a lane.
+ *  The line chart (D-061): the raw service_metrics value, one point per second, on a log y
+ *  scale fitted to what's visible, with a purple tick at each injected incident's start.
+ *  The lane:
  *  - upper half: each injected incident, with its verdict (answered, pending, missed)
  *  - lower half: one block per anomaly run, from the moment the detector flagged it to the
  *    moment the agent's first decision was written (open on the right while it waits); the
@@ -129,6 +133,8 @@ function metricModel(svc, kind) {
     truth: (svc.groundTruth || []).filter(g => g.metric === kind),
     blocks: (svc.blocks || []).filter(b => b.metric === kind).sort((a, b) => a.start - b.start),
     incidentOf: b => (b.incidentId == null ? null : byId.get(b.incidentId) || null),
+    key: `${svc.name}/${kind}`,
+    records: svc.metrics || [],  // service_metrics samples on the axis, oldest first
   };
 }
 const isQuiet = m => !m.truth.length && !m.blocks.length;
@@ -192,7 +198,118 @@ function blockTip(m, b) {
     (b.reason && !b.open ? `<span class="reason">${esc(clip(String(b.reason), 180))}</span>` : "");
 }
 
-// ---------- Chart ----------
+// ---------- Line chart ----------
+// One point per service_metrics record, a plain line on the lane's X() axis (D-061). The y
+// scale is logarithmic: the incidents are ratios (x5, x0.1, x4), and on a log scale a ratio
+// has the same height wherever the service's normal level sits. It runs from a round number
+// just below the smallest visible value above 0 to one just above the largest, at least x10
+// apart so a quiet chart doesn't blow plain noise up. A second with 0 requests sits on the
+// bottom edge. The range is printed in a band above the plot, so it never covers the data.
+const LINE_H = 56, PLOT_TOP = 15;  // a 15 px label band over a 41 px plot
+const UNIT = { latency: "ms", traffic: "rps" };
+const num = v => `${+v.toPrecision(3)}`;
+const valueText = (kind, v) => kind === "latency" ? `${v >= 100 ? Math.round(v) : v.toFixed(1)} ms` : `${v} rps`;
+
+// The nearest multiple of a fifth of the value's power of ten at or above / at or below it:
+// 152 → 160, 37 → 38, 248 → 260; 33 → 32, 170 → 160.
+function ceilNice(v) {
+  if (!(v > 0)) return 1;
+  const step = Math.pow(10, Math.floor(Math.log10(v))) / 5;
+  return Math.ceil(v / step - 1e-9) * step;
+}
+function floorNice(v) {
+  const step = Math.pow(10, Math.floor(Math.log10(v))) / 5;
+  return Math.floor(v / step + 1e-9) * step;
+}
+
+// y as a fraction of the plot height (0 = bottom, 1 = top), and the band's label.
+function logScale(kind, values) {
+  const positive = values.filter(v => v > 0);
+  const hi = ceilNice(positive.length ? Math.max(...positive) : 1);
+  let lo = floorNice(positive.length ? Math.min(...positive) : hi / 10);
+  if (hi / lo < 10) lo = floorNice(hi / 10);
+  const span = Math.log(hi / lo);
+  return {
+    frac: v => Math.max(0, Math.log(Math.max(v, lo) / lo) / span),
+    label: `${num(lo)}–${num(hi)} ${UNIT[kind]} · log`,
+  };
+}
+
+// The pointer over a line chart, kept across snapshots: the DOM is rebuilt on every one, so
+// each redraw puts the crosshair and the tooltip back where the pointer is.
+let lineHover = null;  // { key, x, y }
+function hideLineTip() {
+  if (tip.dataset.owner === "line") tip.classList.remove("on");
+  document.querySelectorAll(".line .crosshair").forEach(g => g.setAttribute("visibility", "hidden"));
+}
+document.addEventListener("pointermove", e => {
+  const hit = e.target.closest?.(".line .hit");
+  if (hit && hit._show) { lineHover = { key: hit._key, x: e.clientX, y: e.clientY }; hit._show(e.clientX, e.clientY); }
+  else if (lineHover) { lineHover = null; hideLineTip(); }
+});
+document.documentElement.addEventListener("pointerleave", () => { lineHover = null; hideLineTip(); });
+
+function drawLine(host, m) {
+  const w = Math.max(160, Math.floor(host.clientWidth));
+  const H = LINE_H, plotH = H - PLOT_TOP - 1;
+  const X = t => (Math.max(0, Math.min(t, AXIS)) / AXIS) * w;
+  const recs = m.records.filter(r => r.t >= 0 && r.t <= AXIS);
+  const scale = logScale(m.kind, recs.map(r => r[m.kind]));
+  const Y = v => PLOT_TOP + plotH * (1 - scale.frac(v));
+
+  host.innerHTML = "";
+  const svg = s("svg", { class: "chart line", width: w, height: H, viewBox: `0 0 ${w} ${H}` }, host);
+  for (let i = 1; i < 10; i++) {
+    const x = Math.round(X(i * AXIS / 10)) + 0.5;
+    s("line", { class: "grid", x1: x, x2: x, y1: PLOT_TOP, y2: H }, svg);
+  }
+  s("line", { class: "ceiling", x1: 0, x2: w, y1: PLOT_TOP + 0.5, y2: PLOT_TOP + 0.5 }, svg);
+  s("line", { class: "zero", x1: 0, x2: w, y1: H - 0.5, y2: H - 0.5 }, svg);
+  s("line", { class: "now", x1: w - 0.5, x2: w - 0.5, y1: PLOT_TOP, y2: H }, svg);
+  s("text", { class: "scale", x: 0, y: PLOT_TOP - 5 }, svg).textContent = recs.length ? scale.label : "No records yet";
+
+  // The start of each injected incident on this metric (INCIDENT_METRIC in the state).
+  for (const t of m.truth) {
+    const x = Math.round(X(t.start)) + 0.5;
+    s("line", { class: "onset", x1: x, x2: x, y1: PLOT_TOP, y2: H }, svg);
+  }
+
+  // A missing second (the simulator stopped, a refresh) breaks the line instead of
+  // bridging it.
+  let d = "", prev = null;
+  for (const r of recs) {
+    d += `${prev == null || r.t - prev > 1.5 ? "M" : "L"} ${X(r.t).toFixed(1)} ${Y(r[m.kind]).toFixed(1)} `;
+    prev = r.t;
+  }
+  if (d) s("path", { class: "series", d }, svg);
+
+  // Hover: a hit area over the whole chart; the crosshair snaps to the nearest second.
+  const cross = s("g", { class: "crosshair", visibility: "hidden" }, svg);
+  const cl = s("line", { class: "cross", y1: PLOT_TOP, y2: H }, cross);
+  const cd = s("circle", { class: "cross-dot", r: 3.5 }, cross);
+  const hit = s("rect", { class: "hit", x: 0, y: 0, width: w, height: H }, svg);
+  hit._key = m.key;
+  hit._show = (clientX, clientY) => {
+    if (!recs.length) return;
+    const t = ((clientX - svg.getBoundingClientRect().left) / w) * AXIS;
+    let i = 0, j = recs.length - 1;
+    while (i < j) { const mid = (i + j) >> 1; if (recs[mid].t < t) i = mid + 1; else j = mid; }
+    const r = i > 0 && t - recs[i - 1].t < recs[i].t - t ? recs[i - 1] : recs[i];
+    const x = X(r.t);
+    cl.setAttribute("x1", x); cl.setAttribute("x2", x);
+    cd.setAttribute("cx", x); cd.setAttribute("cy", Y(r[m.kind]));
+    cross.setAttribute("visibility", "visible");
+    const during = m.truth.find(g => r.t >= g.start && r.t <= g.end);
+    tip.innerHTML = `<strong>${valueText(m.kind, r[m.kind])}</strong>${ago(r.t)}` +
+      (during ? `<em>During the ${esc(human(during.type).toLowerCase())}.</em>` : "");
+    tip.dataset.owner = "line";
+    tip.classList.add("on");
+    placeTip(clientX, clientY);
+  };
+  if (lineHover && lineHover.key === m.key) hit._show(lineHover.x, lineHover.y);
+}
+
+// ---------- Lane ----------
 function drawChart(host, m) {
   const w = Math.max(160, Math.floor(host.clientWidth));
   const quiet = isQuiet(m);
@@ -297,11 +414,13 @@ function serviceRow(svc, hosts) {
   const metrics = row.querySelector(".metrics");
   for (const m of models) {
     const wrap = document.createElement("div");
-    wrap.className = "metric" + (isQuiet(m) ? " quiet" : "");
-    wrap.innerHTML = `<div class="m-label">${m.kind === "latency" ? "Latency" : "Traffic"}</div><div class="chart-host"></div>`;
-    const host = wrap.querySelector(".chart-host");
-    host._model = m;
-    hosts.push(host);
+    wrap.className = "metric";
+    wrap.innerHTML = `<div class="m-label">${m.kind === "latency" ? "Latency" : "Traffic"}</div>
+      <div class="chart-host"><div class="line-host"></div><div class="lane-host"></div></div>`;
+    const line = wrap.querySelector(".line-host"), lane = wrap.querySelector(".lane-host");
+    line._draw = () => drawLine(line, m);
+    lane._draw = () => drawChart(lane, m);
+    hosts.push(line, lane);
     metrics.appendChild(wrap);
   }
   return row;
@@ -351,6 +470,8 @@ function renderLegend() {
   if (lg.dataset.rendered === "1") return;
   const swatch = (style) => `<svg width="18" height="10"><rect width="18" height="10" rx="2" style="${style}"/></svg>`;
   lg.innerHTML = `
+    <span class="item"><svg width="22" height="12"><path d="M 1 9 L 5 6 L 8 8 L 12 3 L 15 7 L 18 5 L 21 6" stroke="var(--metric)" stroke-width="1.25" fill="none" stroke-linejoin="round"/></svg>Value per second</span>
+    <span class="item"><svg width="8" height="14"><line x1="4" x2="4" y1="0" y2="14" stroke="var(--truth)" stroke-width="1.5"/></svg>Incident starts</span>
     <span class="item">${swatch("fill:var(--truth)")}Injected (up)</span>
     <span class="item">${swatch("fill:var(--detect)")}Detected → answered (down)</span>
     <span class="item"><svg width="22" height="12"><path d="M 1 2 V 10 M 1 6 H 21 M 21 2 V 10" stroke="var(--text)" stroke-width="1.25" fill="none"/></svg>Time to detect</span>`;
@@ -368,6 +489,7 @@ function placeTip(x, y) {
   tip.style.top = `${Math.max(8, top)}px`;
 }
 function showTip(node, x, y) {
+  delete tip.dataset.owner;
   tip.innerHTML = node.getAttribute("data-tip");
   tip.classList.add("on");
   placeTip(x, y);
@@ -401,7 +523,7 @@ function render(D) {
   ro = new ResizeObserver(entries => {
     for (const e of entries) {
       const h = e.target, w = Math.floor(e.contentRect.width);
-      if (h._w !== w) { h._w = w; drawChart(h, h._model); }
+      if (h._w !== w) { h._w = w; h._draw(); }
     }
   });
   hosts.forEach(h => ro.observe(h));
