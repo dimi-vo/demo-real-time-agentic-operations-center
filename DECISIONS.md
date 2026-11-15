@@ -1356,6 +1356,10 @@ statement shows it). The `TIMESTAMP_LTZ` column needs the table dropped and appl
 **Amended by D-061.** Above each lane sits a line chart of the raw `service_metrics` value,
 one point per second, with a tick at each injected incident's start.
 
+**Amended by D-064.** The 15 s to detect was the 10 s window plus 5 s of watermark: the
+deployments watermark only passed a window's end at the next 5-s heartbeat. With the
+shorter watermarks a window closes on the tick at its end, ~10 s after an incident starts.
+
 ### D-055 · DECISION · The ops-wall mock is removed
 **What.** `uv run ops-wall --mock` drove the wall from a scripted scene loop with no Kafka
 (D-047). It had drifted from the live wall: it writes no `detected_at`, so since D-054 it
@@ -1710,6 +1714,9 @@ shortlisted: `d` 1 (follows level changes, D-029), STL (the data has no seasonal
 
 Amends D-029, D-031, D-042 and D-058.
 
+**Amended by D-064.** Detection now lands ~10 s after the start, not ~15 s: a 10 s spike is
+still flagged only as it ends, so 20 s stays the shortest spike that is on when flagged.
+
 ### D-060 · DECISION · Per-service schedules: overlap, per-type rests, first three one of each type
 **What.** `ops-sim` had one global incident slot: one incident at a time, the next one
 240–360 s after the last ended, and a 420 s cooldown per service. About 10 incidents an
@@ -1858,3 +1865,44 @@ from 660 s back; the Phase 4 health rows give no rate), `tests/test_opswall_feed
 feed trims on the wall clock until stopped, and again after a restart).
 
 Amends D-053, D-054 and D-058.
+
+### D-064 · DECISION · Shorter source watermarks: a window closes on the tick at its end
+**What.** Every incident was detected 15 s after it started. Incidents start on a window
+boundary and are flagged in their first window (D-059), so 10 s of that is the window. The
+other 5 s were the watermarks: both sources trailed `event_time` by 5 s, and the temporal
+join's watermark is the lower of the two. `service_metrics` (stamped tick + 999 ms, every
+second) reached the window's last millisecond on the tick at 14 s; `service_deployments`
+(stamped on the tick, written only on the 5-s heartbeat) not until the heartbeat at 15 s.
+**Options.** (a) Keep 5 s; (b) 5-s windows and a 1-s watermark; (c) shorter watermarks,
+10-s windows kept.
+**Choice.** (c): `service_metrics` trails by 1 s, `service_deployments` by 1 ms. Both reach
+a window's last millisecond on the tick at its end, so the window closes then: ~10 s from
+an incident's start to its detection, plus processing.
+**Why.**
+- **(b) was measured offline and set aside.** Its detection would land at 10 s, not 6 s: a
+  1-s deployments watermark still misses the window's end at the heartbeat on it (T+4 at
+  T+5) and waits for the next one. And the detector gets worse. `sweep.py`'s generator and
+  AR(1) replica (6 seeds x 3 h, 1,062 incidents) caught every incident in its first window
+  at both sizes, but a 20 s spike becomes 4 windows, the fitted AR(1) coefficient rises from
+  ~0.47 to ~0.73, and the first normal window after every traffic spike is flagged the
+  other way: 0 -> 7.9 false alarms per service-hour, all echoes. `maxTrainingSize` 720 left
+  7.5; 10 s spikes left 2.2. 5-s windows would need D-059's tuning again.
+- **1 s and 1 ms are safe here.** Each topic has one partition and one producer writing in
+  `event_time` order, so no row arrives late. 1 ms, not 0: the heartbeat stamps every service
+  with the same tick, and Flink's strictly ascending strategy (`AS event_time`) would make
+  all but the first of them late. A deploy is always read before the samples it applies
+  to: the join emits a sample only once the deployments watermark has passed it, which
+  takes a later record on the same partition.
+- **The detector is untouched.** A watermark changes when a window is scored, not what is
+  in it, so D-059's results stand.
+**Impact.** `sql/source_service_metrics.sql`, `sql/source_service_deployments.sql` and their
+copies in `platform-team/modules/developer/statements.tf`. `service_incidents` keeps 5 s: no
+statement windows or joins it. Tests: `tests/test_sql_pipeline.py`
+(`test_a_window_closes_on_the_tick_at_its_end` works out the closing tick from the two DDLs
+and ops-sim's stamps and heartbeat), `tests/test_opswall_ingest.py` (the synthetic detection
+delay is 1 s, was 6 s). Rolling out: the tables are `CREATE TABLE IF NOT EXISTS`, so drop
+`service_metrics` and `service_deployments` and apply again, then `uv run reset-health` and
+run the 2.4 INSERT and the agents again. **Pending (live check):** the wall's time to detect
+drops from 15 s to ~10 s.
+
+Amends D-054 and D-059.

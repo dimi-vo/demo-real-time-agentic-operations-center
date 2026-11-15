@@ -34,7 +34,7 @@ resource "confluent_flink_statement" "create_service_metrics_table" {
       `traffic_count` INT COMMENT 'Requests served in that second',
       `latency_ms` DOUBLE COMMENT 'Mean latency of the requests in that second, in milliseconds; set even when traffic_count is 0',
       `error_count` INT COMMENT 'Failed requests in that second (display only)',
-      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
+      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '1' SECOND
     )
     DISTRIBUTED INTO 1 BUCKETS
     WITH (
@@ -80,7 +80,7 @@ resource "confluent_flink_statement" "create_service_deployments_table" {
       `tier` STRING COMMENT 'CRITICAL or STANDARD',
       `owner_team` STRING COMMENT 'Team that owns the service',
       `event_time` TIMESTAMP(3) COMMENT 'Emit time of this state record (changes on every re-emit)',
-      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND,
+      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '0.001' SECOND,
       PRIMARY KEY (`service_name`) NOT ENFORCED
     ) DISTRIBUTED BY (`service_name`) INTO 1 BUCKETS
     WITH (

@@ -17,6 +17,11 @@
 -- the raw service name string (no registered key schema), mirroring the reference
 -- car_telemetry.
 --
+-- The watermark trails event_time by 1 s: one producer writes the topic's one partition
+-- in order, so no sample arrives late, and the tick at a window's end carries the
+-- watermark past it. With service_deployments' watermark, a window closes on that tick:
+-- detection waits for the window and nothing more (D-064).
+--
 -- delete retention (not compaction) with 24h: an append-only log is never
 -- compacted, and 24h caps storage per attendee while covering a workshop day.
 
@@ -26,7 +31,7 @@ CREATE TABLE IF NOT EXISTS `service_metrics` (
   `traffic_count` INT COMMENT 'Requests served in that second',
   `latency_ms` DOUBLE COMMENT 'Mean latency of the requests in that second, in milliseconds; set even when traffic_count is 0',
   `error_count` INT COMMENT 'Failed requests in that second (display only)',
-  WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
+  WATERMARK FOR `event_time` AS `event_time` - INTERVAL '1' SECOND
 )
 DISTRIBUTED INTO 1 BUCKETS
 WITH (

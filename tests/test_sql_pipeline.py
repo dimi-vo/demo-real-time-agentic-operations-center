@@ -4,14 +4,18 @@ The walkthrough has attendees grow one statement step by step (join, window, det
 INSERT). These tests keep the canonical files in sql/ in step with each other and with
 the brief: the same `enriched` and `windowed` CTEs everywhere, the 2.4 INSERT body equal
 to the 2.3 status query, the same detector config for both metrics, the fixed 10-second
-window, explicit earliest-offset hints, and the service_health column list (in the 2.3
-query and in the platform team's DDL).
+window, source watermarks that let a window close on the tick at its end, explicit
+earliest-offset hints, and the service_health column list (in the 2.3 query and in the
+platform team's DDL).
 """
 
 import re
 from pathlib import Path
 
 import pytest
+
+from opsgen.engine import WINDOW_SECONDS
+from opsgen.simulation import REEMIT_INTERVAL, SAMPLE_OFFSET_MS
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL = ROOT / "sql"
@@ -121,6 +125,42 @@ def test_window_is_fixed_at_ten_seconds(name):
     body = _body(name)
     assert "TUMBLE(" in body
     assert re.findall(r"INTERVAL '(\d+)' SECOND", body) == ["10"]
+
+
+def _watermark_delay_ms(name: str) -> int:
+    """How far a source table's watermark trails its event_time, from its DDL."""
+    m = re.search(r"WATERMARK FOR `event_time` AS `event_time` - INTERVAL '([\d.]+)' SECOND", _body(name))
+    assert m, f"no event_time watermark in {name}"
+    return round(float(m.group(1)) * 1000)
+
+
+def _first_tick_reaching(target_ms: int, stamp_ms: int, every: int, delay_ms: int) -> int:
+    """The first tick (seconds after ops-sim's aligned start) whose record carries a source's
+    watermark to `target_ms`. The source writes on every `every`-th tick, stamped `stamp_ms`
+    after the tick; its watermark is the latest stamp minus `delay_ms`."""
+    k = every
+    while k * 1000 + stamp_ms - delay_ms < target_ms:
+        k += every
+    return k
+
+
+def test_a_window_closes_on_the_tick_at_its_end():
+    """D-064. A window closes once the temporal join's watermark, the lower of its two
+    sources', reaches the window's last millisecond. service_metrics writes every second,
+    stamped tick + 999 ms; service_deployments only on its heartbeat, stamped on the tick.
+    A longer delay or a rarer heartbeat makes every detection wait for the next heartbeat:
+    with the old 5-second watermarks, the window [0, 10 s) closed at 15 s."""
+    last_ms = WINDOW_SECONDS * 1000 - 1
+    deployments_delay = _watermark_delay_ms("source_service_deployments.sql")
+    metrics = _first_tick_reaching(last_ms, SAMPLE_OFFSET_MS, 1, _watermark_delay_ms("source_service_metrics.sql"))
+    deployments = _first_tick_reaching(last_ms, 0, REEMIT_INTERVAL, deployments_delay)
+    assert max(metrics, deployments) == WINDOW_SECONDS, (
+        f"window [0, {WINDOW_SECONDS} s) closes at {max(metrics, deployments)} s "
+        f"(service_metrics at {metrics} s, service_deployments at {deployments} s)"
+    )
+    # The heartbeat stamps every service with the same tick: a watermark at the stamp itself
+    # would make all but the first of them late (Flink's strictly ascending strategy).
+    assert deployments_delay >= 1
 
 
 def test_deployment_context_uses_last_value_not_max():

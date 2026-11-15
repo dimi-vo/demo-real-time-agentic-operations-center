@@ -47,8 +47,8 @@ FIXTURES = ROOT / "tests" / "fixtures" / "opswall"
 TIMESTAMP_COLUMNS = ("window_start", "window_end", "detected_at")
 # SYNTHETIC: the Phase 4 rows were read before service_health had detected_at (D-054). Each
 # health row gets one this long after its window_end, an estimate of the real delay (the
-# 5-second source watermark plus processing).
-SYNTHETIC_DETECTION_DELAY = 6.0
+# window closes on the tick at its end, D-064, plus processing).
+SYNTHETIC_DETECTION_DELAY = 1.0
 
 
 def _epoch(text: str) -> float:
