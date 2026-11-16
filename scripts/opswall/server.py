@@ -3,8 +3,7 @@
 Serves the static frontend and pushes OpsWallState.snapshot() over a websocket
 at ~4 Hz. The HTML is served with no-cache so a browser never holds a stale JS
 across runs. A /healthz endpoint summarises the consumer connection for the
-"empty dashboard, no reason given" case. ``POST /refresh`` (the page's "Refresh data"
-button) restarts the feed behind the state: it clears the wall and re-reads the topics.
+"empty dashboard, no reason given" case.
 """
 
 from __future__ import annotations
@@ -15,11 +14,10 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from scripts.opswall.feed import Feed
 from scripts.opswall.state import OpsWallState
 
 logger = logging.getLogger("ops-wall.server")
@@ -43,7 +41,7 @@ class NoCacheStaticFiles(StaticFiles):
         return response
 
 
-def create_app(state: OpsWallState, feed: Feed | None = None) -> FastAPI:
+def create_app(state: OpsWallState) -> FastAPI:
     app = FastAPI(title="Ops wall")
     app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 
@@ -60,17 +58,6 @@ def create_app(state: OpsWallState, feed: Feed | None = None) -> FastAPI:
             "connectionErrors": snap["connectionErrors"],
             "serviceCount": len(snap["services"]),
         }
-
-    @app.post("/refresh")
-    def refresh() -> dict:
-        """Clear the wall and re-read the topics. A POST because it changes state (D-053).
-        A plain `def`, so FastAPI runs it in a worker thread: stopping and joining the old
-        consumers must not block the websocket loop. Returns the new generation; the page
-        waits for a snapshot that carries it."""
-        if feed is None:
-            raise HTTPException(status_code=503, detail="No feed is attached to this wall")
-        feed.restart()
-        return {"generation": state.generation}
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:

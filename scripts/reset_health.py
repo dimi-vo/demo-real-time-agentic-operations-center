@@ -68,7 +68,7 @@ def _print_next_steps() -> None:
     print("  2. The two agent INSERTs (`INSERT INTO remediation_decisions`) only once the ops wall's")
     print("     charts reach the right-hand edge again. Agents started during the replay would call")
     print("     the model for every replayed anomaly.")
-    print('\nOn the ops wall (`uv run ops-wall`), press "Refresh data" for a clean view.')
+    print("\nRestart the ops wall (Ctrl-C, then `uv run ops-wall`) for a clean view.")
 
 
 def main(argv: list[str] | None = None) -> None:

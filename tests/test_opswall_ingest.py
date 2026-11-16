@@ -22,7 +22,6 @@ when, without a broker.
 from __future__ import annotations
 
 import json
-import statistics
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -120,7 +119,7 @@ def _live_payments_wall() -> OpsWallState:
 def test_real_health_rows_reach_the_wall():
     payments = _service(_live_payments_wall(), "payments", NOW)
     assert payments["blocks"], "the HIGH latency windows must draw a block"
-    assert payments["rateRps"] is None, "the rate comes from service_metrics, not service_health (D-061)"
+    assert payments["metrics"] == [], "the lines come from service_metrics, not service_health (D-061)"
 
 
 def test_the_first_rollback_closes_the_real_detection():
@@ -179,7 +178,7 @@ def test_a_live_deployment_record_updates_its_tile(registry):
     st.apply_deployment(decoded)
     tile = _service(st, "checkout", 1_800_000_030.0)
     initial = SERVICES_BY_NAME["checkout"].initial_version
-    assert (tile["version"], tile["previousVersion"], tile["lastChange"]) == ("4.2.2", initial, "DEPLOY")
+    assert (tile["previousVersion"], tile["lastChange"]) == (initial, "DEPLOY")
     assert tile["secondsSinceDeploy"] == pytest.approx(30.0)
 
 
@@ -226,17 +225,13 @@ def test_live_metrics_records_reach_the_charts_and_the_rail(registry):
     assert [m["t"] for m in checkout["metrics"]] == pytest.approx([start + k + 0.999 - left for k in range(10)])
     assert [m["traffic"] for m in checkout["metrics"]] == [r["traffic_count"] for r in mine]
     assert [m["latency"] for m in checkout["metrics"]] == [round(r["latency_ms"], 1) for r in mine]
-    assert checkout["rateRps"] == pytest.approx(statistics.mean(r["traffic_count"] for r in mine))
-    errors, requests = sum(r["error_count"] for r in mine), sum(r["traffic_count"] for r in mine)
-    assert checkout["errorRatePct"] == pytest.approx(100 * errors / requests)
 
 
 # --- the topics the consumer tails ---------------------------------------------------
 
 
 def test_the_consumer_tails_service_metrics_from_about_11_minutes_back(monkeypatch):
-    """start_threads is what both a new wall and "Refresh data" call (D-053), so this is
-    also what a refresh re-attaches."""
+    """start_threads is what a new wall calls."""
     tails, seeks = [], []
     monkeypatch.setattr(consumer, "_schema_registry", lambda card: object())
     monkeypatch.setattr(consumer, "make_deserializer", lambda sr: object())

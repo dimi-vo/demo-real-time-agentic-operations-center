@@ -849,6 +849,9 @@ agent's first decision for it. The decision pins are gone from the chart (the bl
 names the action), so is the warm-up band, and the state computes the verdicts and the summary
 the page used to count.
 
+**Amended by D-066.** The mirror is gone: one chart per metric, the incident a translucent box
+behind the raw line, the detection and the answer marks under the plot.
+
 ### D-037 · DECISION · New `service_incidents` topic, two records per incident
 **What.** Simulator ground truth is published to a Kafka topic (`service_incidents`),
 not just the `incidents.jsonl` file. One record at `degradation_start` (`ended_at` null)
@@ -1252,7 +1255,7 @@ statement listings were only tested against fakes. Check in your environment: wi
 INSERTs running, `reset-health` deletes exactly those, empties both topics, leaves other
 statements running, and Run on the INSERTs fills the tables again with no duplicates.
 
-### D-053 · DECISION · "Refresh data" on the ops wall restarts the feed behind it
+### D-053 · DECISION · "Refresh data" on the ops wall restarts the feed behind it (superseded by D-066)
 **What.** After `reset-health` empties the output topics (D-052), a running ops wall still
 held up to 10 minutes of old charts and pins in memory, and a consumer stayed attached to a
 topic that had been deleted and recreated. The only cure was restarting the wall.
@@ -1276,6 +1279,9 @@ would show.
 `run_until_interrupt`; `consumer.py` stops promptly on the stop event; the header button in
 `static/`). Tests: `tests/test_opswall_{state,server,feed}.py`. No JS test setup exists, so
 the button is a manual check. Refreshing loses nothing: all data comes back from Kafka.
+
+**Superseded by D-066.** The button, `POST /refresh`, `Feed.restart()`, `clear()` and
+`generation` are removed; a clean view means restarting the wall.
 
 ### D-054 · DECISION · The ops wall draws each anomaly from detection to the agent's answer
 **What.** The lower half of each chart drew the windows `service_health` flagged, in the
@@ -1362,6 +1368,10 @@ charts are kept and updated in place, keyed (block bars by the snapshot's new `k
 **Amended by D-064.** The 15 s to detect was the 10 s window plus 5 s of watermark: the
 deployments watermark only passed a window's end at the next 5-s heartbeat. With the
 shorter watermarks a window closes on the tick at its end, ~10 s after an incident starts.
+
+**Amended by D-066.** A block is no longer a bar: a cyan dot at its start, a line to its end
+and an amber diamond at the answer, under the plot of its metric's chart. The summary is a
+table.
 
 ### D-055 · DECISION · The ops-wall mock is removed
 **What.** `uv run ops-wall --mock` drove the wall from a scripted scene loop with no Kafka
@@ -1885,6 +1895,10 @@ Amends D-053, D-054 and D-058.
 **Amended by D-062.** The page no longer rebuilds its DOM on every snapshot: rows, bars and
 charts are kept and updated in place, keyed (block bars by the snapshot's new `key`).
 
+**Amended by D-066.** The line and its lane are one chart; the incidents are boxes behind the
+line instead of onset ticks. The rail's Rate and Errors are gone, and with them `rateRps`,
+`errorRatePct` and the per-sample `errors`.
+
 ### D-062 · FIX · The ops wall updates its DOM in place instead of rebuilding it
 **What.** On every snapshot (4 Hz, `PUSH_INTERVAL_SEC`) the page emptied `#rows` and built
 every row again with empty chart hosts, which a ResizeObserver drew after the next layout.
@@ -2172,3 +2186,70 @@ still no worse than today); fixes at T+21 to T+29 were not tested.
 - The live echo rate and fresh-start false alarms with 35 s incidents.
 
 Amends D-059 and D-060.
+
+### D-066 · DECISION · The ops wall redesign: one chart per metric, floating cards, Confluent dark
+**What.** The user asked for a calmer wall that says what to expect: the summary sentence
+changed shape with the numbers, the legend was a run of inline items, and each service row
+carried text nobody read (subtitle, footer, the tier pill, Rate, Errors, the "Detected 10s
+after onset" note). Each metric had a line chart above a separate lane of bars. Agreed in a
+grilling round (Q1–Q25); the spec is `.scratch/opswall-redesign/spec.md`. Design source: the
+dark stage of `dimi-vo/demo-confluent-intelligence-f1/docs/site/pre-provisioned.html`.
+**Options.** For the chart: (a) keep the line above the lane; (b) merge them: the incident
+as a box behind the line, the detection and the answer as marks under the plot. For the
+answer marker: (a) one shape for every action, the action in the tooltip; (b) a hollow shape
+for observe / invalid. For Refresh: (a) hide the button only; (b) remove it end to end.
+**Choice.** Chart (b), marker (a), Refresh (b).
+- **Page.** Dark only (D-035), midnight `#040531` with a 20-px dot grid, text `#E8EEF5` and
+  its mixes into midnight, Confluent cyan `#38CCED` for detection, purple `#B69CFF` for
+  incidents, amber `#F2B33D` for answers, red for anomalies, green only for status and the
+  LIVE lamp. IBM Plex Sans stays (D-040; Plex is IBM's face, and the logo reads "an IBM
+  Company"). The header has the Confluent lockup (`static/confluent-logo.svg`) and "Ops
+  wall"; the favicon is the mark (`static/confluent-mark.svg`), both vendored from the
+  design source. The LIVE pill has a real lamp: green with a steady glow, red while
+  reconnecting, grey before the first connection.
+- **Tables.** A summary table, one row per field, Metric | Value (Injected · Answered ·
+  Open · Missed · False alarms · median time to detect and to answer in seconds; whole
+  numbers; an empty field reads 0; caption "Last 10 minutes"), beside a seven-row legend
+  table, each symbol drawn like its mark.
+- **Layout.** Inside side margins of 8% of the window (20–160 px), three columns: the
+  summary (25%), the cards (50%) and the legend (25%), the cards starting right under the
+  header and the two side panels staying in view while the cards scroll. The content is
+  capped at 1680 px so an ultra-wide screen doesn't stretch it. Below 1200 px the two
+  tables sit side by side above the cards; below 760 px everything stacks.
+- **Cards.** One floating card per service: name and status in its header; the
+  Latency and Traffic charts at full width; one time axis per card instead of the page's
+  sticky axis. An open anomaly gives the card a red glow.
+- **Chart.** Back to front: a purple box per incident on that metric at 30% opacity, the
+  full plot height (dashed when missed); the raw line, unchanged (D-061); under the plot, per
+  detection block (D-054), a cyan dot at detection (hollow for a false alarm), a cyan line to
+  the agent's first decision (to now while it waits) and an amber diamond there. The diamond
+  sits one row below the dot: an answer lands about a second after detection, 2 px away,
+  and on one row the diamond hid the dot. No grid lines, "now" line, onset tick or
+  time-to-detect bracket. Hovering the plot inside a box adds the incident to the value's
+  tooltip; a box and a mark group (dot, line, diamond) are each a tab stop with their own.
+- **Refresh removed.** The button and its JS, `POST /refresh`, `Feed.restart()`,
+  `OpsWallState.clear()` and `generation`. `Feed` keeps starting the consumers and the
+  trimmer. `uv run reset-health` now says to restart the wall for a clean view. The user
+  will design a new way later.
+- **Snapshot pruned.** `rateRps`, `errorRatePct` (`_rate_and_errors`,
+  `RATE_WINDOW_SECONDS`), the per-sample `errors` (`MetricSample.error_count`), `tier`,
+  `replicas` and `version` (also off `ServiceState`) had no reader left. The pipeline's
+  columns stay. `previousVersion`, `lastChange` and `secondsSinceDeploy` were unread before
+  this change and stay; they are now all the wall takes from `service_deployments`. The
+  user keeps that consumer for now; whether the wall shows deployments again or stops
+  reading the topic is to be reviewed by 2026-11-23, ahead of the 2026-12-08 hackathon
+  (`.scratch/opswall-redesign/issues/01-review-service-deployments-feed.md`).
+**Why.** One chart per metric puts the injected incident, the detection and the answer on
+the same time line as the raw value, which is the question the wall exists to answer
+(D-036). Tables with fixed columns show what the wall can say before it has said it.
+**Measured.** `uv run ops-wall` against the live cluster, headless Chrome at 1440 and 820 px
+wide: the cards, the tables and the stacked narrow layout render; a box hover, a mark hover
+(action, target, reason) and a keyboard-focused box each show their tooltip.
+**Impact.** `scripts/opswall/static/{index.html,opswall.css,opswall.js,confluent-logo.svg,
+confluent-mark.svg}`, `scripts/opswall/{state,server,feed,app,consumer}.py`,
+`scripts/reset_health.py`. Tests: `tests/test_opswall_{state,server,feed,ingest}.py` (the
+refresh, clear, rate, errors and tier tests removed; the feed's start and stop and a
+failed start tested on their own), `tests/test_reset_health.py`. No JS test setup exists;
+the page is a manual check.
+
+Supersedes D-053. Amends D-036, D-054 and D-061.

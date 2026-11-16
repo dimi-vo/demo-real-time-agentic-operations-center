@@ -30,8 +30,7 @@ transaction wrote comes again when the statement replays, D-063).
 - The **samples** are the raw ``service_metrics`` records, one per service per second
   (D-058), kept for the axis plus a margin (``trim()``). The snapshot
   carries the ones on the chart; the page draws them as the latency and traffic lines
-  (D-061). The rail's Rate (requests/s) and Errors (% of requests) come from the last 10 s
-  of them.
+  (D-061).
 
 State stores absolute epoch seconds everywhere. The snapshot turns positions into the
 axis-relative seconds the page draws with: ``t - (now - axis_seconds)``, clipped to
@@ -60,7 +59,6 @@ FIX_ACTIONS = ("ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM")
 # Keep this long past the axis: a run straddling the left edge stays whole, and a sample
 # stays until well after it scrolled off.
 RETAIN_MARGIN_SECONDS = 60.0
-RATE_WINDOW_SECONDS = 10.0  # the rail's Rate and Errors: the samples of the last 10 s
 
 
 @dataclass(frozen=True)
@@ -95,7 +93,6 @@ class MetricSample:
     event_time: float  # epoch seconds; the end of the second it covers
     traffic_count: int
     latency_ms: float
-    error_count: int
 
 
 @dataclass
@@ -123,10 +120,7 @@ class DecisionMark:
 @dataclass
 class ServiceState:
     name: str
-    tier: str
-    version: str | None = None
     previous_version: str | None = None
-    ready_replicas: int | None = None
     last_change: str | None = None
     deployed_at: float | None = None
     health: list[HealthRow] = field(default_factory=list)
@@ -162,9 +156,6 @@ class OpsWallState:
         self._lock = threading.RLock()
         self._services = _seeded_services()
         self._connection_errors: dict[str, dict] = {}  # topic -> {code, detail, ts}
-        # Bumped by clear(); every snapshot carries it so the page can tell data read after
-        # a "Refresh data" from the snapshots that came before it (D-053).
-        self.generation = 0
 
     # ---- writes ---------------------------------------------------------------
 
@@ -174,9 +165,7 @@ class OpsWallState:
             return
         with self._lock:
             s = self._services[name]
-            s.version = record.get("version") or s.version
             s.previous_version = record.get("previous_version") or s.previous_version
-            s.ready_replicas = record.get("ready_replicas") or s.ready_replicas
             s.last_change = record.get("last_change") or s.last_change
             if record.get("deployed_at") is not None:
                 s.deployed_at = _to_seconds(record["deployed_at"])
@@ -262,7 +251,7 @@ class OpsWallState:
         traffic, latency = record.get("traffic_count"), record.get("latency_ms")
         if t is None or traffic is None or latency is None:
             return
-        sample = MetricSample(t, traffic, latency, record.get("error_count") or 0)
+        sample = MetricSample(t, traffic, latency)
         with self._lock:
             samples = self._services[name].samples
             if not samples or t > samples[-1].event_time:
@@ -281,15 +270,6 @@ class OpsWallState:
     def clear_error(self, topic: str) -> None:
         with self._lock:
             self._connection_errors.pop(topic, None)
-
-    def clear(self) -> None:
-        """Back to the state a new wall starts in: three pre-seeded services (tier and replicas,
-        nothing else), no connection errors, and the next ``generation``. The owner of the feed
-        calls this while no consumer is running, then starts new ones (D-053)."""
-        with self._lock:
-            self._services = _seeded_services()
-            self._connection_errors = {}
-            self.generation += 1
 
     # ---- housekeeping ---------------------------------------------------------
 
@@ -318,7 +298,6 @@ class OpsWallState:
         with self._lock:
             services = [_snapshot_service(s, now, left, rel) for s in self._services.values()]
             return {
-                "generation": self.generation,
                 "axisSeconds": self.axis_seconds,
                 "updatedAt": now,
                 "connectionErrors": dict(self._connection_errors),
@@ -339,17 +318,11 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
         b.incident = _owner(b, incidents, now)
 
     status, status_text = _status(blocks, now)
-    rate, error_pct = _rate_and_errors(s.samples, now)
     return {
         "name": s.name,
-        "tier": s.tier,
-        "version": s.version,
         "previousVersion": s.previous_version,
-        "replicas": s.ready_replicas,
         "lastChange": s.last_change,
         "secondsSinceDeploy": (now - s.deployed_at) if s.deployed_at else None,
-        "rateRps": rate,
-        "errorRatePct": error_pct,
         "status": status,
         "statusText": status_text,
         "groundTruth": [_incident_json(i, [b for b in blocks if b.incident is i], now, rel)
@@ -365,21 +338,8 @@ def _samples_json(samples: list[MetricSample], left: float, now: float) -> list[
     snapshot. Latency is rounded to 0.1 ms, which is all the page shows."""
     start = bisect.bisect_left(samples, left, key=lambda m: m.event_time)
     return [{"t": round(m.event_time - left, 3), "traffic": m.traffic_count,
-             "latency": round(m.latency_ms, 1), "errors": m.error_count}
+             "latency": round(m.latency_ms, 1)}
             for m in samples[start:] if m.event_time <= now]
-
-
-def _rate_and_errors(samples: list[MetricSample], now: float) -> tuple[float | None, float | None]:
-    """Requests per second and the share of failed requests (%), over the samples of the
-    last ``RATE_WINDOW_SECONDS``. A sample is one second, so the rate is the mean
-    ``traffic_count``. No samples → no rate; no requests → no error share."""
-    start = bisect.bisect_right(samples, now - RATE_WINDOW_SECONDS, key=lambda m: m.event_time)
-    recent = samples[start:]
-    if not recent:
-        return None, None
-    requests = sum(m.traffic_count for m in recent)
-    errors = sum(m.error_count for m in recent)
-    return requests / len(recent), (100.0 * errors / requests if requests else None)
 
 
 def _blocks(health: list[HealthRow], decisions: list[DecisionMark], now: float) -> list[_Block]:
@@ -507,12 +467,8 @@ def _status(blocks: list[_Block], now: float) -> tuple[str, str]:
 # ---- helpers ------------------------------------------------------------------
 
 def _seeded_services() -> dict[str, ServiceState]:
-    """The pre-seeded tiles: every service with its tier and replica count, so the wall looks
-    lived-in before the first record arrives."""
-    return {
-        s.name: ServiceState(name=s.name, tier=s.tier, ready_replicas=s.ready_replicas)
-        for s in SERVICES
-    }
+    """Every service, so the wall shows its cards before the first record arrives."""
+    return {s.name: ServiceState(name=s.name) for s in SERVICES}
 
 
 def _to_seconds(value) -> float | None:

@@ -167,7 +167,7 @@ def test_prints_each_deleted_statement_then_what_was_emptied_then_the_restart_or
         out.index("Topic remediation_decisions: cleared"),
         out.index("`INSERT INTO service_health` first"),
         out.index("agent INSERTs"),
-        out.index("Refresh data"),
+        out.index("Restart the ops wall"),
     ]
     assert positions == sorted(positions)
     assert "right-hand edge" in out

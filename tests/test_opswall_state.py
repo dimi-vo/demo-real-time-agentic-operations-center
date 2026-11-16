@@ -54,10 +54,10 @@ def _incident(st, service, start, end=None, incident_type="BAD_DEPLOY", iid="INC
         st.apply_incident({**record, "event_time": _dt(end), "ended_at": _dt(end)})
 
 
-def _sample(st, service, event_time, traffic=50, latency=35.0, errors=0):
+def _sample(st, service, event_time, traffic=50, latency=35.0):
     """One service_metrics record: one second of one service, stamped at its end (D-058)."""
     st.apply_metric({"service_name": service, "event_time": _dt(event_time), "traffic_count": traffic,
-                     "latency_ms": latency, "error_count": errors})
+                     "latency_ms": latency, "error_count": 0})
 
 
 def _svc(st, name, now=NOW):
@@ -72,24 +72,22 @@ def _pos(t, now=NOW):
 # --- plumbing -----------------------------------------------------------------
 
 
-def test_services_are_preseeded_with_tier_and_replicas():
+def test_services_are_preseeded():
     snap = OpsWallState().snapshot(now=NOW)
     names = {s["name"]: s for s in snap["services"]}
     assert "checkout" in names and "web-gateway" in names
-    assert names["checkout"]["tier"] in ("CRITICAL", "STANDARD")
-    assert names["checkout"]["replicas"] is not None
     assert names["checkout"]["status"] == "healthy"
     assert "maxReplicas" not in names["checkout"]  # D-043: no ceiling
 
 
 def test_deployment_upsert_keeps_latest():
     st = OpsWallState()
-    st.apply_deployment({"service_name": "checkout", "version": "1.0.0", "ready_replicas": 3,
-                         "deployed_at": _dt(NOW - 300)})
-    st.apply_deployment({"service_name": "checkout", "version": "1.0.1", "ready_replicas": 4})
+    st.apply_deployment({"service_name": "checkout", "version": "1.0.0", "previous_version": "0.9.0",
+                         "ready_replicas": 3, "deployed_at": _dt(NOW - 300)})
+    st.apply_deployment({"service_name": "checkout", "version": "1.0.1", "previous_version": "1.0.0",
+                         "ready_replicas": 4})
     s = _svc(st, "checkout")
-    assert s["version"] == "1.0.1"
-    assert s["replicas"] == 4
+    assert s["previousVersion"] == "1.0.0"
     assert 299 <= s["secondsSinceDeploy"] <= 301
 
 
@@ -109,7 +107,7 @@ def test_unknown_service_is_silently_ignored():
 def test_the_samples_on_the_chart_reach_the_snapshot_oldest_first():
     st = OpsWallState()
     _sample(st, "checkout", NOW - 630.001)                 # kept, but left of the chart
-    _sample(st, "checkout", NOW - 2.001, traffic=31, latency=140.04, errors=1)
+    _sample(st, "checkout", NOW - 2.001, traffic=31, latency=140.04)
     _sample(st, "checkout", NOW - 4.001, traffic=29)        # late: put in its place
     _sample(st, "checkout", NOW - 3.001, traffic=1)
     _sample(st, "checkout", NOW - 3.001, traffic=30)        # the same second again: newer wins
@@ -118,7 +116,7 @@ def test_the_samples_on_the_chart_reach_the_snapshot_oldest_first():
     metrics = _svc(st, "checkout")["metrics"]
     assert [m["t"] for m in metrics] == pytest.approx([_pos(NOW - 4.001), _pos(NOW - 3.001), _pos(NOW - 2.001)])
     assert [m["traffic"] for m in metrics] == [29, 30, 31]
-    assert metrics[-1] == {"t": pytest.approx(_pos(NOW - 2.001)), "traffic": 31, "latency": 140.0, "errors": 1}
+    assert metrics[-1] == {"t": pytest.approx(_pos(NOW - 2.001)), "traffic": 31, "latency": 140.0}
     assert [m["traffic"] for m in _svc(st, "payments")["metrics"]] == [7]
 
 
@@ -138,38 +136,10 @@ def test_trim_drops_the_samples_older_than_the_axis_plus_the_margin():
     assert [m["traffic"] for m in _svc(st, "checkout", now=NOW - 100)["metrics"]] == [2]
 
 
-def test_rate_and_errors_come_from_the_samples_of_the_last_10_s():
-    st = OpsWallState()
-    _sample(st, "web-gateway", NOW - 20, traffic=1000, errors=1000)  # older than 10 s: left out
-    for k in range(10):
-        _sample(st, "web-gateway", NOW - 9.001 + k, traffic=40 + k, errors=k % 2)
-    s = _svc(st, "web-gateway")
-    assert s["rateRps"] == pytest.approx(44.5)                     # requests per second
-    assert s["errorRatePct"] == pytest.approx(100 * 5 / 445)       # % of the requests
-
-
-def test_rate_and_errors_follow_a_bad_deploy_and_a_drop():
-    st = OpsWallState()
-    for k in range(10):
-        _sample(st, "checkout", NOW - 9.001 + k, traffic=30, latency=560.0, errors=4)
-        _sample(st, "payments", NOW - 9.001 + k, traffic=k % 3)
-    assert _svc(st, "checkout")["errorRatePct"] == pytest.approx(100 * 4 / 30)
-    assert _svc(st, "payments")["rateRps"] == pytest.approx(0.9)
-
-
-def test_without_recent_samples_or_requests_rate_and_errors_are_empty():
-    st = OpsWallState()
-    assert (_svc(st, "checkout")["rateRps"], _svc(st, "checkout")["errorRatePct"]) == (None, None)
-    _sample(st, "checkout", NOW - 30)  # the simulator stopped 30 s ago
-    assert (_svc(st, "checkout")["rateRps"], _svc(st, "checkout")["errorRatePct"]) == (None, None)
-    _sample(st, "payments", NOW - 1, traffic=0)  # a second with no requests
-    assert (_svc(st, "payments")["rateRps"], _svc(st, "payments")["errorRatePct"]) == (0.0, None)
-
-
-def test_health_rows_alone_give_no_rate():
+def test_health_rows_alone_draw_no_line():
     st = OpsWallState()
     _health(st, "payments", NOW - 10, traffic_count=800)
-    assert _svc(st, "payments")["rateRps"] is None
+    assert _svc(st, "payments")["metrics"] == []  # the lines come from service_metrics (D-061)
 
 
 # --- incidents ----------------------------------------------------------------
@@ -523,55 +493,6 @@ def test_trim_takes_an_incident_that_never_ended_off_the_wall_after_11_minutes()
     assert _svc(st, "checkout")["groundTruth"] == []
     assert [g["incidentId"] for g in _svc(st, "payments")["groundTruth"]] == ["RECENT"]
     assert st.snapshot(now=NOW)["summary"]["pending"] == 1
-
-
-# --- clear (the "Refresh data" button, D-053) --------------------------------
-
-
-def _fill(st):
-    st.apply_deployment({"service_name": "checkout", "version": "9.9.9", "ready_replicas": 7,
-                         "deployed_at": _dt(NOW - 60)})
-    _incident(st, "checkout", NOW - 40, iid="INC-1")
-    _health(st, "checkout", NOW - 20, lat="HIGH")
-    _decide(st, "checkout", NOW - 20, at=NOW - 5)
-    _sample(st, "checkout", NOW - 1)
-    st.record_error("service_health", "UNKNOWN_TOPIC", "gone")
-
-
-def test_clear_reseeds_the_services_and_drops_history_blocks_and_errors():
-    fresh = OpsWallState().snapshot(now=NOW)
-    st = OpsWallState()
-    _fill(st)
-    assert _svc(st, "checkout")["blocks"] and _svc(st, "checkout")["metrics"]  # something to clear
-
-    st.clear()
-
-    snap = st.snapshot(now=NOW)
-    assert snap["connectionErrors"] == {}
-    cleared = _svc(st, "checkout")
-    assert cleared["version"] is None
-    assert cleared["groundTruth"] == [] and cleared["blocks"] == []
-    assert cleared["tier"] and cleared["replicas"] is not None  # pre-seeded again, like a new wall
-    assert snap["services"] == fresh["services"]
-    assert snap["summary"] == fresh["summary"]
-
-
-def test_clear_bumps_the_generation_the_snapshot_carries():
-    st = OpsWallState()
-    first = st.snapshot(now=NOW)["generation"]
-    st.clear()
-    second = st.snapshot(now=NOW)["generation"]
-    st.clear()
-    assert second > first
-    assert st.snapshot(now=NOW)["generation"] > second
-
-
-def test_a_cleared_state_takes_new_records():
-    st = OpsWallState()
-    _fill(st)
-    st.clear()
-    st.apply_deployment({"service_name": "checkout", "version": "1.0.0", "ready_replicas": 3})
-    assert _svc(st, "checkout")["version"] == "1.0.0"
 
 
 # --- thread safety -----------------------------------------------------------

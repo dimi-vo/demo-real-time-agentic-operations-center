@@ -6,10 +6,7 @@ OpsWallState (``scripts/opswall/consumer.py``), serves a FastAPI + static-JS
 single-page app at http://localhost:8000, and pushes updates over a websocket at
 ~4 Hz. Only consumes — never touches Flink, never produces, costs nothing beyond
 the Kafka egress. Missing topics are not fatal — the wall renders with empty
-lanes, and ``/healthz`` carries the reason. Stop with Ctrl-C.
-
-The "Refresh data" button in the page header clears the state and re-attaches every
-consumer (D-053).
+charts, and ``/healthz`` carries the reason. Stop with Ctrl-C.
 """
 
 from __future__ import annotations
@@ -57,7 +54,6 @@ def main() -> None:
     def starter(stop: threading.Event) -> list[threading.Thread]:
         return start_threads(state=state, card=card, stop=stop)
 
-    # The feed owns the threads so the "Refresh data" button can restart them (D-053).
     feed = Feed(state, starter)
     feed.start()
 
@@ -66,7 +62,7 @@ def main() -> None:
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
-    app = create_app(state, feed)
+    app = create_app(state)
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     except KeyboardInterrupt:
