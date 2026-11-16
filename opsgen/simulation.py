@@ -10,10 +10,11 @@ format them for display.
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 
 from opsgen.deployments import DeploymentState
 from opsgen.distributions import binomial, mean_latency_ms, poisson
-from opsgen.engine import Config, Engine, Event
+from opsgen.engine import Config, Decision, Engine, Event
 from opsgen.services import SERVICES
 
 REEMIT_INTERVAL = 5  # seconds; the controller reconciliation loop re-emits all services
@@ -117,8 +118,15 @@ class Simulation:
 
     # --- tick ------------------------------------------------------------------
 
-    def tick(self, now: float) -> tuple[list[dict], list[dict], list[Event]]:
-        """Advance one tick. Returns (metrics_records, deployment_records, events)."""
+    def tick(self, now: float, decisions: Iterable[Decision] = ()) -> tuple[list[dict], list[dict], list[Event]]:
+        """Advance one tick. Returns (metrics_records, deployment_records, events).
+
+        `decisions` are the agent decisions read since the last tick. They are applied first
+        (D-065), so a decision that resolves an incident ends it on this tick: this tick's
+        metrics are normal, and its end (and a bad deploy's ROLLBACK) is in this tick's
+        events and records."""
+        for decision in decisions:
+            self.engine.resolve(decision, now)
         events = self.engine.tick(now, self.deployments)
         changed = {e.service_name for e in events if e.new_version is not None}
         dep_records: list[dict] = []

@@ -11,7 +11,8 @@ import pytest
 
 from opsgen import engine
 from opsgen.distributions import latency_ms, poisson
-from opsgen.engine import BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP, Config, Incident
+from opsgen.engine import BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP, Config, Decision, Incident
+from opsgen.groundtruth import end_record
 from opsgen.services import SERVICES, SERVICES_BY_NAME, service_names
 from opsgen.simulation import REEMIT_INTERVAL, Simulation
 
@@ -104,6 +105,7 @@ def _forced(itype: str, service: str, start: float, end: float) -> Incident:
         degradation_end=end,
         expected_trigger=engine.TRIGGER[itype],
         expected_action=engine.EXPECTED_ACTION[itype],
+        scheduled_end=end,
     )
 
 
@@ -268,6 +270,58 @@ def test_incident_ends_on_a_tick_at_the_logged_ended_at():
     for now, inc in ends:
         assert now == inc.degradation_end
         assert float(inc.degradation_end - inc.degradation_start).is_integer()
+
+
+# --- resolving an incident (D-065) ---------------------------------------------
+
+AGENT_FOR_TRIGGER = {"LATENCY_HIGH": "release_agent", "TRAFFIC_HIGH": "capacity_agent", "TRAFFIC_LOW": "capacity_agent"}
+ONE_OF_EACH = [(BAD_DEPLOY, "payments"), (TRAFFIC_SURGE, "web-gateway"), (UPSTREAM_DROP, "checkout")]
+
+
+def _resolved_on_tick_17(itype, svc):
+    """A run whose only incident is an `itype` on `svc` from 0, answered correctly (for its
+    first window) by a decision read before tick 17. Returns the run, the start's events,
+    and ticks 16 and 17."""
+    sim = _sim(seed=4, config=Config(quiet_period=0))
+    _force(sim, itype, svc)
+    _, _, started = sim.tick(0.0)
+    inc = started[-1].incident
+    for k in range(1, 16):
+        assert sim.tick(float(k))[2] == []
+    tick_16 = sim.tick(16.0)
+    answer = Decision(svc, 10.0, AGENT_FOR_TRIGGER[inc.expected_trigger], inc.expected_trigger, inc.expected_action)
+    tick_17 = sim.tick(17.0, decisions=[answer])
+    return sim, started, tick_16, tick_17
+
+
+@pytest.mark.parametrize(("itype", "svc"), ONE_OF_EACH)
+def test_a_resolved_incident_and_its_records_end_on_the_tick_that_read_the_decision(itype, svc):
+    sim, started, _, (_, deps, events) = _resolved_on_tick_17(itype, svc)
+    [end] = events
+    assert (end.kind, end.now, end.incident) == ("incident_end", 17.0, started[-1].incident)
+    assert end_record(end.incident, end.now)["ended_at"] == 17_000  # the real end, not the cap
+    if itype == BAD_DEPLOY:  # its ROLLBACK restores the version the bad deploy replaced
+        [dep] = deps
+        assert (dep["service_name"], dep["last_change"], dep["event_time"]) == (svc, "ROLLBACK", 17_000)
+        assert dep["version"] == started[0].old_version
+    else:
+        assert deps == []
+    assert all(sim.tick(float(k))[2] == [] for k in range(18, 40))  # it doesn't end again at 35
+
+
+def _times_normal(record, itype):
+    """The sample's incident metric as a multiple of its service's normal level."""
+    field, normal = ("latency_ms", "median_latency_ms") if itype == BAD_DEPLOY else ("traffic_count", "rps")
+    return record[field] / getattr(SERVICES_BY_NAME[record["service_name"]], normal)
+
+
+@pytest.mark.parametrize(("itype", "svc"), ONE_OF_EACH)
+def test_the_tick_that_reads_the_decision_samples_normal_metrics(itype, svc):
+    _, _, (before, _, _), (at, _, _) = _resolved_on_tick_17(itype, svc)
+    [before] = [r for r in before if r["service_name"] == svc]
+    [at] = [r for r in at if r["service_name"] == svc]
+    assert not 0.5 < _times_normal(before, itype) < 2, before  # x4, x5 or x0.1 on tick 16
+    assert 0.5 < _times_normal(at, itype) < 2, at
 
 
 def test_aligned_start_is_the_next_ten_second_boundary():

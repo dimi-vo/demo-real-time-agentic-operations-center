@@ -18,6 +18,7 @@ from opsgen.engine import (
     UPSTREAM_DROP,
     WINDOW_SECONDS,
     Config,
+    Decision,
     Engine,
     Incident,
 )
@@ -49,9 +50,10 @@ def _incident(itype, svc, start):
         type=itype,
         service_name=svc,
         degradation_start=start,
-        degradation_end=start + Config().duration,
+        degradation_end=start + Config().max_duration,
         expected_trigger=engine.TRIGGER[itype],
         expected_action=engine.EXPECTED_ACTION[itype],
+        scheduled_end=start + Config().max_duration,
     )
 
 
@@ -123,7 +125,9 @@ def test_twenty_seconds_between_incidents_on_a_service(seed):
     for incs in _by_service(_incidents(events)).values():
         gaps += [nxt.degradation_start - prev.degradation_end for prev, nxt in pairwise(incs)]
     assert gaps and min(gaps) >= Config().gap == 20
-    assert min(gaps) == 20, "a service should start again as soon as it may"
+    # A service starts again as soon as it may: at the first boundary 20 s after its last
+    # incident ended. A 35 s incident ends mid-window (D-065), so that is 25 s after (T+60).
+    assert min(gaps) == 25, "a service should start again as soon as it may"
 
 
 @pytest.mark.parametrize("seed", range(5))
@@ -150,17 +154,18 @@ def test_the_first_three_incidents_are_one_of_each_type():
     assert len(orders) >= 4, orders
 
 
-def test_about_sixty_incidents_an_hour():
-    # D-059's target. The issue-05 harness gave 60 in the first hour for every one of 500
-    # seeds and 58.5 an hour at steady state (hours 2 and 3 of a 3-hour run).
+def test_about_56_incidents_an_hour():
+    # D-065: the 35 s cap, with gap and rests dated from its scheduled end, takes D-059's 59
+    # an hour down to about 56. These seeds give 54 in the first hour for every one and 57 an
+    # hour at steady state (hours 2 and 3 of a 3-hour run): 56 over 3 hours, as offline (55.9).
     first_hour, steady = [], []
     for seed in range(20):
         events, _, _ = _run(Config(), seed=seed, horizon=3 * 3600)
         starts = [i.degradation_start for i in _incidents(events)]
         first_hour.append(sum(t < 3600 for t in starts))
         steady.append(sum(t >= 3600 for t in starts) / 2)
-    assert all(57 <= n <= 63 for n in first_hour), first_hour
-    assert 56 <= sum(steady) / len(steady) <= 62, steady
+    assert all(51 <= n <= 57 for n in first_hour), first_hour
+    assert 54 <= sum(steady) / len(steady) <= 60, steady
 
 
 def test_bad_deploy_lifecycle_and_rollback():
@@ -181,7 +186,7 @@ def test_bad_deploy_lifecycle_and_rollback():
     assert (end.old_version, end.new_version) == (broken, good)
 
 
-def test_every_incident_lasts_the_duration_on_window_boundaries():
+def test_every_incident_lasts_the_max_duration_from_a_window_boundary():
     # Start off a boundary to prove the rounding: the windows are epoch-aligned, not
     # aligned to the generator's start.
     rng = random.Random(9)
@@ -194,8 +199,179 @@ def test_every_incident_lasts_the_duration_on_window_boundaries():
     assert len(incs) >= 10
     for inc in incs:
         assert inc.degradation_start % 10 == 0, inc
-        assert inc.degradation_end - inc.degradation_start == Config().duration == 20, inc  # D-059
+        # With no agent in the loop, every incident runs to its cap (D-065).
+        assert inc.degradation_end - inc.degradation_start == Config().max_duration == 35, inc
     assert {i.type for i in incs} == {BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP}
+
+
+def test_the_cap_ends_an_incident_mid_window():
+    # D-065: an incident that runs to its cap ends mid-window, so the return to baseline
+    # splits over two windows, in two steps small enough to stay inside the detector's band.
+    # A cap on a boundary brings the after-spike echoes back: offline, 35 s had none, where
+    # 30 s and 40 s had 80x and 670x the echoes of the old fixed 20 s.
+    assert Config().max_duration % WINDOW_SECONDS != 0
+
+
+def test_gap_and_rests_count_from_the_scheduled_end():
+    # D-065: an incident that ends early leaves the schedule as it was. Cut a surge on
+    # web-gateway to 10 s by hand: the service's next incident still waits for the gap after
+    # start + 35 s, and its next surge for the surge's rest after start + 35 s.
+    eng = _past_first_three(Engine(rng=random.Random(0), start=0.0, config=Config(quiet_period=0)))
+    deployments = _deployments()
+    real_choice = eng._choose_incident
+    _force(eng, TRAFFIC_SURGE, "web-gateway")
+    eng.tick(0.0, deployments)
+    eng._choose_incident = real_choice
+    surge = eng.active["web-gateway"]
+    assert surge.scheduled_end == 35
+    surge.degradation_end = 10.0
+    on_gateway = []
+    for k in range(1, 400):
+        started = _incidents(eng.tick(float(k), deployments))
+        on_gateway += [(i.type, i.degradation_start) for i in started if i.service_name == "web-gateway"]
+    # Dated from the real end (10 s), the gap would allow a bad deploy at 30 and the rest a
+    # surge at 310.
+    assert on_gateway[:2] == [(BAD_DEPLOY, 60.0), (TRAFFIC_SURGE, 340.0)]
+
+
+# --- resolving an incident (D-065) ---------------------------------------------
+
+AGENT_FOR_TRIGGER = {"LATENCY_HIGH": "release_agent", "TRAFFIC_HIGH": "capacity_agent", "TRAFFIC_LOW": "capacity_agent"}
+ONE_OF_EACH = [(BAD_DEPLOY, "payments"), (TRAFFIC_SURGE, "web-gateway"), (UPSTREAM_DROP, "checkout")]
+
+
+def _started(itype, svc):
+    """An engine whose only incident is an `itype` on `svc`, started at 0."""
+    eng = Engine(rng=random.Random(0), start=0.0, config=Config(quiet_period=0))
+    deployments = _deployments()
+    _force(eng, itype, svc)
+    events = eng.tick(0.0, deployments)
+    return eng, deployments, events
+
+
+def _answer(inc, window_end=10.0, **changes):
+    """The agent's decision on `inc`'s service for the window ending at `window_end`: the
+    correct one, unless `changes` say otherwise."""
+    fields = {
+        "service_name": inc.service_name,
+        "window_end": window_end,
+        "agent_name": AGENT_FOR_TRIGGER[inc.expected_trigger],
+        "trigger": inc.expected_trigger,
+        "action": inc.expected_action,
+    } | changes
+    return Decision(**fields)
+
+
+def _tick_through(eng, deployments, ticks, decisions=None):
+    """Tick over `ticks`, resolving `decisions[k]` before the tick at k, as
+    `Simulation.tick` does. Returns the events."""
+    events = []
+    for k in ticks:
+        for d in (decisions or {}).get(k, ()):
+            eng.resolve(d, float(k))
+        events.extend(eng.tick(float(k), deployments))
+    return events
+
+
+@pytest.mark.parametrize(("itype", "svc"), ONE_OF_EACH)
+def test_a_correct_decision_ends_its_incident_on_the_tick_that_reads_it(itype, svc):
+    eng, deployments, started = _started(itype, svc)
+    inc = eng.active[svc]
+    assert _tick_through(eng, deployments, range(1, 17)) == []
+    assert eng.resolve(_answer(inc), 17.0) is True
+    [end] = eng.tick(17.0, deployments)
+    assert (end.kind, end.now, end.incident) == ("incident_end", 17.0, inc)
+    assert inc.degradation_end == 17.0 and svc not in eng.active
+    assert inc.resolved_by == f"{AGENT_FOR_TRIGGER[inc.expected_trigger]} {inc.expected_action}"
+    if itype == BAD_DEPLOY:  # the ROLLBACK restores the version the bad deploy replaced
+        deploy = started[0]
+        assert (end.old_version, end.new_version) == (deploy.new_version, deploy.old_version)
+
+
+@pytest.mark.parametrize(
+    ("itype", "svc", "action"),
+    [
+        (BAD_DEPLOY, "payments", "OBSERVE"),
+        (BAD_DEPLOY, "payments", "INVALID"),
+        (TRAFFIC_SURGE, "web-gateway", "OBSERVE"),
+        (TRAFFIC_SURGE, "web-gateway", "INVESTIGATE_UPSTREAM"),  # the wrong capacity action
+        (UPSTREAM_DROP, "checkout", "INVALID"),
+        (UPSTREAM_DROP, "checkout", "SCALE_OUT"),  # the wrong capacity action
+    ],
+)
+def test_any_other_action_leaves_the_incident_running_to_its_cap(itype, svc, action):
+    eng, deployments, _ = _started(itype, svc)
+    inc = eng.active[svc]
+    assert eng.resolve(_answer(inc, action=action), 17.0) is False
+    [end] = _tick_through(eng, deployments, range(17, 40))
+    assert end.now == inc.degradation_end == 35.0 and inc.resolved_by is None
+
+
+def test_a_correct_answer_on_a_later_window_still_resolves_it():
+    eng, deployments, _ = _started(TRAFFIC_SURGE, "web-gateway")
+    inc = eng.active["web-gateway"]
+    decisions = {13: [_answer(inc, window_end=10.0, action="OBSERVE")], 23: [_answer(inc, window_end=20.0)]}
+    [end] = _tick_through(eng, deployments, range(1, 40), decisions)
+    assert end.now == inc.degradation_end == 23.0
+    assert inc.resolved_by == "capacity_agent SCALE_OUT"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"trigger": "TRAFFIC_HIGH"},  # the right action under the wrong trigger
+        {"window_end": 0.0},  # the window ended as the incident started
+        {"window_end": -10.0},  # a stale answer, for a window before the incident
+        {"service_name": "checkout"},  # another service, which has no incident
+    ],
+    ids=["trigger", "window-at-start", "window-before", "service"],
+)
+def test_a_decision_that_does_not_match_the_incident_is_ignored(changes):
+    eng, deployments, _ = _started(BAD_DEPLOY, "payments")
+    inc = eng.active["payments"]
+    assert eng.resolve(_answer(inc, **changes), 17.0) is False
+    [end] = _tick_through(eng, deployments, range(17, 40))
+    assert end.now == inc.degradation_end == 35.0 and inc.resolved_by is None
+
+
+def test_only_the_first_correct_decision_resolves_it():
+    eng, deployments, _ = _started(UPSTREAM_DROP, "checkout")
+    inc = eng.active["checkout"]
+    assert eng.resolve(_answer(inc, window_end=10.0), 17.0) is True
+    # a second correct answer read on the same tick, and another after the incident ended
+    assert eng.resolve(_answer(inc, window_end=20.0, agent_name="someone_else"), 17.0) is False
+    assert _tick_through(eng, deployments, [17])[0].now == 17.0
+    assert eng.resolve(_answer(inc, window_end=20.0), 18.0) is False
+    assert inc.degradation_end == 17.0 and inc.resolved_by == "capacity_agent INVESTIGATE_UPSTREAM"
+
+
+def test_a_correct_decision_after_the_incident_expired_is_ignored():
+    eng, deployments, _ = _started(UPSTREAM_DROP, "checkout")
+    inc = eng.active["checkout"]
+    [end] = _tick_through(eng, deployments, range(1, 36))
+    assert end.now == 35.0
+    assert eng.resolve(_answer(inc, window_end=40.0), 41.0) is False
+    assert inc.degradation_end == 35.0 and inc.resolved_by is None
+
+
+def test_the_schedule_is_the_same_whether_incidents_are_resolved_or_not():
+    # D-065: the gap and the rests count from the scheduled end, so agents never move the
+    # schedule, and the live one still follows --seed.
+    def starts(resolve_after):
+        eng = Engine(rng=random.Random(3), start=0.0, config=Config())
+        deployments = _deployments()
+        out = []
+        for k in range(3 * 3600):
+            for inc in list(eng.active.values()):
+                if resolve_after is not None and k == inc.degradation_start + resolve_after:
+                    assert eng.resolve(_answer(inc, window_end=inc.degradation_start + 10), float(k))
+            started = _incidents(eng.tick(float(k), deployments))
+            out += [(i.degradation_start, i.service_name, i.type) for i in started]
+        return out
+
+    never = starts(None)
+    assert len(never) > 150
+    assert starts(15) == never
 
 
 def test_no_incidents_runs_an_hour_without_a_deploy():

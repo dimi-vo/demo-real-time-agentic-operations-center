@@ -87,7 +87,7 @@ def schedule_settings(config: Config) -> str:
     if config.no_incidents:
         return "no incidents"
     rests = " ".join(f"{t}={config.rests[t]:g}s" for t in INCIDENT_TYPES)
-    return f"quiet={config.quiet_period:g}s duration={config.duration:g}s gap={config.gap:g}s rests: {rests}"
+    return f"quiet={config.quiet_period:g}s max={config.max_duration:g}s gap={config.gap:g}s rests: {rests}"
 
 
 def run_simulate(sim: Simulation, minutes: float, out=None) -> None:

@@ -2,28 +2,34 @@
 
 Ticked once per simulated second. `Engine.tick(now, deployments)` ends and starts
 incidents, mutates the `DeploymentState`s on deploys and rollbacks, and returns the
-`Event`s that fired this tick. All scheduling randomness comes from the single rng,
-drawn in a fixed order, so `--seed` reproduces the whole schedule.
+`Event`s that fired this tick. `Engine.resolve(decision, now)`, called before the tick,
+ends an incident early on an agent's correct answer. All scheduling randomness comes from
+the single rng, drawn in a fixed order, so `--seed` reproduces the whole schedule.
 
-Rules (D-060, which amends D-042):
+Rules (D-060, which amends D-042; D-065 amends both):
 - Every service runs its own schedule: incidents on different services may overlap, and a
   service has at most one at a time. Each service has its own detector model (D-009), so
   overlap costs no accuracy.
 - Quiet period: no incident in the first `quiet_period` seconds after start (the
   detector's warm-up).
-- Every incident starts on a 10-second window boundary and lasts a fixed `duration` of
-  whole windows (20 s, D-059), so it ends on a boundary too.
+- Every incident starts on a 10-second window boundary, so its first window is all spike,
+  and lasts up to `max_duration` (35 s, D-065). The cap ends it mid-window on purpose: the
+  return to baseline splits over two windows and stays inside the detector's band.
 - A service can start its next incident at the first boundary at least `gap` after its
-  last one ended, with a type whose rest is over. Rests are per service and type, measured
-  from the end of that type's last incident on that service (`rests`, D-059). They set the
-  rate (about 60 an hour) and keep the same metric's spikes on a service far enough apart
-  for the detector.
+  last one's scheduled end (start + `max_duration`), with a type whose rest is over. Rests
+  are per service and type, measured from the scheduled end of that type's last incident on
+  that service (`rests`, D-059). Counting from the scheduled end, not the actual one, keeps
+  the schedule the same however incidents end. The rests set the rate (about 56 an hour) and
+  keep the same metric's spikes on a service far enough apart for the detector.
 - At each boundary, while some service can start one: pick the type by weight among the
   types allowed now, then a random service allowed for it. Until all three types have
   happened, only types not seen yet are allowed, so the first three are one of each.
-- BAD_DEPLOY fires a DEPLOY and starts degrading on the same tick; it ends with a
-  ROLLBACK and metrics return to baseline at that moment. These are the only version
-  changes: there are no other deploys (D-057).
+- An incident is **resolved** when an agent answers it correctly: its expected action under
+  its expected trigger, for a window that ends after it started. It then ends on the tick
+  that reads the decision, mid-window (D-065). Otherwise it **expires** at its cap.
+- BAD_DEPLOY fires a DEPLOY and starts degrading on the same tick; it ends, resolved or
+  expired, with a ROLLBACK to the previous version, and metrics return to baseline at that
+  moment. These are the only version changes: there are no other deploys (D-057).
 """
 
 from __future__ import annotations
@@ -75,11 +81,12 @@ def _first_tick_of_window(now: float) -> bool:
     return now - math.floor(now / WINDOW_SECONDS) * WINDOW_SECONDS < 1
 
 
-# The time a service waits after an incident of a type ends before it can have that type
-# again, the same on every service (D-059). The detector trains on its spike windows: too
-# many of them on one metric and its band outgrows the next spike. These rests keep every
-# type caught and land on about 60 incidents an hour; the long bad-deploy rest brings the
-# rate down without making traffic spikes rarer, which would add after-spike false alarms.
+# The time a service waits, from the scheduled end of an incident of a type, before it can
+# have that type again, the same on every service (D-059). The detector trains on its spike
+# windows: too many of them on one metric and its band outgrows the next spike. These rests
+# keep every type caught and land on about 56 incidents an hour (D-065); the long bad-deploy
+# rest brings the rate down without making traffic spikes rarer, which would add after-spike
+# false alarms.
 RESTS = {BAD_DEPLOY: 390.0, TRAFFIC_SURGE: 300.0, UPSTREAM_DROP: 300.0}
 
 
@@ -91,9 +98,12 @@ class Config:
     # first incident is in a window the detector scores. 150 s with lab 2.3's minTrainingSize
     # 12; a test keeps the two in step.
     quiet_period: float = 150.0
-    # D-059 (was 40 s, D-042): fixed, so every incident covers 2 whole windows. The detector
-    # flags a spike in its first window; more windows only add after-spike false alarms.
-    duration: float = 20.0
+    # D-065 (was a fixed 20 s, D-059): an incident lasts until an agent resolves it, or this
+    # cap. 35 s ends mid-window on purpose: the return to baseline splits over two windows, in
+    # two steps small enough to stay inside the detector's band. A multiple of 10 ends on a
+    # boundary and brings the after-spike echoes back (30 s and 40 s: 80x and 670x those of
+    # the old 20 s).
+    max_duration: float = 35.0
     gap: float = 20.0  # between two incidents on one service, whatever their types
     rests: dict[str, float] = field(default_factory=lambda: dict(RESTS))  # per type
     no_incidents: bool = False
@@ -118,9 +128,13 @@ class Incident:
     type: str
     service_name: str
     degradation_start: float
-    degradation_end: float
+    degradation_end: float  # when its effect stops; the scheduled end unless it ends early
     expected_trigger: str
     expected_action: str
+    # start + max_duration. The gap and the rests count from here, however the incident
+    # ends, so the schedule doesn't depend on when it ended (D-065).
+    scheduled_end: float
+    resolved_by: str | None = None  # "<agent_name> <action>" once an agent resolved it
 
     def effect(self) -> Effect:
         if self.type == BAD_DEPLOY:
@@ -128,6 +142,20 @@ class Incident:
         if self.type == TRAFFIC_SURGE:
             return Effect(lam_mult=SURGE_LAMBDA_MULT)  # traffic only: latency untouched (D-059)
         return Effect(lam_mult=DROP_LAMBDA_MULT)
+
+
+@dataclass(frozen=True)
+class Decision:
+    """An agent's decision, as ops-sim reads it from `remediation_decisions` (D-065): plain
+    values, no Kafka or Avro types. `window_end` is in epoch seconds. No `target`: a resolved
+    bad deploy rolls back to its previous version whatever the agent named, and `SCALE_OUT`
+    leaves the replicas alone (`evaluate` scores targets, D-045)."""
+
+    service_name: str
+    window_end: float
+    agent_name: str
+    trigger: str
+    action: str
 
 
 @dataclass
@@ -166,6 +194,28 @@ class Engine:
             return inc.effect()
         return NEUTRAL
 
+    # --- resolve ---------------------------------------------------------------
+
+    def resolve(self, decision: Decision, now: float) -> bool:
+        """Resolve the active incident on the decision's service if the decision is its
+        correct answer: the incident's expected action under its expected trigger, for a
+        window that ends after the incident started (so an answer about an earlier incident
+        can't end this one). The incident then ends on the tick at `now`, as it would at
+        its cap. The first match wins: an incident already resolved ignores the decision.
+        Returns whether it resolved one."""
+        inc = self.active.get(decision.service_name)
+        if (
+            inc is None
+            or inc.resolved_by is not None
+            or decision.action != inc.expected_action
+            or decision.trigger != inc.expected_trigger
+            or decision.window_end <= inc.degradation_start
+        ):
+            return False
+        inc.degradation_end = now
+        inc.resolved_by = f"{decision.agent_name} {decision.action}"
+        return True
+
     # --- tick ------------------------------------------------------------------
 
     def tick(self, now: float, deployments: dict[str, DeploymentState]) -> list[Event]:
@@ -184,8 +234,8 @@ class Engine:
                 events.append(Event("incident_end", now, svc, old, new, inc))
             else:
                 events.append(Event("incident_end", now, svc, incident=inc))
-            self.last_incident_end[svc] = now
-            self.last_type_end[(svc, inc.type)] = now
+            self.last_incident_end[svc] = inc.scheduled_end
+            self.last_type_end[(svc, inc.type)] = inc.scheduled_end
             del self.active[svc]
 
     def _start_incidents(self, now: float, deployments: dict[str, DeploymentState], events: list[Event]) -> None:
@@ -200,16 +250,17 @@ class Engine:
     ) -> None:
         # Whole seconds, so degradation_end falls on a tick: the incident really ends (and a
         # BAD_DEPLOY's ROLLBACK fires) exactly at the ended_at in its end record.
-        duration = float(math.ceil(self.config.duration))
+        scheduled_end = now + float(math.ceil(self.config.max_duration))
         self.incident_counter += 1
         inc = Incident(
             incident_id=f"INC{self.incident_counter:04d}",
             type=itype,
             service_name=svc,
             degradation_start=now,
-            degradation_end=now + duration,
+            degradation_end=scheduled_end,
             expected_trigger=TRIGGER[itype],
             expected_action=EXPECTED_ACTION[itype],
+            scheduled_end=scheduled_end,
         )
         # A BAD_DEPLOY's deploy and its degradation start on the same tick (D-042).
         if itype == BAD_DEPLOY:

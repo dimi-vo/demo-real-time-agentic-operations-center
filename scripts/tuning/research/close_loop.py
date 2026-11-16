@@ -92,7 +92,7 @@ class FixEngine(eng.Engine):
         self.fix_rng = random.Random(f"close-loop-fix-{self.fix_seed}")
 
     def _cap(self) -> float:
-        return float(math.ceil(self.config.duration))
+        return float(math.ceil(self.config.max_duration))
 
     def _start_incident(self, itype, svc, now, deployments, events) -> None:
         super()._start_incident(itype, svc, now, deployments, events)
@@ -102,7 +102,9 @@ class FixEngine(eng.Engine):
     def _end_incidents(self, now, deployments, events) -> None:
         ending = [inc for inc in self.active.values() if now >= inc.degradation_end]
         super()._end_incidents(now, deployments, events)
-        for inc in ending:  # the schedule ignores the fix: gap and rest from start + cap
+        # The schedule ignores the fix: gap and rest from start + cap. Since D-065 the stock
+        # engine does this too (`Incident.scheduled_end`); kept so the run is as recorded.
+        for inc in ending:
             scheduled_end = inc.degradation_start + self._cap()
             self.last_incident_end[inc.service_name] = scheduled_end
             self.last_type_end[(inc.service_name, inc.type)] = scheduled_end
@@ -114,7 +116,7 @@ def patch(sc: Scenario | None, seed: int) -> None:
         eng.Config, sim_mod.Engine = _ORIG_CONFIG, _ORIG_ENGINE
         return
     rests = dict(eng.RESTS) if sc.rests is None else dict(zip(eng.INCIDENT_TYPES, sc.rests, strict=True))
-    eng.Config = lambda: _ORIG_CONFIG(duration=sc.cap, rests=dict(rests))
+    eng.Config = lambda: _ORIG_CONFIG(max_duration=sc.cap, rests=dict(rests))
     FixEngine.fix_at, FixEngine.fix_share, FixEngine.fix_seed = sc.fix_at, sc.fix_share, seed
     sim_mod.Engine = FixEngine
 
@@ -137,7 +139,9 @@ def one(args: tuple[str, int, float]) -> dict:
     for i in incidents:
         incs_by_svc[i.service_name].append(i)
 
-    out = {"n_ended": len(incidents), "inc": [], "fp": [], "hours": 0.0, "fresh": [], "lengths": Counter(), "absorbed": 0}
+    out = {
+        "n_ended": len(incidents), "inc": [], "fp": [], "hours": 0.0, "fresh": [], "lengths": Counter(), "absorbed": 0,
+    }  # fmt: skip
     for i in incidents:
         out["lengths"][round(i.ended_at - i.started_at)] += 1
     for r in rep.incidents:
@@ -205,13 +209,14 @@ def summarize(outs: list[dict], hours: float) -> dict:
 
 
 def selfcheck(hours: float) -> list[str]:
-    """FixEngine without a fix reproduces the stock engine; the 35 s scenarios share a schedule."""
+    """FixEngine without a fix reproduces the stock engine (35 s since D-065, so scenario C);
+    the 35 s scenarios share a schedule."""
     msgs = []
     for seed in (0, 1):
         stock = simulate(None, seed, hours)
-        a = simulate(SCENARIOS["A"], seed, hours)
-        same = stock[0] == a[0] and stock[1] == a[1]
-        msgs.append(f"seed {seed}: scenario A == stock engine (rows and incidents): {same}")
+        c = simulate(SCENARIOS["C"], seed, hours)
+        same = stock[0] == c[0] and stock[1] == c[1]
+        msgs.append(f"seed {seed}: scenario C == stock engine (rows and incidents): {same}")
         sched = {}
         for key in "CEFG":
             _, incs, _, end, _ = simulate(SCENARIOS[key], seed, hours)

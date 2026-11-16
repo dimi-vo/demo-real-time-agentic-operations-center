@@ -20,6 +20,7 @@ def _inc(itype=BAD_DEPLOY):
         degradation_end=1070.0,
         expected_trigger=_TRIGGER[itype],
         expected_action=_ACTION[itype],
+        scheduled_end=1070.0,
     )
 
 

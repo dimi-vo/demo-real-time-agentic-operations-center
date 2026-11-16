@@ -7,9 +7,9 @@ import json
 import pytest
 
 from opsgen.driver import run_simulate
-from opsgen.engine import Config
+from opsgen.engine import BAD_DEPLOY, Config, Decision
 from opsgen.simulation import Simulation
-from opsgen.sinks import DryRunSink
+from opsgen.sinks import DryRunSink, format_event
 
 
 def test_dry_run_sink_emits_tagged_json_lines():
@@ -76,7 +76,7 @@ def test_simulate_quiet_period_before_first_incident():
 def test_simulate_banner_shows_the_schedule():
     first = _simulate(minutes=1).splitlines()[0]
     assert first == (
-        "# ops-sim --simulate 1min  (quiet=150s duration=20s gap=20s "
+        "# ops-sim --simulate 1min  (quiet=150s max=35s gap=20s "
         "rests: BAD_DEPLOY=390s TRAFFIC_SURGE=300s UPSTREAM_DROP=300s)"
     )
     assert _simulate(minutes=1, no_incidents=True).splitlines()[0] == "# ops-sim --simulate 1min  (no incidents)"
@@ -128,6 +128,30 @@ def test_no_incidents_simulate_has_no_incidents():
     text = _simulate(minutes=30, no_incidents=True)
     assert "INCIDENT START" not in text
     assert "DEPLOY" not in text
+
+
+def test_an_incident_end_line_says_who_resolved_it_and_when():
+    # D-065. A bad deploy on checkout from 0, its ROLLBACK read before tick 17.
+    sim = Simulation(1, start=0.0, config=Config(quiet_period=0))
+    picks = iter([(BAD_DEPLOY, "checkout")])
+    sim.engine._choose_incident = lambda now: next(picks, None)
+    sim.tick(0.0)
+    for k in range(1, 17):
+        sim.tick(float(k))
+    answer = Decision("checkout", 10.0, "release_agent", "LATENCY_HIGH", "ROLLBACK")
+    [end] = sim.tick(17.0, decisions=[answer])[2]
+    assert format_event(end, clock="00:17") == (
+        "[00:17] INCIDENT END    BAD_DEPLOY     checkout     rollback 4.2.2 -> 4.2.1, "
+        "resolved by release_agent ROLLBACK after 17 s"
+    )
+
+
+def test_simulate_without_decisions_every_incident_expires_at_the_cap():
+    # --simulate reads no decisions (D-065), so every incident runs its 35 s.
+    ends = [ln for ln in _simulate(minutes=60).splitlines() if "INCIDENT END" in ln]
+    assert len(ends) > 40
+    assert all(ln.endswith(" expired after 35 s") for ln in ends), ends
+    assert any(", expired after 35 s" in ln and "rollback" in ln for ln in ends)
 
 
 def test_cli_has_no_timing_flags():

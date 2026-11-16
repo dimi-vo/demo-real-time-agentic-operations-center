@@ -23,7 +23,7 @@ def one(args):
 
         def init(self, *a, **k):
             orig(self, *a, **k)
-            self.duration = eng.Config._dur
+            self.max_duration = eng.Config._dur
 
         eng.Config.__init__ = init
         eng.Config._patched = True

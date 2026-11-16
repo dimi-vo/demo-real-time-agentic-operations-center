@@ -187,7 +187,9 @@ def test_a_live_incident_record_draws_its_ground_truth(registry):
     from opsgen.engine import BAD_DEPLOY, Incident
     from opsgen.groundtruth import end_record, start_record
 
-    inc = Incident("INC0001", BAD_DEPLOY, "checkout", 1_800_000_000.0, 1_800_000_040.0, "LATENCY_HIGH", "ROLLBACK")
+    inc = Incident(
+        "INC0001", BAD_DEPLOY, "checkout", 1_800_000_000.0, 1_800_000_040.0, "LATENCY_HIGH", "ROLLBACK", 1_800_000_040.0
+    )
     deser = make_deserializer(registry)
     st = OpsWallState()
     for rec in (start_record(inc, 1_800_000_000.0), end_record(inc, 1_800_000_040.0)):

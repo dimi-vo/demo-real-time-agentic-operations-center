@@ -1721,6 +1721,11 @@ Amends D-029, D-031, D-042 and D-058.
 **Amended by D-064.** Detection now lands ~10 s after the start, not ~15 s: a 10 s spike is
 still flagged only as it ends, so 20 s stays the shortest spike that is on when flagged.
 
+**Amended by D-065.** Spikes are no longer a fixed 20 s: an incident lasts until an agent
+resolves it, or a 35 s cap (`Config.max_duration`) that ends mid-window on purpose. Offline,
+35 s has no echoes, where 30 s and 40 s (both on a boundary) have 80× and 670× those of 20 s.
+The rests stay 390/300/300 s, counted from the scheduled end; the rate is ~56 an hour.
+
 ### D-060 · DECISION · Per-service schedules: overlap, per-type rests, first three one of each type
 **What.** `ops-sim` had one global incident slot: one incident at a time, the next one
 240–360 s after the last ended, and a 420 s cooldown per service. About 10 incidents an
@@ -1790,6 +1795,12 @@ was 140 s; at 150 s the numbers above are unchanged, so D-059's results carry ov
   (rests, gap, weights, first three); the banner; `ops-sim --help` has no timing flags.
 
 Amends D-042.
+
+**Amended by D-065.** Incidents last up to 35 s (an agent's correct answer ends one early)
+and so end mid-window. The gap and the rests count from each incident's scheduled end
+(start + 35 s), not its actual end, so the schedule doesn't depend on what the agents do and
+still follows `--seed`. About 56 incidents an hour; a service's shortest gap between
+incidents is 25 s (T+35 to the boundary at T+60). The banner prints `max` for `duration`.
 
 ### D-061 · DECISION · The wall charts raw `service_metrics` latency and traffic
 **What.** The wall drew each metric as a lane: the injected incidents up, the detections
@@ -1972,3 +1983,161 @@ run the 2.4 INSERT and the agents again. **Pending (live check):** the wall's ti
 drops from 15 s to ~10 s.
 
 Amends D-054 and D-059.
+
+### D-065 · DECISION · Close the loop: a correct agent answer resolves its incident
+**What.** The demo's story is: an incident starts, the pipeline detects it, an agent decides
+what to do. The ops wall showed all three, but the agent's decision changed nothing: the
+generator kept degrading the service until the incident's fixed 20 s (D-059) ran out,
+whatever the agent said. A `ROLLBACK` that rolled nothing back, or a `SCALE_OUT` after which
+the surge carried on, made the last step of the story fake.
+**Options.**
+- Whether a decision acts at all: (a) keep agent decisions display-only; (b) ops-sim reads
+  `remediation_decisions` and a correct answer ends its incident early.
+- The length of an incident nobody fixes: a cap of 20 s (today), 30 s, 35 s or 40 s.
+- Where an early end leaves the schedule: gap and rests dated from (i) the actual end;
+  (ii) the scheduled end (start + cap).
+- When a fix takes effect: on the next tick, mid-window; or snapped to a window boundary.
+- How ops-sim reads the decisions: `read_committed` or `read_uncommitted`.
+**Choice.** (b), decided with the user in a grilling session on 2026-11-15/16
+(`.scratch/close-the-loop/spec.md`). An incident an agent ends is **resolved**; one that
+reaches the cap **expires**. ("Anomaly" stays what the detector flags; the generator ends
+*incidents*.)
+- **Which decision resolves which incident.** A decision resolves the active incident on its
+  `service_name` when its `action` is the incident's `expected_action` (`ROLLBACK`,
+  `SCALE_OUT` or `INVESTIGATE_UPSTREAM`), its `trigger` is the incident's
+  `expected_trigger`, its `window_end` is after the incident's `started_at` (so a stale
+  decision for an earlier incident can't end a new one), and the incident is still active
+  when the decision is read. The first match resolves it; later decisions for the same
+  incident, decisions arriving after it ended, and decisions matching no active incident are
+  ignored. `OBSERVE`, `INVALID` and a wrong action resolve nothing: the incident runs on, and
+  a correct answer for a later window of it can still resolve it.
+- **What resolving does.** The rule lives in the engine, `Engine.resolve(decision, now)`,
+  pure, no Kafka; `Simulation.tick(now, decisions=())` applies the decisions before ticking
+  the engine. A decision read before the tick at `now` makes that tick's metrics sample
+  normal, and the incident ends on that tick (`ended_at` = `now`), mid-window, not snapped to
+  a boundary. The end is an expiry, only sooner: a bad deploy fires its `ROLLBACK`
+  deployment record on that tick, and the end record goes to `service_incidents` with the
+  real `ended_at`. `ROLLBACK` always restores `previous_version`; the decision's `target` is
+  ignored (`evaluate` scores targets, D-045). `SCALE_OUT` only ends the surge:
+  `ready_replicas` and `desired_replicas` stay as they are (no ceiling exists, D-043, and
+  `SCALE` is reserved for a later project). The console line for an end says how it ended:
+  `resolved by release_agent ROLLBACK after 17 s` or `expired after 35 s`.
+- **The cap: 35 s** (`Config.max_duration`, was `Config.duration` 20 s). It ends mid-window
+  on purpose; a test pins it to a value that is not a multiple of 10.
+- **The schedule is dated from the scheduled end** (`Incident.scheduled_end`, start + 35 s):
+  the gap and the per-type rests count from there, not from the actual end. The rests stay
+  390/300/300 s (D-059). Incidents still start on a 10 s window boundary.
+- **Reading the decisions.** Live mode only. A consumer thread in `opsgen/decisions.py`
+  reads `remediation_decisions` with the card's Kafka key, Avro through Schema Registry (the
+  registered schema, as the wall does), a fresh group per launch, no offset commits,
+  `read_uncommitted`, from the topic's latest offset when it is assigned, so old decisions
+  are never replayed. It decodes each record onto a queue; the driver drains the queue
+  before every tick. If the topic is missing or can't be read, ops-sim warns once, keeps
+  retrying in the background, and keeps producing; meanwhile every incident expires at
+  35 s. `--dry-run` and `--simulate` never connect to Kafka, so every incident runs its 35 s.
+  There is no flag to turn the loop off: before lab 4.3 runs, there are no decisions to read.
+**Why.**
+- **35 s, not 30 or 40.** An incident that ends on a window boundary goes from a fully
+  spiked window to a fully normal one in one step, and that first normal window gets the
+  opposite traffic flag (an echo: the forecast is still pulled toward the spike, D-059). At
+  35 s the return to baseline splits over two windows, in two steps small enough to stay
+  inside the band. Measured
+  offline (table below): 35 s has no echoes, where 30 s and 40 s, which end on a boundary,
+  have 80× and 670× today's. It also removes almost all of D-059's fresh-start echoes (0.06
+  false alarms per service against 0.91). 40 s also starts to miss drops (57 in 122,000).
+- **Scheduled end, not actual end.** The schedule (which service, which type, when) is then
+  the same whatever the agents do, and the live schedule still follows `--seed`. Dated from
+  start + 35 s, the rate falls from ~59 to **~56 incidents an hour**; the mix stays
+  44/19/37%. `Engine` alone, seeded: 54 in the first hour for each of 20 seeds, 57 an hour
+  at steady state.
+- **Starts stay on a boundary** so the first window is all spike and detection stays in the
+  first window (100% in every scenario below).
+- **The fix lands on the next tick, mid-window.** Snapped to a boundary, every fix would
+  end on one and lose the mid-window benefit (row H below: a fix exactly at T+20).
+- **`read_uncommitted`** because Flink commits about once a minute (D-063): a committed
+  reader would see every decision after its incident had already expired. Accepted cost: a
+  decision from a transaction Flink later aborts can already have resolved an incident; its
+  replay finds the incident ended and is ignored.
+- **The loop never stops the generator.** A missing or unreadable topic only means
+  incidents expire, as they did before.
+**Evidence.** `scripts/tuning/research/close_loop.py`, output in
+`.scratch/close-the-loop/research/close_loop.out`: the real generator through the AR(1)
+replica at the labs' settings (12/360/99.95), scored with `evaluate`'s code, 2000 seeds × 3 h
+per scenario, the same seeds everywhere. A fix is modelled by ending the incident at the fix
+tick while the gap and rests are dated from start + cap.
+
+| Scenario | Incidents/h | Recall | Echoes /svc-h | Fresh-start false alarms /svc | Agent calls /incident |
+|---|---|---|---|---|---|
+| 20 s (today) | 59.0 | 100 % | 0.003 | 0.91 | 1.02 |
+| 30 s | 57.9 | 100 % | 0.239 | 1.00 | 1.02 |
+| **35 s, no fix** | **55.9** | **100 %** | **0.000** | **0.06** | **1.02** |
+| 40 s | 55.9 | 99.98 % | 1.997 | 0.99 | 1.02 |
+| 35 s cap, fixed at T+15 | 56.0 | 100 % | 0.000 | 0.07 | 1.02 |
+| 35 s cap, fixed at T+18 | 56.0 | 100 % | 0.000 | 0.11 | 1.02 |
+| 35 s cap, 80 % fixed at T+18 | 56.0 | 100 % | 0.002 | 0.10 | 1.02 |
+| H: 35 s cap, fixed at T+20 | 56.0 | 100 % | 0.006 | 0.94 | 1.02 |
+
+The harness reproduces D-059 (20 s at 99.9: 0.012 vs 0.013 echoes; 30 s: 1.71 vs 1.49).
+**Caveats:** after a big jump the replica's band is up to 1.5× wider than Confluent's, so
+live echo suppression may be weaker; a fix exactly on a boundary loses the benefit (row H,
+still no worse than today); fixes at T+21 to T+29 were not tested.
+**What does not change.**
+- No schema, DDL or Terraform change; no Flink statement changes. `service_incidents` gets
+  no new column.
+- The ops wall: the incident box already ends at `ended_at`, and the raw per-second chart
+  (D-061) shows the spike ending right after the block closes. D-054's 30 s ownership and
+  missed limits work unchanged with 35 s incidents.
+- `uv run evaluate`: only the comment on `UNLOGGED_TAIL_SECONDS` changes; 35 s fits its
+  100 s tail. No "resolved vs expired" count: without a column it could only be guessed
+  from durations. **Accepted scoring gap:** in the part-spike last window of a traffic
+  incident, an opposite flag counts as neither a false alarm nor a wrong direction
+  (`Incident.at_end`), though it is still an agent call that
+  `scripts/evaluation/decisions.py` attributes to the incident. Measured on 0.2–0.4% of
+  incidents (the fixed scenarios above).
+- A restart still drops the incidents in flight (D-060).
+**Impact.**
+- `opsgen/engine.py`: `Config.duration` (20) becomes `Config.max_duration` (35);
+  `Incident.scheduled_end` (start + `max_duration`, whole seconds); `degradation_end` starts
+  equal to it; `_end_incidents` dates `last_incident_end` and `last_type_end` from
+  `scheduled_end`; the module docstring and the `RESTS` comment (about 56 an hour).
+- `opsgen/driver.py`: the `--simulate` banner prints `max=35s` (was `duration=20s`).
+- `scripts/evaluation/detection.py`: the `UNLOGGED_TAIL_SECONDS` comment.
+- `scripts/tuning/research/close_loop.py` and `window_echoes.py` set `max_duration`;
+  `close_loop.py`'s self-check compares the stock engine with scenario C (35 s, no fix),
+  since the stock engine is no longer 20 s. Research scripts that run the stock `Config`
+  (`sweep.py`, `window_compare.py`, `window_phi.py`) now run 35 s incidents, so their
+  earlier outputs no longer reproduce exactly.
+- Tests (`opsgen/tests/test_engine.py`): every incident starts on a boundary and lasts
+  35 s; the cap is not a multiple of 10; about 56 an hour (54 in the first hour, 57 at
+  steady state); the shortest gap between incidents on a service is 25 s (T+35 to the
+  boundary at T+60); the gap and the rest count from `scheduled_end`.
+  `opsgen/tests/test_output.py`: the banner. Test helpers that build an `Incident` pass
+  `scheduled_end`.
+- `opsgen/engine.py`: `Decision` (`service_name`, `window_end` in epoch seconds,
+  `agent_name`, `trigger`, `action`; no Kafka types, no `target`); `Incident.resolved_by`
+  (`"<agent_name> <action>"`); `Engine.resolve(decision, now) -> bool` sets
+  `degradation_end` to `now`, so `_end_incidents` ends the incident (and rolls a bad deploy
+  back) on that tick. `tick` is unchanged. The module docstring states the resolve rule.
+- `opsgen/simulation.py`: `Simulation.tick(now, decisions=())` applies the decisions, in
+  order, before the engine ticks.
+- `opsgen/sinks.py`: `format_event`'s `INCIDENT END` line appends how it ended, after the
+  rollback for a bad deploy: `rollback 4.2.2 -> 4.2.1, resolved by release_agent ROLLBACK
+  after 17 s`, or `expired after 35 s`.
+- `opsgen/groundtruth.py`: unchanged; `end_record` already writes `ended_at` from
+  `degradation_end`, and a test pins it.
+- Tests: `opsgen/tests/test_engine.py` (a correct decision ends each type on the tick that
+  reads it, a bad deploy rolled back to its previous version; `OBSERVE`, `INVALID` and the
+  wrong capacity action leave it running to 35 s; a correct answer after an `OBSERVE`
+  still resolves; a wrong trigger, a `window_end` at or before the start, another service:
+  ignored; only the first correct decision counts, and none after the incident expired; the
+  schedule is identical whether every incident is resolved at T+15 or none is),
+  `opsgen/tests/test_simulation.py` (the end record's `ended_at` and a bad deploy's
+  `ROLLBACK` deployment record land on the resolving tick; that tick samples normal metrics
+  and the one before is still degraded), `opsgen/tests/test_output.py` (the resolved line;
+  without decisions, every `--simulate` incident expires after 35 s).
+**Pending (live check).**
+- The real time from an incident's start to its resolution. Detection lands when the first
+  window closes (~T+10, D-064); the answer time was estimated at ~8 s and never measured.
+- The live echo rate and fresh-start false alarms with 35 s incidents.
+
+Amends D-059 and D-060.

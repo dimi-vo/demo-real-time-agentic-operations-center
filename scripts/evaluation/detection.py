@@ -40,8 +40,9 @@ FRESH_START_SECONDS = 300.0
 ECHO_SECONDS = 60.0
 RESTART_SECONDS = 60.0
 # Only ended incidents are scored (their end record has arrived), so the newest rows may
-# belong to one still in progress. An incident lasts 20 s (D-059; 40 s under D-042, up to
-# 80 s with the old onset delay); rows ending 100 s before the newest row can't be part of one.
+# belong to one still in progress. An incident lasts up to 35 s (D-065; 20 s under D-059,
+# 40 s under D-042, up to 80 s with the old onset delay); rows ending 100 s before the newest
+# row can't be part of one.
 UNLOGGED_TAIL_SECONDS = 100.0
 
 LATENCY_HIGH = "LATENCY_HIGH"

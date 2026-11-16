@@ -128,7 +128,7 @@ c99.95 [conf=99.95] steady 59.2/h rests 390/300/300: 60.0 inc/h | mix 45/18/37% 
 - `w1:100.0`: % of incidents first flagged in window 1, 2, ... (`wmiss` = never flagged).
 
 Once a setup is chosen, carry it into the code: means in `opsgen/services.py`, spike sizes,
-duration and rests in `opsgen/engine.py`, detector settings in `sql/2.3_*.sql` and
+`max_duration` and rests in `opsgen/engine.py`, detector settings in `sql/2.3_*.sql` and
 `sql/2.4_service_health.sql`. Then confirm it on the real
 generator with `scripts.tuning.sweep` and live with `evaluate`. `tune.py`'s service constants
 (`MEDIAN`, `TYPES_OF`, `WEIGHTS`) and `sampler.py` mirror the simulator as of D-059/D-060.

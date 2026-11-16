@@ -187,7 +187,7 @@ def _gen_records(incident_id="INC0001", start=T0, duration=40):
     gen = GenIncident(
         incident_id=incident_id, type=BAD_DEPLOY, service_name="web-gateway",
         degradation_start=start, degradation_end=start + duration, expected_trigger="LATENCY_HIGH",
-        expected_action="ROLLBACK",
+        expected_action="ROLLBACK", scheduled_end=start + duration,
     )  # fmt: skip
     return start_record(gen, start), end_record(gen, start + duration)
 

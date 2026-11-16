@@ -11,11 +11,17 @@ import json
 import sys
 from datetime import datetime, timezone
 
-from opsgen.engine import BAD_DEPLOY, Event
+from opsgen.engine import BAD_DEPLOY, Event, Incident
 
 
 def _hms(epoch_seconds: float) -> str:
     return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).strftime("%H:%M:%S")
+
+
+def _how_it_ended(inc: Incident) -> str:
+    """`resolved by release_agent ROLLBACK after 17 s`, or `expired after 35 s` (D-065)."""
+    lasted = f"after {inc.degradation_end - inc.degradation_start:.0f} s"
+    return f"resolved by {inc.resolved_by} {lasted}" if inc.resolved_by else f"expired {lasted}"
 
 
 def format_event(ev: Event, clock: str | None = None) -> str:
@@ -32,9 +38,13 @@ def format_event(ev: Event, clock: str | None = None) -> str:
         )
     if ev.kind == "incident_end":
         inc = ev.incident
-        tail = f" rollback {ev.old_version} -> {ev.new_version}" if inc and inc.type == BAD_DEPLOY else ""
+        tail = []
+        if inc and inc.type == BAD_DEPLOY:
+            tail.append(f"rollback {ev.old_version} -> {ev.new_version}")
+        if inc:
+            tail.append(_how_it_ended(inc))
         itype = inc.type if inc else "?"
-        return f"[{when}] INCIDENT END    {itype:<14} {ev.service_name:<12}{tail}"
+        return f"[{when}] INCIDENT END    {itype:<14} {ev.service_name:<12} {', '.join(tail)}".rstrip()
     return f"[{when}] {ev.kind} {ev.service_name}"
 
 
