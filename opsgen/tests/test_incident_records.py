@@ -87,11 +87,11 @@ def test_driver_emits_two_records_per_incident(monkeypatch):
     k_counter = {"k": 0}
     real_tick = sim.tick
 
-    def stopping_tick(now):
+    def stopping_tick(now, decisions=()):
         k_counter["k"] += 1
         if k_counter["k"] > 600:  # 10 simulated minutes
             raise KeyboardInterrupt
-        return real_tick(now)
+        return real_tick(now, decisions)
 
     sim.tick = stopping_tick
     run_realtime(sim, sink, root=None)

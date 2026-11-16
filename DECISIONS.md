@@ -2135,6 +2135,37 @@ still no worse than today); fixes at T+21 to T+29 were not tested.
   `ROLLBACK` deployment record land on the resolving tick; that tick samples normal metrics
   and the one before is still degraded), `opsgen/tests/test_output.py` (the resolved line;
   without decisions, every `--simulate` incident expires after 35 s).
+- `opsgen/decisions.py` (new): `DecisionFeed(card)` tails `remediation_decisions` on one
+  daemon thread. Its consumer (`_build_consumer`) uses the card's Kafka key over SASL_SSL, a
+  fresh `ops-sim-decisions-<hex>` group per launch, `enable.auto.commit` off and
+  `read_uncommitted`; once the topic is found, every partition is assigned at `OFFSET_END`.
+  Values are decoded against the registered schema (`make_deserializer`, as the wall does)
+  by `decode_decision`, with `window_end` through `epoch_seconds` (a naive datetime is UTC,
+  D-048). `drain()` returns what was queued since the last call, in order, without
+  blocking. A missing topic, a failed lookup, assign or poll, a broker error on a message,
+  a Schema Registry failure and a record that doesn't decode (or lacks a field) are each
+  warned once on stderr; the feed retries every 3 s and skips bad records. `stop()` waits
+  about one poll (1.5 s) and no longer: a thread stuck in a metadata lookup to an
+  unreachable broker is a daemon and ends with the process, so Ctrl-C stays quick.
+- `opsgen/driver.py`: `tick_once(sim, sink, now, decisions, st_path)` is one second of live
+  output (drain the feed, tick, emit records, events and ground truth, save the state);
+  `run_realtime(..., decisions=None)` calls it every second and stops the feed on the way
+  out.
+- `opsgen/cli.py`: live mode builds `DecisionFeed(card)` after the `KafkaSink`, prints
+  "Reading remediation_decisions: a correct agent answer resolves its incident.", and
+  passes the feed to `run_realtime`. `--dry-run` and `--simulate` build none; no flag.
+  Module docstring updated.
+- Tests: `opsgen/tests/test_decisions.py` (a real Phase 4 decision round-trips through the
+  Avro pair against the table's registered schema shape, whose columns are checked against
+  `sql/sink_remediation_decisions.sql`; with a fake consumer, the feed queues every decision
+  and `drain` hands them over once, in order; a missing topic and an unreachable broker are
+  each warned once and retried; a record that doesn't decode is skipped with one warning; a
+  poll error is warned once per kind, and the end of a partition is no error; the consumer
+  built from the card reads uncommitted, never commits, gets a fresh group and is assigned
+  at `OFFSET_END`; the driver's tick step hands the drained decisions to `sim.tick`, so a
+  resolving tick emits the normal sample, the `ROLLBACK` deployment record and the end
+  record; `--dry-run` and `--simulate` build no feed, and live mode builds one and says so).
+  `opsgen/tests/test_incident_records.py`: its `sim.tick` wrapper passes the decisions on.
 **Pending (live check).**
 - The real time from an incident's start to its resolution. Detection lands when the first
   window closes (~T+10, D-064); the answer time was estimated at ~8 s and never measured.

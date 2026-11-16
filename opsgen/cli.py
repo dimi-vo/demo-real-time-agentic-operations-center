@@ -1,12 +1,17 @@
 """`uv run ops-sim` — the River Shop traffic and incident generator.
 
-  uv run ops-sim                         # live: produce to Kafka (Phase 2)
+  uv run ops-sim                         # live: produce to Kafka, read the agents' decisions
   uv run ops-sim --dry-run               # print raw events to stdout, no Kafka
   uv run ops-sim --dry-run --simulate 60 # fast synthetic clock, window summaries
   uv run ops-sim --dry-run --seed 42     # reproducible schedule and traffic
   uv run ops-sim --no-incidents          # baseline traffic only: no incidents, no deploys
 
-There are no timing flags: the schedule (quiet period, spike length, gap and rests) lives
+Live, ops-sim also tails `remediation_decisions`: an agent's correct answer resolves its
+incident on the next tick, and an incident nobody resolves expires at its 35 s cap (D-065).
+Before lab 4.3 there are no decisions, so every incident expires. `--dry-run` and
+`--simulate` never connect to Kafka, so there every incident expires too.
+
+There are no timing flags: the schedule (quiet period, incident cap, gap and rests) lives
 in `Config` in opsgen/engine.py (D-060).
 """
 
@@ -59,6 +64,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     # Live: produce to Kafka, loading the card and continuing from persisted state.
+    from opsgen.decisions import DecisionFeed
     from opsgen.kafka_io import KafkaSink
     from opsgen.state import load_state, state_path
     from scripts.common.credentials import load_card
@@ -73,7 +79,9 @@ def main(argv: list[str] | None = None) -> None:
     initial = load_state(state_path(root))
     sim = Simulation(args.seed, start=aligned_start(time.time()), config=config, initial_state=initial)
     print("Producing to service_metrics, service_deployments and service_incidents. Ctrl-C to stop.")
-    run_realtime(sim, KafkaSink(card), root=root)
+    sink = KafkaSink(card)
+    print("Reading remediation_decisions: a correct agent answer resolves its incident.")
+    run_realtime(sim, sink, root=root, decisions=DecisionFeed(card))
 
 
 if __name__ == "__main__":

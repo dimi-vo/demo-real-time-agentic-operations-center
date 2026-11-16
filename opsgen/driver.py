@@ -7,6 +7,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from opsgen.engine import INCIDENT_TYPES, WINDOW_SECONDS, Config, next_window_boundary
 from opsgen.groundtruth import end_record, start_record
@@ -14,6 +15,9 @@ from opsgen.services import service_names
 from opsgen.simulation import Simulation
 from opsgen.sinks import format_event
 from opsgen.state import save_state, state_path
+
+if TYPE_CHECKING:  # the feed needs Kafka; --dry-run and --simulate never import it
+    from opsgen.decisions import DecisionFeed
 
 
 def _mmss(seconds: int) -> str:
@@ -36,12 +40,38 @@ def wait_until(start: float) -> None:
         time.sleep(delay)
 
 
-def run_realtime(sim: Simulation, sink, root: Path | None = None) -> None:
+def tick_once(
+    sim: Simulation, sink, now: float, decisions: DecisionFeed | None = None, st_path: Path | None = None
+) -> None:
+    """One second of live output: tick with the decisions read since the last tick (so a
+    resolving one ends its incident on this tick, D-065), emit the records and events,
+    and save the state (every 5 s, and on any event) when `st_path` is given."""
+    metrics, deps, events = sim.tick(now, decisions.drain() if decisions is not None else ())
+    if deps:
+        sink.emit_deployments(deps)
+    sink.emit_metrics(metrics)
+    for ev in events:
+        sink.emit_event(ev)
+        if ev.incident is not None:
+            # Two records per incident: one at start (ended_at null) and one
+            # at end (both timestamps), tied by incident_id.
+            if ev.kind == "incident_start":
+                sink.emit_incident(start_record(ev.incident, ev.now))
+            elif ev.kind == "incident_end":
+                sink.emit_incident(end_record(ev.incident, ev.now))
+    if st_path is not None and (events or round(now - sim.start) % 5 == 0):
+        save_state(st_path, sim.state_snapshot())
+    sink.flush()
+
+
+def run_realtime(sim: Simulation, sink, root: Path | None = None, decisions: DecisionFeed | None = None) -> None:
     """Tick once per wall-clock second, emitting through `sink`, until Ctrl-C.
 
     When `root` is given, the generator's state (versions, incident counter) is saved.
     `--dry-run` passes root=None, so a dry run writes nothing and stays reproducible.
     The first tick is at `sim.start`; callers pass an `aligned_start` and this waits for it.
+    Live mode passes the `decisions` feed: each tick gets what it read since the last one,
+    and it is stopped on the way out.
 
     The schedule itself is not saved: on a restart, the incidents in flight when it stopped
     (up to one per service) never get their end record. Accepted (D-060): the wall keeps them
@@ -55,23 +85,7 @@ def run_realtime(sim: Simulation, sink, root: Path | None = None) -> None:
     k = 0
     try:
         while True:
-            now = start_wall + k
-            metrics, deps, events = sim.tick(now)
-            if deps:
-                sink.emit_deployments(deps)
-            sink.emit_metrics(metrics)
-            for ev in events:
-                sink.emit_event(ev)
-                if ev.incident is not None:
-                    # Two records per incident: one at start (ended_at null) and one
-                    # at end (both timestamps), tied by incident_id.
-                    if ev.kind == "incident_start":
-                        sink.emit_incident(start_record(ev.incident, ev.now))
-                    elif ev.kind == "incident_end":
-                        sink.emit_incident(end_record(ev.incident, ev.now))
-            if st_path is not None and (events or k % 5 == 0):
-                save_state(st_path, sim.state_snapshot())
-            sink.flush()
+            tick_once(sim, sink, start_wall + k, decisions, st_path)
             k += 1
             delay = (start_wall + k) - time.time()
             if delay > 0:
@@ -80,6 +94,9 @@ def run_realtime(sim: Simulation, sink, root: Path | None = None) -> None:
         if st_path is not None:
             save_state(st_path, sim.state_snapshot())
         sys.stderr.write("\nStopped.\n")
+    finally:
+        if decisions is not None:
+            decisions.stop()
 
 
 def schedule_settings(config: Config) -> str:
