@@ -1567,7 +1567,7 @@ for the simplified demo (`.scratch/simplify-demo/spec.md`, issue 05), chosen off
 replica for the issue-06 schedule (one schedule per service, incidents may overlap across
 services, 20 s between incidents on a service, per-type rests, first three one of each type,
 50/25/25; D-060). Attendees tune their own detectors later; that competition is out of scope.
-**Options.** Varied with `.scratch/simplify-demo/research/tune.py` (the per-second data
+**Options.** Varied with `scripts/tuning/research/tune.py` (the per-second data
 model, the issue-06 schedule, an AR(p) replica with any refit interval, scored with
 `evaluate`'s code): spike length 20/30 s (10 and 40 s from the earlier search), traffic means,
 spike sizes, `confidencePercentage`, `minTrainingSize`, `maxTrainingSize`, `p`, the refit
@@ -1713,7 +1713,8 @@ shortlisted: `d` 1 (follows level changes, D-029), STL (the data has no seasonal
   untouched latency, the sweep's traffic level.
 - Until D-060 lands, the old single-slot schedule (spacing 240–360 s, cooldown 420 s) runs
   with 20 s incidents; the rests above take effect with D-060.
-- Evidence: `.scratch/simplify-demo/research/tune.py` and its `t_*.out` outputs.
+- Evidence: `scripts/tuning/research/tune.py`; its `t_*.out` outputs are in
+  `.scratch/simplify-demo/research/`.
 
 Amends D-029, D-031, D-042 and D-058.
 
@@ -1761,8 +1762,9 @@ first minute of a run, where it used to take up to an hour for a surge. Tying th
 period to the warm-up means every incident lands in windows the detector scores.
 **Measured** (`Engine` alone, seeded): **60 incidents in the first hour for each of 500
 seeds**, **58.5 an hour at steady state** (hours 2–3 of 200 three-hour runs), mix
-44/19/37% (bad deploy, surge, drop), the same as the issue-05 harness (`research/tune.py`'s
-`schedule`, D-059's 59/h). The harness loops over the free services in random order and draws
+44/19/37% (bad deploy, surge, drop), the same as the issue-05 harness
+(`scripts/tuning/research/tune.py`'s `schedule`, D-059's 59/h). The harness loops over the
+free services in random order and draws
 a type for each; the engine draws a type, then a service. The two give the same rate, mix and
 per-service rates, and with the harness's 140 s quiet period the engine reproduces a
 type-first copy of it incident for incident (300 seeds × 3 h). The harness's quiet period
@@ -1945,8 +1947,9 @@ an incident's start to its detection, plus processing.
 - **(b) was measured offline and set aside.** Its detection would land at 10 s, not 6 s: a
   1-s deployments watermark still misses the window's end at the heartbeat on it (T+4 at
   T+5) and waits for the next one. And the detector gets worse. `sweep.py`'s generator and
-  AR(1) replica (6 seeds x 3 h, 1,062 incidents) caught every incident in its first window
-  at both sizes, but a 20 s spike becomes 4 windows, the fitted AR(1) coefficient rises from
+  AR(1) replica (`scripts/tuning/research/window_*.py`; 6 seeds x 3 h, 1,062 incidents)
+  caught every incident in its first window at both sizes, but a 20 s spike becomes 4
+  windows, the fitted AR(1) coefficient rises from
   ~0.47 to ~0.73, and the first normal window after every traffic spike is flagged the
   other way: 0 -> 7.9 false alarms per service-hour, all echoes. `maxTrainingSize` 720 left
   7.5; 10 s spikes left 2.2. 5-s windows would need D-059's tuning again.
