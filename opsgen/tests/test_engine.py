@@ -491,8 +491,26 @@ def test_incident_numbering_continues_after_a_restart(tmp_path):
     assert {n: d.version for n, d in second.deployments.items()} == {
         n: d.version for n, d in first.deployments.items()
     }
+    # D-067: and the highest version each service has run, so a deploy never reuses a number
+    assert {n: d.highest_version for n, d in second.deployments.items()} == {
+        n: d.highest_version for n, d in first.deployments.items()
+    }
     ids = []
     for now in range(1000, 1300):
         _, _, events = second.tick(float(now))
         ids += [ev.incident.incident_id for ev in events if ev.kind == "incident_start"]
     assert ids and ids[0] == f"INC{len(started) + 1:04d}"
+
+
+def test_a_state_file_without_highest_version_still_never_reuses_one():
+    # A state file saved before D-067 has no highest_version: it is the higher of the saved
+    # version and previous_version (after a rollback, previous_version is the bad one).
+    from opsgen.simulation import Simulation
+
+    saved = {
+        "services": {"checkout": {"version": "4.2.2", "previous_version": "4.2.3", "last_change": "ROLLBACK"}},
+        "incident_counter": 3,
+    }
+    sim = Simulation(1, start=0.0, initial_state=saved)
+    assert sim.deployments["checkout"].highest_version == "4.2.3"
+    assert sim.deployments["checkout"].deploy(10.0)[1] == "4.2.4"

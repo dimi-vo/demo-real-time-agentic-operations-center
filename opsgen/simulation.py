@@ -12,7 +12,7 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable
 
-from opsgen.deployments import DeploymentState
+from opsgen.deployments import DeploymentState, highest
 from opsgen.distributions import binomial, mean_latency_ms, poisson
 from opsgen.engine import Config, Decision, Engine, Event
 from opsgen.services import SERVICES
@@ -54,6 +54,9 @@ class Simulation:
                 state.previous_version = saved.get("previous_version", state.previous_version)
                 state.deployed_at = saved.get("deployed_at", state.deployed_at)
                 state.last_change = saved.get("last_change", state.last_change)
+                # A state file from before D-067 has no highest_version: after a rollback,
+                # previous_version holds the rolled-back one, so the higher of the two is it.
+                state.highest_version = highest(saved.get("highest_version"), state.version, state.previous_version)
             self.deployments[svc.name] = state
         self.engine = Engine(rng=self.sched_rng, start=start, config=self.config)
         # Continue incident numbering across restarts: ops-wall pairs each incident's start
@@ -143,13 +146,14 @@ class Simulation:
         return metrics, dep_records, events
 
     def state_snapshot(self) -> dict:
-        """The persistable state: each service's deployment (versions, deployed_at) and
-        the last incident number used."""
+        """The persistable state: each service's deployment (versions, the highest version
+        it has run, deployed_at) and the last incident number used."""
         return {
             "services": {
                 name: {
                     "version": d.version,
                     "previous_version": d.previous_version,
+                    "highest_version": d.highest_version,
                     "deployed_at": d.deployed_at,
                     "last_change": d.last_change,
                 }

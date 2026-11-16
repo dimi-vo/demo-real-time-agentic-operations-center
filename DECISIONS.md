@@ -1441,6 +1441,11 @@ data. No change to Terraform, the schemas or the DDL. Tests: `CANDIDATES` is pin
 `reset-health` tests use the kept services and count three. The remaining `401`s in
 `scripts/preprovisioned/` and its tests are Confluent Cloud API answers, not `auth`.
 
+**Amended by D-067.** `web-gateway` is no longer a candidate of any shared incident type:
+`BAD_DEPLOY`, `TRAFFIC_SURGE` and `UPSTREAM_DROP` all go to `checkout` and `payments`.
+web-gateway deploys on its own clock; its bad deploys are `BAD_DEPLOY_ERRORS`, flagged by an
+error-rate threshold in lab 2.2.
+
 ### D-057 · DECISION · No benign deploys
 **What.** `ops-sim` deployed a random healthy service every 3-5 minutes (first at 60 s): a
 patch-version bump that changed no metric, so the temporal join had versions to follow
@@ -1472,6 +1477,11 @@ Terraform and the schemas are unchanged. Tests: an hour of `--no-incidents` sees
 heartbeat after the bootstrap (`opsgen/tests/test_engine.py`); version changes come only
 from bad deploys and their rollbacks; `--simulate` shows every deploy as a `BAD DEPLOY`;
 the tests that relied on a benign deploy force a bad one. Amends D-021 and D-042.
+
+**Amended by D-067.** Good deploys come back on web-gateway only, on its own deploy clock:
+an error-rate threshold has no false alarm that could turn one into a wrong rollback.
+checkout and payments still have none. A deploy now bumps past the highest version the
+service has run, so a rolled-back version's number is never reused.
 
 ### D-058 · DECISION · `service_metrics`: one record per service per second
 **What.** `ops-sim` wrote one `service_requests` record per HTTP request: instance, route,
@@ -1570,6 +1580,11 @@ latency effect), drop ×0.1 and bad deploy ×4 latency.
 
 **Amended by D-061.** The wall's Rate and Errors come from the last 10 s of
 `service_metrics` samples, not from `service_health`.
+
+**Amended by D-067.** `error_count` is read again, by lab 2.2 only: web-gateway's error
+rate over a 10-second window against a fixed 25 % threshold, written to
+`service_error_rate`. `service_health` still has no error columns, and the ARIMA labs
+(renumbered 2.3–2.5) still don't read it.
 
 ### D-059 · DECISION · Tuned data and reference detector: 20 s spikes, 50/30/30, confidence 99.95
 **What.** Workshop preparation: the data settings and **our** reference detector settings
@@ -1811,6 +1826,11 @@ and so end mid-window. The gap and the rests count from each incident's schedule
 (start + 35 s), not its actual end, so the schedule doesn't depend on what the agents do and
 still follows `--seed`. About 56 incidents an hour; a service's shortest gap between
 incidents is 25 s (T+35 to the boundary at T+60). The banner prints `max` for `duration`.
+
+**Amended by D-067.** The shared scheduler serves `checkout` and `payments` only.
+web-gateway has its own deploy clock with its own RNG (`seed + 2`): a deploy every 60–90 s,
+bad with probability ½, outside the quiet period, the gap, the rests and the "one of each"
+rule.
 
 ### D-061 · DECISION · The wall charts raw `service_metrics` latency and traffic
 **What.** The wall drew each metric as a lane: the injected incidents up, the detections
@@ -2253,3 +2273,124 @@ failed start tested on their own), `tests/test_reset_health.py`. No JS test setu
 the page is a manual check.
 
 Supersedes D-053. Amends D-036, D-054 and D-061.
+
+**Amended by D-067.** web-gateway's card shows one chart, errors per second in % (linear,
+0–100 %, a line at 25 %), with a mark at every deploy and rollback; checkout and payments
+keep latency and traffic. The per-sample `errors` comes back for that chart, and the wall
+reads `service_error_rate`. The deploy marks settle part of the `service_deployments`
+review: the consumer stays.
+
+### D-067 · DECISION · web-gateway is detected by an error-rate threshold
+**What.** Every service was detected the same way: `ML_DETECT_ANOMALIES` (ARIMA) on
+10-second windows of latency and traffic. That is the hardest detector in the workshop, and
+it is the first one attendees meet. The labs should build up: begin with something simpler
+of the same shape (the simulator produces metrics, a Flink statement inspects them and flags
+the agent, the agent's answer closes the loop, D-065), then move to ARIMA.
+**Options.**
+- The signal: (a) `error_count`, display only until now (D-058); (b) latency or traffic
+  against a fixed bound.
+- The window: (a) 10 s tumbling; (b) 10 s sliding, moving 1 s at a time.
+- Where the flag goes: (a) its own narrow table; (b) error columns on `service_health`,
+  written by a second INSERT.
+- web-gateway's bad deploy: (a) a new incident type; (b) `BAD_DEPLOY` with a per-service
+  effect and trigger.
+- web-gateway's schedule: (a) its own deploy clock; (b) the shared scheduler with a shorter
+  rest.
+- Surges, whose only candidate was web-gateway: (a) move them to checkout and payments;
+  (b) drop them.
+**Choice.** (a) each time, decided with the user in a grilling session on 2026-11-16
+(`.scratch/web-gateway-threshold/spec.md`). The story for web-gateway: a deploy happens, a
+lot of requests start failing, so it must have been a bad deploy; the release agent answers
+ROLLBACK and the errors stop.
+- **web-gateway** leaves the shared scheduler and gets its own deploy clock, with its own
+  RNG (`Random(seed + 2)`). The first deploy is on the first window boundary at or after
+  start + 60 s and is good; the second is bad. After that, each deploy is on a boundary 60,
+  70, 80 or 90 s (uniform) after the previous one started, bad with probability ½, never
+  three good in a row. The clock is dated from the starts, so it is the same however
+  incidents end. The quiet period doesn't apply. A good deploy is a deployment record
+  (`last_change = DEPLOY`) and nothing else. A bad deploy is the same record plus a
+  `BAD_DEPLOY_ERRORS` incident: 40 % of requests fail, traffic and latency stay normal,
+  expected trigger `ERROR_RATE_HIGH`, expected action `ROLLBACK`, capped at 35 s and
+  resolved like any incident (D-065). `--no-incidents`: web-gateway doesn't deploy.
+- **checkout and payments** keep the shared scheduler and its three types, now with both of
+  them as candidates for each (`TRAFFIC_SURGE` gains them, `BAD_DEPLOY` loses web-gateway).
+  Their bad deploys keep latency ×4 and 12 % errors. The quiet period, the "first three are
+  one of each" rule, the gap and the rests stay, unless an offline re-check of detection
+  (×5 surges at 30 rps, three types per service) finds it worse than before.
+- **Versions never repeat.** A deploy bumps the patch past the highest version the service
+  has run, on every service. Before, it bumped the current version, so the first deploy
+  after a rollback reused the bad version's number. The generator state file (D-046) keeps
+  the highest version; a file without it uses the higher of the saved `version` and
+  `previous_version`.
+- **Lab 2.2** (new): the 2.1 temporal join plus `error_count`, web-gateway only, a 10 s
+  `TUMBLE`, `error_rate = SUM(error_count) / SUM(traffic_count)`, and `error_status` `HIGH`
+  when `SUM(error_count) >= 0.25 * SUM(traffic_count)` (never with no requests), else
+  `NORMAL`. Every window goes to a new table, `service_error_rate` (12 columns: service,
+  window, `traffic_count`, `error_count`, `error_rate`, `error_status`, the deployment
+  context, `detected_at`), created by the platform team's Terraform like the others (D-050).
+- **ARIMA** moves to labs 2.3–2.5 (the files are renamed) and reads
+  `WHERE m.service_name IN ('checkout', 'payments')`.
+- **The agent.** The release agent takes `ERROR_RATE_HIGH` too: a second INSERT,
+  `4.3_insert_release_agent_errors.sql`, reads `service_error_rate` where
+  `error_status = 'HIGH'` and runs before the latency INSERT. The prompt names both
+  triggers; its decision rules don't change. The capacity agent's `SCALE_OUT` example moves
+  off web-gateway.
+- **The wall.** web-gateway's card shows one chart, errors per second in % (linear, 0–100 %,
+  a line at 25 %), with a mark at every deploy and rollback. The wall reads
+  `service_error_rate`.
+- `uv run evaluate` scores `ERROR_RATE_HIGH`; `uv run reset-health` covers
+  `service_error_rate`.
+**Why.**
+- A fixed threshold on one metric is the simplest detector with ARIMA's shape, and errors
+  are what a bad deploy is known by.
+- Tumbling: incidents start on a window boundary, so the first window after a bad deploy is
+  bad for all 10 s: one detection, one answer. A sliding window fires about 5 s sooner, but
+  then every second until the rollback and for a few seconds after it, calling the agent
+  each time; and it would be a new kind of window in the simplest lab.
+- A narrow table keeps the first INSERT small. On `service_health` it would fill most of 22
+  columns with typed NULLs.
+- The engine and the wall key everything by incident type (candidates, effect, trigger,
+  action, rest, `INCIDENT_METRIC`). A new type fits that; one `BAD_DEPLOY` with per-service
+  effects would add per-service exceptions in the engine, the wall and `evaluate`.
+- In the shared scheduler, web-gateway would share the RNG (its draws would shift checkout's
+  and payments' schedule for a seed), the "one of each" rule (a type only one side can take
+  can hold the other side back) and the quiet period (ARIMA's warm-up, which a threshold
+  doesn't need). On its own clock its bad deploys can come often, about 24 an hour against
+  about 8 per service before, without touching the other two.
+- Good deploys, back on web-gateway only, show that the rule reacts to the errors, not to
+  the deploy. D-057 removed them because an ARIMA latency false alarm soon after one rolled
+  back a healthy version; a 0.5 % baseline against a 25 % threshold has no such false alarm.
+  The reason still holds for checkout and payments.
+- With good deploys, "3.4.4 is bad, rolled back, then 3.4.4 deployed again and fine" would
+  contradict itself.
+- Surges move rather than go, so the capacity agent keeps both of its answers and ARIMA's
+  traffic detector keeps seeing changes in both directions.
+**Measured.** Offline, the share of web-gateway windows (50 rps, about 500 requests) at or
+above 25 % when *k* of their 10 seconds fail at the bad-deploy rate and the rest at 0.5 %;
+`opsgen.distributions`, 20,000 windows per cell, seed 1
+(`.scratch/web-gateway-threshold/research/threshold_check.py`):
+
+| bad rate | k = 10 | k = 5 | k = 3 | k ≤ 2 |
+|---|---|---|---|---|
+| 0.30 | 99.38 % | 0 % | 0 % | 0 % |
+| 0.35 | 100 % | 0.01 % | 0 % | 0 % |
+| **0.40** | **100 %** | **0.54 %** | 0 % | 0 % |
+| 0.45 | 100 % | 11.6 % | 0 % | 0 % |
+| 0.50 | 100 % | 55.3 % | 0 % | 0 % |
+
+k = 10 is the first window after a bad deploy. k = 1–3 is the window the rollback lands in
+when an agent answers (about 1 s after detection, D-066). k = 5 is the window an expired
+incident ends in: at 0.40, 0.5 % of those are flagged again, with `last_change = ROLLBACK`,
+so the release agent answers OBSERVE.
+**Pending (live).** The time from a web-gateway bad deploy to its rollback; the release
+agent's answers to `ERROR_RATE_HIGH` (ROLLBACK, right target); ARIMA's recall, false alarms
+and echoes on checkout and payments with surges.
+**Open.** Lab 2.2 now teaches `TUMBLE` first, so the windowing-only step of the old 2.2
+(`2.3_window_metrics.sql` after the rename) may be redundant. Kept for now.
+**Impact.** Issue 01 (versions): `opsgen/deployments.py` (`DeploymentState.highest_version`,
+`highest()`), `opsgen/simulation.py` (restores it, `state_snapshot` saves it),
+`opsgen/state.py` (docstring). Tests: `opsgen/tests/test_deployments.py` (no version
+reused after a rollback, numeric order), `opsgen/tests/test_engine.py` (a restart keeps the
+highest version; a state file from before D-067). The spec's other issues add theirs.
+
+Amends D-056, D-057, D-058, D-060 and D-066.
