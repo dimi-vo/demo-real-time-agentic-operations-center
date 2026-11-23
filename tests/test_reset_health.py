@@ -149,6 +149,14 @@ def test_nothing_running_still_empties_the_topics_and_exits_zero(run, capsys):
     assert "No running statement writes" in capsys.readouterr().out
 
 
+def test_the_next_steps_name_every_insert_in_lab_order(run, capsys):
+    run(statements=[])
+    out = capsys.readouterr().out
+    steps = [out.index(s) for s in ("INSERT INTO service_error_rate", "INSERT INTO service_health",
+                                      "4.3_insert_release_agent_errors.sql")]  # fmt: skip
+    assert steps == sorted(steps)
+
+
 def test_a_missing_topic_is_reported_and_exits_nonzero(run, capsys):
     with pytest.raises(SystemExit) as exit_:
         run(topics=("service_health",))

@@ -1,4 +1,5 @@
--- 4.3 Fan-out leg 1: latency anomalies to the release agent.
+-- 4.3 Fan-out leg 2: latency anomalies to the release agent (leg 1 is its error-rate
+-- breaches, 4.3_insert_release_agent_errors.sql).
 --
 -- Routing is mutually exclusive with the capacity leg: a window where traffic is also
 -- anomalous is a load problem, not a release problem, so it goes to the capacity agent

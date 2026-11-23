@@ -1,4 +1,4 @@
--- 4.3 Fan-out leg 2: traffic anomalies to the capacity agent.
+-- 4.3 Fan-out leg 3: traffic anomalies to the capacity agent.
 --
 -- Routing is mutually exclusive with the release leg (see 4.3_insert_release_agent.sql):
 -- this one takes every window where traffic is HIGH or LOW, whatever latency is doing.

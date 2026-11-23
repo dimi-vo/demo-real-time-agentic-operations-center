@@ -1,8 +1,8 @@
 """The section 4 files must keep the contract the agents, the table and the scorer share.
 
-`remediation_decisions` is written by two INSERT statements and read by
+`remediation_decisions` is written by three INSERT statements and read by
 `uv run evaluate`, so the column list, the allowed actions, the output format and the
-routing rules exist in four places at once (two prompts, two INSERTs, one DDL, one
+routing rules exist in several places at once (two prompts, three INSERTs, one DDL, one
 scorer). These tests fail when they drift apart.
 """
 
@@ -23,7 +23,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SQL = ROOT / "sql"
 
 AGENT_FILES = {RELEASE_AGENT: "4.2_release_agent.sql", CAPACITY_AGENT: "4.2_capacity_agent.sql"}
-INSERT_FILES = {RELEASE_AGENT: "4.3_insert_release_agent.sql", CAPACITY_AGENT: "4.3_insert_capacity_agent.sql"}
+# Each INSERT: the agent it calls and the table it reads. The release agent has two legs:
+# error-rate breaches (lab 2.2's table, D-067) and latency anomalies.
+INSERTS = {
+    "4.3_insert_release_agent_errors.sql": (RELEASE_AGENT, "service_error_rate"),
+    "4.3_insert_release_agent.sql": (RELEASE_AGENT, "service_health"),
+    "4.3_insert_capacity_agent.sql": (CAPACITY_AGENT, "service_health"),
+}
+ERRORS_INSERT, LATENCY_INSERT, CAPACITY_INSERT = INSERTS
 TABLE_FILE = "sink_remediation_decisions.sql"
 
 # Brief section 5.5, cut down in D-034.
@@ -52,13 +59,43 @@ def test_prompt_states_the_three_output_lines_in_order(agent):
         assert line not in prompt, "D-034 cut the output down to three lines"
 
 
+def _examples(prompt: str) -> list[tuple[str, str]]:
+    """(action, the example's text) for every `Correct <ACTION> example:` block."""
+    head = prompt[: prompt.index("\n---\n")]
+    parts = re.split(r"Correct (\w+) example:", head)
+    return list(zip(parts[1::2], parts[2::2], strict=True))
+
+
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_prompt_has_one_example_answer_per_allowed_action(agent):
-    prompt = read(AGENT_FILES[agent])
-    for action in ALLOWED_ACTIONS[agent]:
-        assert f"Correct {action} example:" in prompt
-    # Every example starts with the Action line, so counting them counts the examples.
-    assert prompt.count("Correct ") == len(ALLOWED_ACTIONS[agent])
+def test_prompt_has_an_example_answer_for_every_allowed_action_and_no_other(agent):
+    examples = _examples(read(AGENT_FILES[agent]))
+    assert {action for action, _ in examples} == set(ALLOWED_ACTIONS[agent])
+    for action, text in examples:
+        assert f"Action: {action}\n" in text
+
+
+def test_the_release_prompt_rolls_back_on_either_trigger():
+    """D-067: the release agent answers latency anomalies and error-rate breaches by the same
+    rule. With a ROLLBACK example for only one of them, the model could learn the trigger
+    instead of the rule (errors roll back, latency is observed)."""
+    prompt = read(AGENT_FILES[RELEASE_AGENT])
+    rollbacks = [text for action, text in _examples(prompt) if action == "ROLLBACK"]
+    assert any("latency" in t for t in rollbacks) and any("error rate" in t for t in rollbacks)
+    assert "LATENCY_HIGH" in prompt and "ERROR_RATE_HIGH" in prompt
+    assert "25 percent" in prompt
+
+
+def test_examples_put_each_trigger_on_a_service_that_gets_it():
+    """D-067: web-gateway's only incident is an error-rate breach, checkout gets surges and
+    payments drops, so an example must not pair web-gateway with latency or traffic."""
+    for action, text in _examples(read(AGENT_FILES[RELEASE_AGENT])):
+        if "Web-gateway" in text:
+            assert "error rate" in text and "latency" not in text, (action, text)
+    capacity = read(AGENT_FILES[CAPACITY_AGENT])
+    assert "web-gateway" not in capacity.lower()
+    examples = dict(_examples(capacity))
+    assert examples["SCALE_OUT"].split("Reason: ", 1)[1].startswith("Checkout")
+    assert examples["INVESTIGATE_UPSTREAM"].split("Reason: ", 1)[1].startswith("Payments")
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
@@ -89,34 +126,37 @@ def test_agent_continues_on_a_failed_model_call(agent):
     assert "'max_consecutive_failures'" in sql, "the documented default is contradictory; set it"
 
 
-@pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_insert_calls_its_own_agent_by_name_as_a_string(agent):
+@pytest.mark.parametrize("name", INSERTS)
+def test_insert_calls_its_own_agent_by_name_as_a_string(name):
     """The docs type the first AI_RUN_AGENT argument as STRING (D-033)."""
-    sql = read(INSERT_FILES[agent])
+    agent, _ = INSERTS[name]
+    sql = read(name)
     assert f"AI_RUN_AGENT(\n  '{agent}'," in sql
     assert sql.count(f"'{agent}'") == 2, "once as the written agent_name, once as the call"
 
 
-@pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_insert_filters_below_the_lateral_join(agent):
+@pytest.mark.parametrize("name", INSERTS)
+def test_insert_filters_below_the_lateral_join(name):
     """The agent must be called once per anomalous row, not once per window: the WHERE
     sits in a derived table that is the left input of the LATERAL join."""
-    sql = read(INSERT_FILES[agent])
+    _, table = INSERTS[name]
+    sql = read(name)
     where = sql.index("WHERE")
     assert where < sql.index("LATERAL TABLE")
-    assert sql.index("FROM `service_health`") < where
+    assert sql.index(f"FROM `{table}`") < where
 
 
-@pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_insert_reads_service_health_from_the_latest_offset(agent):
+@pytest.mark.parametrize("name", INSERTS)
+def test_insert_reads_its_table_from_the_latest_offset(name):
     """Brief 5.5: starting a statement must not replay history through the model."""
-    sql = read(INSERT_FILES[agent])
-    assert "`service_health` /*+ OPTIONS('scan.startup.mode'='latest-offset') */" in sql
+    _, table = INSERTS[name]
+    assert f"`{table}` /*+ OPTIONS('scan.startup.mode'='latest-offset') */" in read(name)
 
 
-@pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_insert_maps_a_failed_or_out_of_set_answer_to_invalid(agent):
-    sql = read(INSERT_FILES[agent])
+@pytest.mark.parametrize("name", INSERTS)
+def test_insert_maps_a_failed_or_out_of_set_answer_to_invalid(name):
+    agent, _ = INSERTS[name]
+    sql = read(name)
     assert "`agent_status` = 'SUCCESS'" in sql
     assert "ELSE 'INVALID'" in sql
     for action in ALLOWED_ACTIONS[agent]:
@@ -127,13 +167,37 @@ def test_insert_maps_a_failed_or_out_of_set_answer_to_invalid(agent):
 
 
 def test_routing_is_mutually_exclusive():
-    """No window may reach both agents: traffic anomalies go to capacity, and the
-    release leg takes latency only when traffic is normal."""
-    assert "WHERE `traffic_status` IN ('HIGH', 'LOW')" in read(INSERT_FILES[CAPACITY_AGENT])
-    assert (
-        "WHERE `latency_status` = 'HIGH' AND `traffic_status` NOT IN ('HIGH', 'LOW')"
-        in read(INSERT_FILES[RELEASE_AGENT])
-    )
+    """No window may reach two legs: traffic anomalies go to capacity, the latency leg takes
+    latency only when traffic is normal, and the error-rate leg reads service_error_rate,
+    where only web-gateway has rows (web-gateway has none in service_health, D-067)."""
+    assert "WHERE `traffic_status` IN ('HIGH', 'LOW')" in read(CAPACITY_INSERT)
+    assert "WHERE `latency_status` = 'HIGH' AND `traffic_status` NOT IN ('HIGH', 'LOW')" in read(LATENCY_INSERT)
+    assert "WHERE `error_status` = 'HIGH'" in read(ERRORS_INSERT)
+
+
+@pytest.mark.parametrize(("name", "trigger"), [(ERRORS_INSERT, "ERROR_RATE_HIGH"), (LATENCY_INSERT, "LATENCY_HIGH")])
+def test_each_release_leg_writes_and_tells_its_own_trigger(name, trigger):
+    sql = read(name)
+    head = sql[sql.index("INSERT INTO") : sql.index("CASE")]
+    assert f"'{trigger}'," in head, "the written trigger"
+    assert f"'Trigger: {trigger}\\n'" in sql, "the trigger line the agent reads"
+
+
+def _parsing(sql: str) -> str:
+    """The Action, Target and Reason expressions: from the first CASE to the raw response."""
+    return sql[sql.index("  CASE") : sql.index("  a.`agent_response`\nFROM")]
+
+
+def test_both_release_legs_parse_the_answer_the_same_way():
+    assert _parsing(read(ERRORS_INSERT)) == _parsing(read(LATENCY_INSERT))
+
+
+def test_the_error_rate_leg_tells_the_agent_the_rate_against_the_threshold():
+    sql = read(ERRORS_INSERT)
+    for line in ("'Error Rate: '", "'  Threshold: 25 %\\n'", "'Errors: '", "' requests\\n'",
+                 "'Last Change: '", "'  Seconds Since Deploy: '", "'Previous Version: '"):  # fmt: skip
+        assert line in sql, line
+    assert "ROUND(h.`error_rate` * 100, 1)" in sql
 
 
 def test_table_declares_the_columns_in_order(table_sql):
@@ -153,11 +217,12 @@ def test_table_is_created_by_the_platform_team_and_can_be_emptied(table_sql):
     assert "'kafka.cleanup-policy' = 'delete'" in table_sql
 
 
-@pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_inserts_start_with_the_four_identity_columns(agent):
-    """Both INSERTs are positional: the first four values are the identity columns, in
+@pytest.mark.parametrize("name", INSERTS)
+def test_inserts_start_with_the_four_identity_columns(name):
+    """The INSERTs are positional: the first four values are the identity columns, in
     the DDL's order. The rest is checked by the arity test below."""
-    sql = read(INSERT_FILES[agent])
+    agent, _ = INSERTS[name]
+    sql = read(name)
     head = sql[sql.index("INSERT INTO") : sql.index("CASE")]
     assert "h.`window_end`," in head and "h.`service_name`," in head
     assert head.index("h.`window_end`") < head.index("h.`service_name`") < head.index(f"'{agent}'")
@@ -165,7 +230,7 @@ def test_inserts_start_with_the_four_identity_columns(agent):
 
 def test_capacity_insert_computes_the_replica_suggestion_in_sql():
     """Brief 5.5: the arithmetic is deterministic, the agent only decides to use it."""
-    sql = read(INSERT_FILES[CAPACITY_AGENT])
+    sql = read(CAPACITY_INSERT)
     assert "GREATEST(" in sql and "CEIL(" in sql
     assert "Suggested Replicas: " in sql, "the computed value must reach the prompt"
     # D-043: no autoscaling ceiling, so no cap and no Max Replicas in the prompt.
@@ -190,14 +255,14 @@ def test_suggested_replicas_matches_the_sql_formula(ready, count, expected, want
 
 def test_escalate_is_gone_from_every_agent_file():
     """D-043: every incident type has exactly one correct answer, and none is ESCALATE."""
-    for name in (*AGENT_FILES.values(), *INSERT_FILES.values(), TABLE_FILE):
+    for name in (*AGENT_FILES.values(), *INSERTS, TABLE_FILE):
         assert "ESCALATE" not in read(name), name
 
 
-@pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_inserts_select_exactly_as_many_values_as_the_table_has_columns(table_sql, agent):
-    """Both INSERTs are positional: a missing or extra value shifts every column."""
-    sql = read(INSERT_FILES[agent])
+@pytest.mark.parametrize("name", INSERTS)
+def test_inserts_select_exactly_as_many_values_as_the_table_has_columns(table_sql, name):
+    """The INSERTs are positional: a missing or extra value shifts every column."""
+    sql = read(name)
     head = sql[sql.index("INSERT INTO") : sql.index("FROM (")]
     body = head[head.index("SELECT") + len("SELECT") :]
     depth, items = 0, 1
@@ -210,5 +275,5 @@ def test_inserts_select_exactly_as_many_values_as_the_table_has_columns(table_sq
 def test_no_select_star_with_extra_expressions():
     """`SELECT *, expr` is not worth the parser risk; the capacity leg lists its
     columns (D-033)."""
-    for name in INSERT_FILES.values():
+    for name in INSERTS:
         assert "*," not in read(name)

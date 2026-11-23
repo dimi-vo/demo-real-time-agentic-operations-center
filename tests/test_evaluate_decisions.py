@@ -292,7 +292,7 @@ def _main_with_tables(monkeypatch, capsys, decisions):
 def test_an_empty_decisions_topic_skips_the_decision_half(monkeypatch, capsys):
     out = _main_with_tables(monkeypatch, capsys, decisions=[])
     assert "decision half is skipped" in out
-    assert "Run the two agent INSERTs" in out
+    assert "Run the agent INSERTs" in out
     assert "Create it with" not in out  # the table is the platform team's, nobody creates it in a lab
 
 

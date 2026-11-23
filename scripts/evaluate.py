@@ -213,7 +213,7 @@ def main(argv: list[str] | None = None) -> None:
     if records is None:
         console.print(
             f"\n[dim]No decisions in `{args.decisions_topic}` yet — the decision half is skipped. "
-            f"Run the two agent INSERTs (sql/4.3_insert_*.sql) to fill it.[/dim]"
+            f"Run the agent INSERTs (sql/4.3_insert_*.sql) to fill it.[/dim]"
         )
         return
     decisions = [DecisionRow.from_record(r) for r in records]

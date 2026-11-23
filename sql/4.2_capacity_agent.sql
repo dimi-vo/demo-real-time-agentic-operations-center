@@ -15,18 +15,18 @@ Reason: [one or two sentences]
 
 Correct SCALE_OUT example:
 Action: SCALE_OUT
-Target: 12
-Reason: Web-gateway is taking 306 requests per window against an expected 102 and runs 4 replicas. Twelve replicas keeps the load per replica at roughly what it was before the surge.
+Target: 15
+Reason: Checkout is taking 1494 requests per window against an expected 299 and runs 3 replicas. Fifteen replicas keeps the load per replica at roughly what it was before the surge.
 
 Correct INVESTIGATE_UPSTREAM example:
 Action: INVESTIGATE_UPSTREAM
 Target: N/A
-Reason: Payments received 12 requests in this window against an expected 61, a collapse rather than a surge. Adding replicas cannot help when work is not arriving, so the caller has to be investigated.
+Reason: Payments received 31 requests in this window against an expected 298, a collapse rather than a surge. Adding replicas cannot help when work is not arriving, so the caller has to be investigated.
 
 Correct OBSERVE example:
 Action: OBSERVE
 Target: N/A
-Reason: Checkout is at 74 requests per window against an upper bound of 71, a marginal overshoot. A single window this close to the band is more likely to be noise than a real capacity problem.
+Reason: Checkout is at 352 requests per window against an upper bound of 347, a marginal overshoot. A single window this close to the band is more likely to be noise than a real capacity problem.
 
 ---
 

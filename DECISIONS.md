@@ -2476,6 +2476,25 @@ no lab runs `ML_DETECT_ANOMALIES` on web-gateway; for 2.2: web-gateway only, the
 sums at 0.25 with the zero-traffic guard, the INSERT body is the query, the column order in
 the query and the DDL, the DDL types, `detected_at`, earliest offsets and the 10-second
 window; D-058's guard now keeps `error_count` out of 2.3-2.5), `opsgen/tests/test_engine.py`
-(the quiet-period test reads `2.4_anomaly_status.sql`). The spec's other issues add theirs.
+(the quiet-period test reads `2.4_anomaly_status.sql`).
+Issue 06 (the agent): `sql/4.3_insert_release_agent_errors.sql` (new, fan-out leg 1: the
+release agent on `service_error_rate` rows with `error_status = 'HIGH'`, trigger
+`ERROR_RATE_HIGH`, its input the error rate against the 25 % threshold, errors of requests,
+last change, seconds since deploy and previous version; the same answer parsing as the
+latency leg, which becomes leg 2, and capacity leg 3). `sql/4.2_release_agent.sql`: the role
+paragraph names both triggers, rule 1 covers a burst of failing requests, and the examples are
+a checkout latency ROLLBACK, a web-gateway error-rate ROLLBACK and a payments latency OBSERVE
+(both triggers get a ROLLBACK example, so the model learns the rule and not the trigger).
+`sql/4.2_capacity_agent.sql`: SCALE_OUT on checkout (15 replicas, the scorer's formula), and
+all three examples' numbers follow D-059's 30 requests a second (they were from the old
+rates). `sql/checks/remediation_call_rate.sql` counts `service_error_rate` too;
+`remediation_routing.sql` and the checks README; `uv run reset-health`'s next steps start the
+error-rate agent INSERT first; `evaluate`'s hint no longer says "two" agent INSERTs. Tests:
+`tests/test_agent_sql.py` (keyed by INSERT file, three of them; an example for every allowed
+action and no other, instead of exactly one per action; both release legs write and tell their
+own trigger and parse the answer identically; the error-rate leg's input lines; no example
+pairs web-gateway with latency or traffic, SCALE_OUT on checkout, INVESTIGATE_UPSTREAM on
+payments), `tests/test_reset_health.py`, `tests/test_evaluate_decisions.py`. The spec's other
+issues add theirs.
 
 Amends D-056, D-057, D-058, D-060 and D-066.
