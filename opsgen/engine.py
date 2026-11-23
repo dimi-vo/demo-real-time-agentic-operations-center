@@ -1,4 +1,4 @@
-"""The schedule: incidents, one per-service schedule each.
+"""The schedule: incidents, one per-service schedule each, and web-gateway's deploy clock.
 
 Ticked once per simulated second. `Engine.tick(now, deployments)` ends and starts
 incidents, mutates the `DeploymentState`s on deploys and rollbacks, and returns the
@@ -33,12 +33,24 @@ Rules (D-060, which amends D-042; D-065 and D-067 amend both):
   that reads the decision, mid-window (D-065). Otherwise it **expires** at its cap.
 - BAD_DEPLOY fires a DEPLOY and starts degrading on the same tick; it ends, resolved or
   expired, with a ROLLBACK to the previous version, and metrics return to baseline at that
-  moment. These are the only version changes: there are no other deploys (D-057).
+  moment. On checkout and payments these are the only version changes (D-057).
+
+web-gateway's deploy clock (D-067, `DeployClock`), outside the rules above (no quiet period,
+gap or rests) and with its own rng, so it never moves the shared schedule:
+- The first deploy is on the first window boundary at or after start + 60 s and is good; the
+  second is bad. Then each deploy is on a boundary 60, 70, 80 or 90 s (uniform) after the
+  previous one started, bad with probability 1/2 but never a third good one in a row (4/7
+  bad in the long run). Dated from the starts, so it is the same however incidents end.
+- A good deploy is a DEPLOY and nothing else. A bad one is the same DEPLOY plus a
+  BAD_DEPLOY_ERRORS incident: 40 % of requests fail, traffic and latency stay normal, up to
+  35 s, resolved like any incident, ended by a ROLLBACK.
+- `no_incidents` stops the clock too: no version changes at all.
 """
 
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field
 
 from opsgen.deployments import DeploymentState
@@ -62,8 +74,24 @@ CANDIDATES = {
     TRAFFIC_SURGE: ("checkout",),
     UPSTREAM_DROP: ("payments",),
 }
-TRIGGER = {BAD_DEPLOY: "LATENCY_HIGH", TRAFFIC_SURGE: "TRAFFIC_HIGH", UPSTREAM_DROP: "TRAFFIC_LOW"}
-EXPECTED_ACTION = {BAD_DEPLOY: "ROLLBACK", TRAFFIC_SURGE: "SCALE_OUT", UPSTREAM_DROP: "INVESTIGATE_UPSTREAM"}
+# D-067: web-gateway's bad deploy, started only by its deploy clock (never by the shared
+# scheduler, so it is not in INCIDENT_TYPES). It fails requests and changes nothing else, and an
+# error-rate threshold (lab 2.2) flags it.
+BAD_DEPLOY_ERRORS = "BAD_DEPLOY_ERRORS"
+BAD_DEPLOY_TYPES = (BAD_DEPLOY, BAD_DEPLOY_ERRORS)  # a deploy at the start, a rollback at the end
+
+TRIGGER = {
+    BAD_DEPLOY: "LATENCY_HIGH",
+    TRAFFIC_SURGE: "TRAFFIC_HIGH",
+    UPSTREAM_DROP: "TRAFFIC_LOW",
+    BAD_DEPLOY_ERRORS: "ERROR_RATE_HIGH",
+}
+EXPECTED_ACTION = {
+    BAD_DEPLOY: "ROLLBACK",
+    TRAFFIC_SURGE: "SCALE_OUT",
+    UPSTREAM_DROP: "INVESTIGATE_UPSTREAM",
+    BAD_DEPLOY_ERRORS: "ROLLBACK",
+}
 
 # Metric effects during degradation. They change a service_metrics record's values, never
 # the number of records (D-058). Each type moves exactly one metric (D-059): a surge leaves
@@ -73,6 +101,17 @@ BAD_DEPLOY_LATENCY_MULT = 4.0
 BAD_DEPLOY_ERROR_RATE = 0.12  # share of failed requests, for error_count (display only)
 SURGE_LAMBDA_MULT = 5.0
 DROP_LAMBDA_MULT = 0.1
+# D-067: well above lab 2.2's 25 % threshold, so the first window after the deploy always
+# crosses it; low enough that the window an expired incident ends in (5 bad seconds of 10)
+# almost never does (0.5 % offline). Traffic and latency stay normal.
+BAD_DEPLOY_ERRORS_ERROR_RATE = 0.40
+
+# D-067: web-gateway's deploy clock. Each deploy is bad with this probability, except that
+# the third after two good ones in a row is always bad, so 4/7 of the deploys are bad in the
+# long run. Its timings are in Config.
+DEPLOY_CLOCK_SERVICE = "web-gateway"
+DEPLOY_CLOCK_BAD_SHARE = 0.5
+DEPLOY_CLOCK_MAX_GOOD_IN_A_ROW = 2
 
 WINDOW_SECONDS = 10  # Flink's tumbling window; incidents start on its boundaries
 
@@ -115,7 +154,13 @@ class Config:
     max_duration: float = 35.0
     gap: float = 20.0  # between two incidents on one service, whatever their types
     rests: dict[str, float] = field(default_factory=lambda: dict(RESTS))  # per type
-    no_incidents: bool = False
+    # D-067: web-gateway's deploy clock. Its first deploy is on the first window boundary at
+    # or after start + this, and each next one is one of `deploy_clock_gaps` (uniform) after
+    # the previous one started. 60 s or more: a bad deploy is over by +35 s, so at least
+    # 25 s of normal traffic follow it before the next deploy.
+    deploy_clock_first: float = 60.0
+    deploy_clock_gaps: tuple[float, ...] = (60.0, 70.0, 80.0, 90.0)
+    no_incidents: bool = False  # no incidents and no deploys at all, web-gateway's included
 
 
 @dataclass
@@ -148,6 +193,8 @@ class Incident:
     def effect(self) -> Effect:
         if self.type == BAD_DEPLOY:
             return Effect(latency_mult=BAD_DEPLOY_LATENCY_MULT, error_rate=BAD_DEPLOY_ERROR_RATE)
+        if self.type == BAD_DEPLOY_ERRORS:
+            return Effect(error_rate=BAD_DEPLOY_ERRORS_ERROR_RATE)  # errors only (D-067)
         if self.type == TRAFFIC_SURGE:
             return Effect(lam_mult=SURGE_LAMBDA_MULT)  # traffic only: latency untouched (D-059)
         return Effect(lam_mult=DROP_LAMBDA_MULT)
@@ -171,7 +218,7 @@ class Decision:
 class Event:
     """Something that happened this tick, for the console/log and the ground-truth file."""
 
-    kind: str  # "bad_deploy" | "incident_start" | "incident_end"
+    kind: str  # "deploy" (a good one, D-067) | "bad_deploy" | "incident_start" | "incident_end"
     now: float
     service_name: str
     old_version: str | None = None
@@ -180,10 +227,47 @@ class Event:
 
 
 @dataclass
+class DeployClock:
+    """When web-gateway deploys next, and whether that deploy is good or bad (D-067). The
+    engine carries the deploy out. It draws from its own rng, twice per deploy and always in
+    the same order (good or bad, then the gap to the next one), so `--seed` reproduces it and
+    it never moves the shared scheduler's draws. It is dated from the deploys' starts, never
+    from when an incident ended."""
+
+    GOOD = "good"
+    BAD = "bad"
+
+    rng: random.Random
+    next_at: float  # a window boundary
+    gaps: tuple[float, ...]
+    deploys: int = 0
+    good_in_a_row: int = 0
+
+    def due(self, now: float) -> str | None:
+        """GOOD or BAD when a deploy is due at `now` (the first tick at or after `next_at`),
+        else None. The first deploy is good and the second bad, so the story plays once in
+        the first minutes whatever the draws."""
+        if now < self.next_at:
+            return None
+        bad = self.rng.random() < DEPLOY_CLOCK_BAD_SHARE
+        if self.deploys < 2:
+            bad = self.deploys == 1
+        elif self.good_in_a_row >= DEPLOY_CLOCK_MAX_GOOD_IN_A_ROW:
+            bad = True
+        self.deploys += 1
+        self.good_in_a_row = 0 if bad else self.good_in_a_row + 1
+        self.next_at += self.rng.choice(self.gaps)
+        return self.BAD if bad else self.GOOD
+
+
+@dataclass
 class Engine:
-    rng: object  # random.Random
+    rng: object  # random.Random, the shared scheduler's
     start: float
     config: Config = field(default_factory=Config)
+    # web-gateway's deploy clock draws from this (D-067). Simulation passes Random(seed + 2);
+    # an Engine built without one (in tests) gets a fixed one, so it stays reproducible.
+    deploy_rng: object = None
 
     active: dict[str, Incident] = field(default_factory=dict, init=False)  # by service
     last_incident_end: dict[str, float] = field(default_factory=dict, init=False)  # by service
@@ -192,8 +276,16 @@ class Engine:
     incident_counter: int = field(default=0, init=False)  # last incident number used
     quiet_until: float = field(default=0.0, init=False)
 
+    clock: DeployClock | None = field(default=None, init=False)  # None with no_incidents
+
     def __post_init__(self) -> None:
         self.quiet_until = next_window_boundary(self.start + self.config.quiet_period)
+        if not self.config.no_incidents:
+            self.clock = DeployClock(
+                rng=self.deploy_rng if self.deploy_rng is not None else random.Random(0),
+                next_at=next_window_boundary(self.start + self.config.deploy_clock_first),
+                gaps=tuple(self.config.deploy_clock_gaps),
+            )
 
     # --- effects ---------------------------------------------------------------
 
@@ -231,14 +323,28 @@ class Engine:
         events: list[Event] = []
         self._end_incidents(now, deployments, events)
         self._start_incidents(now, deployments, events)
+        self._deploy_on_the_clock(now, deployments, events)
         return events
+
+    def _deploy_on_the_clock(self, now: float, deployments: dict[str, DeploymentState], events: list[Event]) -> None:
+        # web-gateway's deploys (D-067): outside the shared scheduler, its quiet period, gap
+        # and rests. A bad one is a BAD_DEPLOY_ERRORS incident, started like any other.
+        if self.clock is None or (due := self.clock.due(now)) is None:
+            return
+        svc = DEPLOY_CLOCK_SERVICE
+        assert svc not in self.active, "deploys are 60 s or more apart, incidents 35 s at most"
+        if due == DeployClock.BAD:
+            self._start_incident(BAD_DEPLOY_ERRORS, svc, now, deployments, events)
+        else:
+            old, new = deployments[svc].deploy(now)
+            events.append(Event("deploy", now, svc, old, new))
 
     def _end_incidents(self, now: float, deployments: dict[str, DeploymentState], events: list[Event]) -> None:
         # End: rollback a bad deploy; everything else just returns to baseline.
         for svc, inc in list(self.active.items()):
             if now < inc.degradation_end:
                 continue
-            if inc.type == BAD_DEPLOY:
+            if inc.type in BAD_DEPLOY_TYPES:
                 old, new = deployments[svc].rollback(now)
                 events.append(Event("incident_end", now, svc, old, new, inc))
             else:
@@ -271,8 +377,8 @@ class Engine:
             expected_action=EXPECTED_ACTION[itype],
             scheduled_end=scheduled_end,
         )
-        # A BAD_DEPLOY's deploy and its degradation start on the same tick (D-042).
-        if itype == BAD_DEPLOY:
+        # A bad deploy's deploy and its degradation start on the same tick (D-042).
+        if itype in BAD_DEPLOY_TYPES:
             old, new = deployments[svc].deploy(now)
             events.append(Event("bad_deploy", now, svc, old, new, inc))
         events.append(Event("incident_start", now, svc, incident=inc))

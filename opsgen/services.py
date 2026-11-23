@@ -7,10 +7,11 @@ except the traffic means (D-059): 50/30/30 requests/s. Each second, a service's
 means, and replaying history costs the same at any traffic level. The means were chosen
 offline (scripts/tuning, `.scratch/simplify-demo/research/tune.py`): calmer data shortens
 the rests between incidents, rougher data cuts false alarms at a fresh start, and 50/30/30
-sits between the two while staying visibly noisy. The two services that can suffer an
-UPSTREAM_DROP (checkout, payments) need at least ~6 requests/s (D-031); web-gateway, the
-only TRAFFIC_SURGE service, stays the busiest. Every service can get a BAD_DEPLOY.
-There is no replica ceiling (D-043): a surge always expects SCALE_OUT.
+sits between the two while staying visibly noisy. D-067: checkout gets BAD_DEPLOY and
+TRAFFIC_SURGE, payments BAD_DEPLOY and UPSTREAM_DROP (a drop needs at least ~6 requests/s,
+D-031), and web-gateway, the busiest, deploys on its own clock (good deploys, and
+BAD_DEPLOY_ERRORS, which only fail requests). There is no replica ceiling (D-043): a surge
+always expects SCALE_OUT.
 """
 
 from __future__ import annotations

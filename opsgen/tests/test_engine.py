@@ -11,6 +11,7 @@ from opsgen import engine
 from opsgen.deployments import DeploymentState
 from opsgen.engine import (
     BAD_DEPLOY,
+    BAD_DEPLOY_ERRORS,
     CANDIDATES,
     INCIDENT_TYPES,
     INCIDENT_WEIGHTS,
@@ -31,9 +32,12 @@ def _deployments(now=0.0):
 
 
 def _run(config, seed, horizon):
+    """The shared scheduler alone: these tests are about checkout's and payments' incidents,
+    so web-gateway's deploy clock is off (it has its own tests, test_deploy_clock.py)."""
     rng = random.Random(seed)
     deployments = _deployments()
     eng = Engine(rng=rng, start=0.0, config=config)
+    eng.clock = None
     events = []
     for k in range(horizon):
         events.extend(eng.tick(float(k), deployments))
@@ -211,7 +215,8 @@ def test_every_incident_lasts_the_max_duration_from_a_window_boundary():
         assert inc.degradation_start % 10 == 0, inc
         # With no agent in the loop, every incident runs to its cap (D-065).
         assert inc.degradation_end - inc.degradation_start == Config().max_duration == 35, inc
-    assert {i.type for i in incs} == {BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP}
+    # web-gateway's bad deploys (its deploy clock, D-067) follow the same two rules
+    assert {i.type for i in incs} == {BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP, BAD_DEPLOY_ERRORS}
 
 
 def test_the_cap_ends_an_incident_mid_window():
@@ -246,7 +251,12 @@ def test_gap_and_rests_count_from_the_scheduled_end():
 
 # --- resolving an incident (D-065) ---------------------------------------------
 
-AGENT_FOR_TRIGGER = {"LATENCY_HIGH": "release_agent", "TRAFFIC_HIGH": "capacity_agent", "TRAFFIC_LOW": "capacity_agent"}
+AGENT_FOR_TRIGGER = {
+    "LATENCY_HIGH": "release_agent",
+    "ERROR_RATE_HIGH": "release_agent",  # D-067
+    "TRAFFIC_HIGH": "capacity_agent",
+    "TRAFFIC_LOW": "capacity_agent",
+}
 ONE_OF_EACH = [(BAD_DEPLOY, "payments"), (TRAFFIC_SURGE, "checkout"), (UPSTREAM_DROP, "payments")]
 
 
@@ -407,6 +417,8 @@ def test_no_incidents_runs_an_hour_without_a_deploy():
 
 
 def test_versions_change_only_on_bad_deploys_and_their_rollbacks():
+    # D-057 on checkout and payments. web-gateway's clock also makes good deploys (D-067),
+    # tested in test_deploy_clock.py.
     events, _, _ = _run(Config(), seed=7, horizon=3 * 3600)
     assert {e.kind for e in events} == {"bad_deploy", "incident_start", "incident_end"}
     changes = [e for e in events if e.old_version is not None]

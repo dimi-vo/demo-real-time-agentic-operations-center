@@ -45,6 +45,16 @@ AFTER = {t: TWO for t in eng.INCIDENT_TYPES}
 SPLIT = {eng.BAD_DEPLOY: TWO, eng.TRAFFIC_SURGE: ("checkout",), eng.UPSTREAM_DROP: ("payments",)}
 CANDIDATE_SETS = {"before": BEFORE, "after": AFTER, "split": SPLIT}
 
+# web-gateway's deploy clock came with D-067 (issue 03). The "before" candidates still give
+# web-gateway shared incidents, which the clock would deploy into, so it is off for them. For
+# the others it only moves web-gateway's errors and versions, which ARIMA doesn't read, and
+# sweep.simulate leaves its BAD_DEPLOY_ERRORS out of the scored incidents.
+_CLOCK_DUE = eng.DeployClock.due
+
+
+def _no_deploy(self, now):
+    return None
+
 
 @dataclass(frozen=True)
 class Run:
@@ -69,6 +79,7 @@ def one(args: tuple[str, int, float]) -> dict:
     key, seed, hours = args
     run = RUNS[key]
     eng.CANDIDATES = dict(CANDIDATE_SETS[run.candidates])
+    eng.DeployClock.due = _no_deploy if run.candidates == "before" else _CLOCK_DUE
     rows, incidents, start, end, _ = cl.simulate(cl.Scenario(run.label, 35, run.fix_at), seed, hours)
     rows = [r for r in rows if r.service_name in run.scored]
     incidents = [i for i in incidents if i.service_name in run.scored]

@@ -20,7 +20,7 @@ LATENCY_SIGMA = 0.3
 SLOW_OUTLIER_PROB = 0.002
 SLOW_OUTLIER_MULT = 3.0
 
-# Share of requests that fail in normal operation. A BAD_DEPLOY raises it (opsgen.engine).
+# Share of requests that fail in normal operation. A bad deploy raises it (opsgen.engine).
 ERROR_RATE = 0.005
 
 

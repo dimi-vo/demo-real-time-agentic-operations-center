@@ -7,9 +7,9 @@ import json
 import pytest
 
 from opsgen.driver import run_simulate
-from opsgen.engine import BAD_DEPLOY, Config, Decision
+from opsgen.engine import BAD_DEPLOY, Config, Decision, Event
 from opsgen.simulation import Simulation
-from opsgen.sinks import DryRunSink, format_event
+from opsgen.sinks import DryRunSink, event_json, format_event
 
 
 def test_dry_run_sink_emits_tagged_json_lines():
@@ -60,24 +60,30 @@ def test_simulate_summary_sums_the_window_records():
         assert part in line, (part, line)
 
 
+def _clock(line):
+    mm, ss = (int(x) for x in line.split("[", 1)[1].split("]", 1)[0].split(":"))
+    return mm * 60 + ss
+
+
 def test_simulate_quiet_period_before_first_incident():
-    text = _simulate(minutes=60)
-    starts = [ln for ln in text.splitlines() if "INCIDENT START" in ln]
+    lines = _simulate(minutes=60).splitlines()
+    starts = [ln for ln in lines if "INCIDENT START" in ln and "web-gateway" not in ln]
     assert starts, "expected incidents over an hour"
-    # No incident starts before t=02:30, the detector's warm-up (D-060).
-    clocks = []
-    for ln in starts:
-        mmss = ln.split("[", 1)[1].split("]", 1)[0]
-        mm, ss = (int(x) for x in mmss.split(":"))
-        clocks.append(mm * 60 + ss)
-    assert min(clocks) == Config().quiet_period == 150
+    # No checkout or payments incident starts before t=02:30, the detector's warm-up (D-060).
+    assert min(_clock(ln) for ln in starts) == Config().quiet_period == 150
+    # web-gateway's clock ignores it (D-067): a good deploy at 01:00, then a bad one.
+    deploys = [ln for ln in lines if "DEPLOY " in ln and "web-gateway" in ln and "INCIDENT" not in ln]
+    assert deploys[0].startswith("[01:00] DEPLOY          web-gateway  3.4.2 -> 3.4.3")
+    assert deploys[1].startswith(f"[{deploys[1][1:6]}] BAD DEPLOY      web-gateway  3.4.3 -> 3.4.4")
+    assert _clock(deploys[1]) < Config().quiet_period
 
 
 def test_simulate_banner_shows_the_schedule():
     first = _simulate(minutes=1).splitlines()[0]
     assert first == (
         "# ops-sim --simulate 1min  (quiet=150s max=35s gap=20s "
-        "rests: BAD_DEPLOY=390s TRAFFIC_SURGE=300s UPSTREAM_DROP=300s)"
+        "rests: BAD_DEPLOY=390s TRAFFIC_SURGE=300s UPSTREAM_DROP=300s; "
+        "web-gateway deploys: first=60s every=60-90s)"
     )
     assert _simulate(minutes=1, no_incidents=True).splitlines()[0] == "# ops-sim --simulate 1min  (no incidents)"
 
@@ -96,19 +102,53 @@ def test_simulate_an_hour_has_overlapping_incidents():
             most = max(most, len(open_now))
         else:
             assert open_now.pop(svc) == itype, ln
-    assert most == 2  # checkout and payments; web-gateway is not in the shared scheduler (D-067)
+    assert most == 3  # web-gateway's bad deploys come from its own clock (D-067)
 
 
-def test_simulate_every_deploy_is_a_bad_deploy():
-    # D-057: a deploy line is always a BAD DEPLOY, followed on the same tick by its
-    # incident's start.
+def test_simulate_deploy_lines():
+    # D-057: on checkout and payments a deploy is always a BAD DEPLOY, followed on the same
+    # tick by its incident's start. D-067: web-gateway also has good deploys (DEPLOY, no
+    # incident), and its bad ones start a BAD_DEPLOY_ERRORS.
     lines = [ln for ln in _simulate(minutes=60).splitlines() if not ln.startswith(("#", "[t="))]
-    deploys = [i for i, ln in enumerate(lines) if "DEPLOY" in ln and "INCIDENT" not in ln]
-    assert deploys, "expected a bad deploy over an hour"
+    deploys = [i for i, ln in enumerate(lines) if "DEPLOY " in ln and "INCIDENT" not in ln]
+    kinds = set()
     for i in deploys:
         clock = lines[i].split("]", 1)[0]
-        assert lines[i].startswith(f"{clock}] BAD DEPLOY "), lines[i]
-        assert lines[i + 1].startswith(f"{clock}] INCIDENT START  BAD_DEPLOY "), lines[i + 1]
+        if "web-gateway" not in lines[i]:
+            assert lines[i].startswith(f"{clock}] BAD DEPLOY "), lines[i]
+            assert lines[i + 1].startswith(f"{clock}] INCIDENT START  BAD_DEPLOY "), lines[i + 1]
+            kinds.add("shared")
+        elif lines[i].startswith(f"{clock}] DEPLOY "):
+            assert not lines[i + 1].startswith(f"{clock}] INCIDENT START"), lines[i + 1]
+            kinds.add("good")
+        else:
+            assert lines[i].startswith(f"{clock}] BAD DEPLOY "), lines[i]
+            assert lines[i + 1].startswith(f"{clock}] INCIDENT START  BAD_DEPLOY_ERRORS web-gateway"), lines[i + 1]
+            kinds.add("bad")
+    assert kinds == {"shared", "good", "bad"}
+
+
+def test_simulate_web_gateway_bad_deploy_ends_with_a_rollback():
+    ends = [ln for ln in _simulate(minutes=10).splitlines() if "INCIDENT END    BAD_DEPLOY_ERRORS" in ln]
+    assert ends and all(" rollback " in ln and ln.endswith("expired after 35 s") for ln in ends), ends
+
+
+def test_simulate_web_gateway_crosses_25_percent_errors_only_in_a_bad_deploy():
+    # The summary lines sum a window's records the way lab 2.2 does (D-058). Nothing resolves
+    # an incident in --simulate, so each bad deploy fails 40 % of requests for 35 s: the three
+    # windows ending 10, 20 and 30 s after it are fully bad, and the one ending at 40 s holds
+    # 5 bad seconds (about 20 %).
+    lines = _simulate(minutes=60).splitlines()
+    bad = [_clock(ln) for ln in lines if "BAD DEPLOY      web-gateway" in ln]
+    err = {}  # window end -> err %
+    for ln in lines:
+        if ln.startswith("[t=") and "web-gateway" in ln:
+            err[_clock("[" + ln[3:])] = float(ln.split("err=")[1].split("%")[0])
+    full = {b + j for b in bad for j in (10, 20, 30)} & err.keys()
+    high = {t for t, e in err.items() if e >= 25}
+    assert len(full) > 30 and full <= high
+    assert all(30 <= err[t] <= 50 for t in full)
+    assert high <= {b + j for b in bad for j in (10, 20, 30, 40)}
 
 
 def test_simulate_covers_all_incident_types_over_an_hour():
@@ -166,3 +206,16 @@ def test_cli_has_no_timing_flags():
     for gone in ("--quiet-period", "--spacing-min", "--spacing-max", "--duration", "--cooldown"):
         with pytest.raises(SystemExit):
             parser.parse_args([gone, "30"])
+
+
+def test_a_good_deploy_in_the_dry_run_json_and_on_the_console():
+    # D-067: web-gateway's good deploy is an event of its own, with no incident.
+    ev = Event("deploy", 60.0, "web-gateway", "3.4.2", "3.4.3")
+    assert event_json(ev) == {
+        "_event": "deploy",
+        "service_name": "web-gateway",
+        "event_time": 60_000,
+        "old_version": "3.4.2",
+        "new_version": "3.4.3",
+    }
+    assert format_event(ev, clock="01:00") == "[01:00] DEPLOY          web-gateway  3.4.2 -> 3.4.3"

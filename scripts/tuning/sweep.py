@@ -93,8 +93,9 @@ class Result:
 
 
 def simulate(data: DataConfig, seed: int, hours: float) -> tuple[list[HealthRow], list[Incident], float, float, float]:
-    """Run the generator and return window rows (without detector output), incidents,
-    the run's start/end, and the average traffic (traffic_count per second, all services)."""
+    """Run the generator and return window rows (without detector output), the incidents
+    ARIMA is meant to catch (the shared scheduler's types, D-067), the run's start/end, and
+    the average traffic (traffic_count per second, all services)."""
     import opsgen.distributions as dist
     import opsgen.engine as eng
     import opsgen.simulation as sim_mod
@@ -131,7 +132,9 @@ def simulate(data: DataConfig, seed: int, hours: float) -> tuple[list[HealthRow]
         for name, d in sim.deployments.items():
             ctx[(name, w)] = (d.version, d.deployed_at)
         for ev in events:
-            if ev.kind == "incident_end" and ev.incident is not None:
+            # Only the incidents ARIMA is meant to catch: web-gateway's BAD_DEPLOY_ERRORS (its
+            # deploy clock) moves error_count alone, which an error-rate threshold flags (D-067).
+            if ev.kind == "incident_end" and ev.incident is not None and ev.incident.type in eng.INCIDENT_TYPES:
                 inc = ev.incident
                 incidents.append(
                     Incident(inc.incident_id, inc.type, inc.service_name, inc.degradation_start, inc.degradation_end,

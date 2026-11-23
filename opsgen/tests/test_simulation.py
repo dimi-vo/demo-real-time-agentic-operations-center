@@ -11,7 +11,16 @@ import pytest
 
 from opsgen import engine
 from opsgen.distributions import latency_ms, poisson
-from opsgen.engine import BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP, Config, Decision, Incident
+from opsgen.engine import (
+    BAD_DEPLOY,
+    BAD_DEPLOY_ERRORS,
+    BAD_DEPLOY_TYPES,
+    TRAFFIC_SURGE,
+    UPSTREAM_DROP,
+    Config,
+    Decision,
+    Incident,
+)
 from opsgen.groundtruth import end_record
 from opsgen.services import SERVICES, SERVICES_BY_NAME, service_names
 from opsgen.simulation import REEMIT_INTERVAL, Simulation
@@ -178,7 +187,8 @@ def test_bad_deploy_degrades_from_its_own_tick():
     sim = _sim(seed=11)
     for k in range(3000):
         metrics, _, events = sim.tick(float(k))
-        bad = next((e for e in events if e.kind == "bad_deploy"), None)
+        # a latency bad deploy; web-gateway's BAD_DEPLOY_ERRORS only fails requests (D-067)
+        bad = next((e for e in events if e.kind == "bad_deploy" and e.incident.type == BAD_DEPLOY), None)
         if bad is not None:
             break
     else:
@@ -274,7 +284,12 @@ def test_incident_ends_on_a_tick_at_the_logged_ended_at():
 
 # --- resolving an incident (D-065) ---------------------------------------------
 
-AGENT_FOR_TRIGGER = {"LATENCY_HIGH": "release_agent", "TRAFFIC_HIGH": "capacity_agent", "TRAFFIC_LOW": "capacity_agent"}
+AGENT_FOR_TRIGGER = {
+    "LATENCY_HIGH": "release_agent",
+    "ERROR_RATE_HIGH": "release_agent",  # D-067
+    "TRAFFIC_HIGH": "capacity_agent",
+    "TRAFFIC_LOW": "capacity_agent",
+}
 ONE_OF_EACH = [(BAD_DEPLOY, "payments"), (TRAFFIC_SURGE, "checkout"), (UPSTREAM_DROP, "payments")]
 
 
@@ -294,13 +309,13 @@ def _resolved_on_tick_17(itype, svc):
     return sim, started, tick_16, tick_17
 
 
-@pytest.mark.parametrize(("itype", "svc"), ONE_OF_EACH)
+@pytest.mark.parametrize(("itype", "svc"), [*ONE_OF_EACH, (BAD_DEPLOY_ERRORS, "web-gateway")])
 def test_a_resolved_incident_and_its_records_end_on_the_tick_that_read_the_decision(itype, svc):
     sim, started, _, (_, deps, events) = _resolved_on_tick_17(itype, svc)
     [end] = events
     assert (end.kind, end.now, end.incident) == ("incident_end", 17.0, started[-1].incident)
     assert end_record(end.incident, end.now)["ended_at"] == 17_000  # the real end, not the cap
-    if itype == BAD_DEPLOY:  # its ROLLBACK restores the version the bad deploy replaced
+    if itype in BAD_DEPLOY_TYPES:  # its ROLLBACK restores the version the bad deploy replaced
         [dep] = deps
         assert (dep["service_name"], dep["last_change"], dep["event_time"]) == (svc, "ROLLBACK", 17_000)
         assert dep["version"] == started[0].old_version

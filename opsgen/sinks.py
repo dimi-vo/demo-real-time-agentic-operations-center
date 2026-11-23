@@ -11,7 +11,7 @@ import json
 import sys
 from datetime import datetime, timezone
 
-from opsgen.engine import BAD_DEPLOY, Event, Incident
+from opsgen.engine import BAD_DEPLOY_TYPES, Event, Incident
 
 
 def _hms(epoch_seconds: float) -> str:
@@ -28,6 +28,8 @@ def format_event(ev: Event, clock: str | None = None) -> str:
     """One human-readable line describing a schedule event. `clock` is an optional
     pre-formatted time label; if omitted, the event's wall-clock time is used."""
     when = clock if clock is not None else _hms(ev.now)
+    if ev.kind == "deploy":  # a good deploy (D-067)
+        return f"[{when}] DEPLOY          {ev.service_name:<12} {ev.old_version} -> {ev.new_version}"
     if ev.kind == "bad_deploy":
         return f"[{when}] BAD DEPLOY      {ev.service_name:<12} {ev.old_version} -> {ev.new_version}"
     if ev.kind == "incident_start":
@@ -39,7 +41,7 @@ def format_event(ev: Event, clock: str | None = None) -> str:
     if ev.kind == "incident_end":
         inc = ev.incident
         tail = []
-        if inc and inc.type == BAD_DEPLOY:
+        if inc and inc.type in BAD_DEPLOY_TYPES:
             tail.append(f"rollback {ev.old_version} -> {ev.new_version}")
         if inc:
             tail.append(_how_it_ended(inc))

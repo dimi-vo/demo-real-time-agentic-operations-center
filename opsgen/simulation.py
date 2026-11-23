@@ -58,7 +58,9 @@ class Simulation:
                 # previous_version holds the rolled-back one, so the higher of the two is it.
                 state.highest_version = highest(saved.get("highest_version"), state.version, state.previous_version)
             self.deployments[svc.name] = state
-        self.engine = Engine(rng=self.sched_rng, start=start, config=self.config)
+        # web-gateway's deploy clock has its own rng, so it never moves the shared schedule (D-067)
+        self.deploy_rng = random.Random(None if seed is None else seed + 2)
+        self.engine = Engine(rng=self.sched_rng, start=start, config=self.config, deploy_rng=self.deploy_rng)
         # Continue incident numbering across restarts: ops-wall pairs each incident's start
         # and end records by incident_id, so ids must never repeat (D-046).
         self.engine.incident_counter = int((initial_state or {}).get("incident_counter", 0))

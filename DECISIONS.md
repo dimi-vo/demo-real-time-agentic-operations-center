@@ -2308,7 +2308,7 @@ ROLLBACK and the errors stop.
   RNG (`Random(seed + 2)`). The first deploy is on the first window boundary at or after
   start + 60 s and is good; the second is bad. After that, each deploy is on a boundary 60,
   70, 80 or 90 s (uniform) after the previous one started, bad with probability ½, never
-  three good in a row. The clock is dated from the starts, so it is the same however
+  three good in a row (so 4/7 of the deploys are bad in the long run). The clock is dated from the starts, so it is the same however
   incidents end. The quiet period doesn't apply. A good deploy is a deployment record
   (`last_change = DEPLOY`) and nothing else. A bad deploy is the same record plus a
   `BAD_DEPLOY_ERRORS` incident: 40 % of requests fail, traffic and latency stay normal,
@@ -2359,8 +2359,8 @@ ROLLBACK and the errors stop.
 - In the shared scheduler, web-gateway would share the RNG (its draws would shift checkout's
   and payments' schedule for a seed), the "one of each" rule (a type only one side can take
   can hold the other side back) and the quiet period (ARIMA's warm-up, which a threshold
-  doesn't need). On its own clock its bad deploys can come often, about 24 an hour against
-  about 8 per service before, without touching the other two.
+  doesn't need). On its own clock its bad deploys can come often, about 27 an hour (4/7 of
+  about 48 deploys) against about 8 per service before, without touching the other two.
 - Good deploys, back on web-gateway only, show that the rule reacts to the errors, not to
   the deploy. D-057 removed them because an ARIMA latency false alarm soon after one rolled
   back a healthy version; a 0.5 % baseline against a 25 % threshold has no such false alarm.
@@ -2426,6 +2426,26 @@ README. Tests: `opsgen/tests/test_engine.py` (the candidates; web-gateway gets n
 incident; about 37 an hour; the gap/rest, chooser and resolve tests on checkout and payments),
 `opsgen/tests/test_simulation.py` and `opsgen/tests/test_output.py` (surges on checkout,
 drops on payments, two services open at once), `tests/test_tuning.py` (a quarter-hour's
-traffic bound). The spec's other issues add theirs.
+traffic bound).
+Issue 03 (web-gateway's deploy clock): `opsgen/engine.py` (`BAD_DEPLOY_ERRORS`,
+`BAD_DEPLOY_TYPES`, its trigger, action and effect; `DeployClock`; `Config.deploy_clock_first`
+and `deploy_clock_gaps`; `Engine.deploy_rng` and `_deploy_on_the_clock`; the deploy and
+rollback branches take both bad-deploy types; the docstring), `opsgen/simulation.py` (the
+clock's rng, `Random(seed + 2)`), `opsgen/sinks.py` (the `deploy` event's `DEPLOY` line; a
+`BAD_DEPLOY_ERRORS` end shows its rollback), `opsgen/driver.py` (the banner names the clock),
+docstrings in `opsgen/{deployments,services,distributions,cli}.py`. `scripts/tuning/sweep.py`
+returns only the shared scheduler's incident types, the ones ARIMA is meant to catch;
+`shared_scheduler.py` turns the clock off for its pre-D-067 runs, and its 300-seed output is
+unchanged. Tests: the new `opsgen/tests/test_deploy_clock.py` (the opening; boundaries 60-90 s
+apart; never three good in a row, 4/7 bad; no deploy inside an incident; the clock ignores how
+incidents end and never moves the shared schedule; an `ERROR_RATE_HIGH` answer resolves a bad
+deploy and a `LATENCY_HIGH` one doesn't; the start record; good and bad deploy records look
+alike; 40 % errors with traffic and latency unchanged; `--no-incidents`); `test_engine.py`
+(its `_run` is the shared scheduler alone; the cap and the resolve-or-not schedule include
+the clock), `test_simulation.py` (a resolved `BAD_DEPLOY_ERRORS` and its records),
+`test_output.py` (the banner, deploy lines per service, the quiet period with the clock's
+opening, about 40 % errors only in a bad deploy's windows, the `deploy` JSON). Until issues 07
+and 08, the wall and `evaluate` count each `BAD_DEPLOY_ERRORS` as missed. The spec's other
+issues add theirs.
 
 Amends D-056, D-057, D-058, D-060 and D-066.

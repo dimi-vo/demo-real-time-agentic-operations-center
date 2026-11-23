@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from opsgen.engine import INCIDENT_TYPES, WINDOW_SECONDS, Config, next_window_boundary
+from opsgen.engine import DEPLOY_CLOCK_SERVICE, INCIDENT_TYPES, WINDOW_SECONDS, Config, next_window_boundary
 from opsgen.groundtruth import end_record, start_record
 from opsgen.services import service_names
 from opsgen.simulation import Simulation
@@ -104,7 +104,9 @@ def schedule_settings(config: Config) -> str:
     if config.no_incidents:
         return "no incidents"
     rests = " ".join(f"{t}={config.rests[t]:g}s" for t in INCIDENT_TYPES)
-    return f"quiet={config.quiet_period:g}s max={config.max_duration:g}s gap={config.gap:g}s rests: {rests}"
+    gaps = config.deploy_clock_gaps
+    clock = f"{DEPLOY_CLOCK_SERVICE} deploys: first={config.deploy_clock_first:g}s every={min(gaps):g}-{max(gaps):g}s"
+    return f"quiet={config.quiet_period:g}s max={config.max_duration:g}s gap={config.gap:g}s rests: {rests}; {clock}"
 
 
 def run_simulate(sim: Simulation, minutes: float, out=None) -> None:

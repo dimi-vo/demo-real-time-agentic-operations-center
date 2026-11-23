@@ -6,13 +6,16 @@
   uv run ops-sim --dry-run --seed 42     # reproducible schedule and traffic
   uv run ops-sim --no-incidents          # baseline traffic only: no incidents, no deploys
 
+checkout and payments get incidents from the shared schedule; web-gateway deploys on its own
+clock, and about 4 in 7 of its deploys are bad: they fail 40 % of requests (D-067).
+
 Live, ops-sim also tails `remediation_decisions`: an agent's correct answer resolves its
 incident on the next tick, and an incident nobody resolves expires at its 35 s cap (D-065).
 Before lab 4.3 there are no decisions, so every incident expires. `--dry-run` and
 `--simulate` never connect to Kafka, so there every incident expires too.
 
-There are no timing flags: the schedule (quiet period, incident cap, gap and rests) lives
-in `Config` in opsgen/engine.py (D-060).
+There are no timing flags: the schedule (quiet period, incident cap, gap and rests, and
+web-gateway's deploy clock) lives in `Config` in opsgen/engine.py (D-060, D-067).
 """
 
 from __future__ import annotations
