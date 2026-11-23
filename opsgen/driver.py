@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 from opsgen.engine import DEPLOY_CLOCK_SERVICE, INCIDENT_TYPES, WINDOW_SECONDS, Config, next_window_boundary
 from opsgen.groundtruth import end_record, start_record
 from opsgen.services import service_names
-from opsgen.simulation import Simulation
-from opsgen.sinks import format_event
+from opsgen.simulation import REEMIT_INTERVAL, Simulation
+from opsgen.sinks import format_event, format_record
 from opsgen.state import save_state, state_path
 
 if TYPE_CHECKING:  # the feed needs Kafka; --dry-run and --simulate never import it
@@ -41,15 +41,29 @@ def wait_until(start: float) -> None:
 
 
 def tick_once(
-    sim: Simulation, sink, now: float, decisions: DecisionFeed | None = None, st_path: Path | None = None
+    sim: Simulation,
+    sink,
+    now: float,
+    decisions: DecisionFeed | None = None,
+    st_path: Path | None = None,
+    show_records: str | None = None,
 ) -> None:
     """One second of live output: tick with the decisions read since the last tick (so a
     resolving one ends its incident on this tick, D-065), emit the records and events,
-    and save the state (every 5 s, and on any event) when `st_path` is given."""
+    and save the state (every 5 s, and on any event) when `st_path` is given.
+
+    `show_records` names a service: on the first tick and then every REEMIT_INTERVAL (5 s,
+    with the deployment heartbeat), its service_metrics record goes to stderr as sent
+    (`--show-records`)."""
     metrics, deps, events = sim.tick(now, decisions.drain() if decisions is not None else ())
     if deps:
         sink.emit_deployments(deps)
     sink.emit_metrics(metrics)
+    if show_records is not None and round(now - sim.start) % REEMIT_INTERVAL == 0:
+        for r in metrics:
+            if r["service_name"] == show_records:
+                sys.stderr.write(format_record("service_metrics", r, now) + "\n")
+                sys.stderr.flush()
     for ev in events:
         sink.emit_event(ev)
         if ev.incident is not None:
@@ -64,14 +78,20 @@ def tick_once(
     sink.flush()
 
 
-def run_realtime(sim: Simulation, sink, root: Path | None = None, decisions: DecisionFeed | None = None) -> None:
+def run_realtime(
+    sim: Simulation,
+    sink,
+    root: Path | None = None,
+    decisions: DecisionFeed | None = None,
+    show_records: str | None = None,
+) -> None:
     """Tick once per wall-clock second, emitting through `sink`, until Ctrl-C.
 
     When `root` is given, the generator's state (versions, incident counter) is saved.
     `--dry-run` passes root=None, so a dry run writes nothing and stays reproducible.
     The first tick is at `sim.start`; callers pass an `aligned_start` and this waits for it.
     Live mode passes the `decisions` feed: each tick gets what it read since the last one,
-    and it is stopped on the way out.
+    and it is stopped on the way out. `show_records` is passed to `tick_once`.
 
     The schedule itself is not saved: on a restart, the incidents in flight when it stopped
     (up to one per service) never get their end record. Accepted (D-060): the wall keeps them
@@ -85,7 +105,7 @@ def run_realtime(sim: Simulation, sink, root: Path | None = None, decisions: Dec
     k = 0
     try:
         while True:
-            tick_once(sim, sink, start_wall + k, decisions, st_path)
+            tick_once(sim, sink, start_wall + k, decisions, st_path, show_records)
             k += 1
             delay = (start_wall + k) - time.time()
             if delay > 0:

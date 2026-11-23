@@ -196,13 +196,15 @@ def test_simulate_without_decisions_every_incident_expires_at_the_cap():
 
 def test_cli_has_no_timing_flags():
     # D-060: timing lives in Config only. --seed, --no-incidents, --simulate and --dry-run stay.
+    # --show-records only prints (at a fixed 5 s) and leaves the schedule alone.
     from opsgen.cli import _build_parser, _config_from_args
 
     parser = _build_parser()
     assert _config_from_args(parser.parse_args([])) == Config()
     assert _config_from_args(parser.parse_args(["--no-incidents"])) == Config(no_incidents=True)
+    assert _config_from_args(parser.parse_args(["--show-records", "checkout"])) == Config()
     flags = {opt for action in parser._actions for opt in action.option_strings}
-    assert flags == {"-h", "--help", "--dry-run", "--simulate", "--seed", "--no-incidents", "--creds"}
+    assert flags == {"-h", "--help", "--dry-run", "--simulate", "--seed", "--no-incidents", "--creds", "--show-records"}
     for gone in ("--quiet-period", "--spacing-min", "--spacing-max", "--duration", "--cooldown"):
         with pytest.raises(SystemExit):
             parser.parse_args([gone, "30"])
@@ -219,3 +221,58 @@ def test_a_good_deploy_in_the_dry_run_json_and_on_the_console():
         "new_version": "3.4.3",
     }
     assert format_event(ev, clock="01:00") == "[01:00] DEPLOY          web-gateway  3.4.2 -> 3.4.3"
+
+
+# --- --show-records SERVICE: one service_metrics record every 5 s -----------------------
+
+
+def test_show_records_takes_one_of_the_three_services():
+    from opsgen.cli import _build_parser
+
+    parser = _build_parser()
+    assert parser.parse_args([]).show_records is None
+    assert parser.parse_args(["--show-records", "checkout"]).show_records == "checkout"
+    for bad in (["--show-records"], ["--show-records", "catalog"]):
+        with pytest.raises(SystemExit):
+            parser.parse_args(bad)
+
+
+def test_show_records_needs_real_time(capsys):
+    from opsgen.cli import main
+
+    with pytest.raises(SystemExit) as exit_:
+        main(["--dry-run", "--simulate", "1", "--show-records", "checkout"])
+    assert "--show-records" in str(exit_.value.code) and "--simulate" in str(exit_.value.code)
+
+
+def _ticks(show_records, seconds=12):
+    """Tick a dry run for `seconds` the way the real-time loop does. Returns stdout's JSON
+    records."""
+    from opsgen.driver import tick_once
+
+    sim = Simulation(1, start=1_800_000_000.0)
+    out = io.StringIO()
+    sink = DryRunSink(out=out, log=io.StringIO())
+    for k in range(seconds):
+        tick_once(sim, sink, sim.start + k, show_records=show_records)
+    return [json.loads(line) for line in out.getvalue().splitlines()]
+
+
+def test_show_records_prints_the_services_record_every_5_seconds_as_sent(capsys):
+    sent = _ticks("checkout")
+    lines = capsys.readouterr().err.splitlines()
+    assert len(lines) == 3  # ticks 0, 5 and 10: the first one right away, then with the heartbeat
+    checkout = [{k: v for k, v in r.items() if k != "_stream"} for r in sent
+                if r["_stream"] == "service_metrics" and r["service_name"] == "checkout"]  # fmt: skip
+    for k, line in zip((0, 5, 10), lines, strict=True):
+        clock, rest = line.split("] ", 1)
+        assert clock.startswith("[") and len(clock) == len("[10:42:05")
+        prefix = "service_metrics key=checkout "
+        assert rest.startswith(prefix)
+        assert json.loads(rest[len(prefix):]) == checkout[k]  # the record the sink was given
+
+
+def test_without_show_records_nothing_more_is_printed_and_stdout_is_unchanged(capsys):
+    plain = _ticks(None)
+    assert capsys.readouterr().err == ""
+    assert _ticks("payments") == plain  # the sample goes to stderr only

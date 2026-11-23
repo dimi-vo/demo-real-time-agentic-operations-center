@@ -50,6 +50,15 @@ def format_event(ev: Event, clock: str | None = None) -> str:
     return f"[{when}] {ev.kind} {ev.service_name}"
 
 
+def format_record(topic: str, record: dict, now: float) -> str:
+    """One record as ops-sim sends it, for `--show-records`: the topic, the Kafka key (the
+    raw service name) and the dict the Avro serializer gets, unchanged.
+
+        [10:42:05] service_metrics key=web-gateway {"event_time": 1800000005999, ...}
+    """
+    return f"[{_hms(now)}] {topic} key={record['service_name']} {json.dumps(record)}"
+
+
 def event_json(ev: Event) -> dict:
     out = {"_event": ev.kind, "service_name": ev.service_name, "event_time": int(ev.now * 1000)}
     if ev.old_version is not None:
