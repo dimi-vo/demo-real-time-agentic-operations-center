@@ -6,8 +6,9 @@
 A hands-on Confluent Cloud workshop. Three **River Shop** microservices stream one
 metrics sample per second (traffic, latency, errors) and their deployment state into
 Kafka; Flink SQL enriches them with a temporal join,
-aggregates them into per-service windows, and uses built-in ML
-(`ML_DETECT_ANOMALIES`) to flag latency and traffic anomalies. Two Streaming Agents
+aggregates them into per-service windows, flags web-gateway's bad deploys with a fixed
+error-rate threshold, and uses built-in ML (`ML_DETECT_ANOMALIES`) to flag latency and
+traffic anomalies on checkout and payments. Two Streaming Agents
 then recommend remediations, which are exposed to coding agents through the
 Real-Time Context Engine and queried over REST with Lightning Queries.
 

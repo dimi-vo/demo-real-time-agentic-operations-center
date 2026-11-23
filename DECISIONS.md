@@ -2460,7 +2460,22 @@ statements and empties the topic, and `uv run reset` empties it; the readiness c
 `tests/test_reset.py`, `platform-team/tests/developer_module.tftest.hcl` (the statement key;
 the run block is now `the_three_output_tables_are_created`). Offline only: `terraform fmt`,
 `validate` and `test` pass; the user runs the apply, which creates the table. The two
-comment changes reach an existing table only after a DROP TABLE, which nothing needs. The
-spec's other issues add theirs.
+comment changes reach an existing table only after a DROP TABLE, which nothing needs.
+Issue 05 (the labs): `sql/2.2_error_rate.sql` (new: the 2.1 temporal join plus
+`error_count`, web-gateway only; a `windowed` CTE sums the window's requests and errors and
+takes the deployment context with `LAST_VALUE`; the outer SELECT derives `error_rate`,
+`error_status` and `detected_at`, the same shape as the ARIMA status query) and
+`sql/2.2_service_error_rate.sql` (its INSERT). The ARIMA files are renamed (`git mv`):
+`2.2_window_metrics` and `2.2_window_aggregation` → 2.3, `2.3_anomaly_detection` and
+`2.3_anomaly_status` → 2.4, `2.4_service_health` → 2.5; each reads
+`service_name IN ('checkout', 'payments')` and its header names its new number. References
+to the old names and numbers: `opsgen/{engine,driver}.py`, `scripts/{evaluate,reset}.py`,
+`sql/sink_service_health.sql`, the tuning research README, the README. Tests:
+`tests/test_sql_pipeline.py` (the renamed files; ARIMA covers checkout and payments only and
+no lab runs `ML_DETECT_ANOMALIES` on web-gateway; for 2.2: web-gateway only, the ratio of
+sums at 0.25 with the zero-traffic guard, the INSERT body is the query, the column order in
+the query and the DDL, the DDL types, `detected_at`, earliest offsets and the 10-second
+window; D-058's guard now keeps `error_count` out of 2.3-2.5), `opsgen/tests/test_engine.py`
+(the quiet-period test reads `2.4_anomaly_status.sql`). The spec's other issues add theirs.
 
 Amends D-056, D-057, D-058, D-060 and D-066.

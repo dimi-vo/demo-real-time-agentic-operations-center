@@ -43,8 +43,8 @@ def test_simulate_has_per_window_summaries_for_all_services():
 
 
 def test_simulate_summary_sums_the_window_records():
-    # One line per service per window: SUM(traffic_count), AVG(latency_ms) and the share of
-    # failed requests, like lab 2.2 (D-058).
+    # One line per service per window: SUM(traffic_count) and AVG(latency_ms) like lab 2.3,
+    # and the share of failed requests like lab 2.2 (D-058, D-067).
     sim = Simulation(5, start=0.0, config=Config(no_incidents=True))
     expect = {}
     shadow = Simulation(5, start=0.0, config=Config(no_incidents=True))
@@ -134,7 +134,7 @@ def test_simulate_web_gateway_bad_deploy_ends_with_a_rollback():
 
 
 def test_simulate_web_gateway_crosses_25_percent_errors_only_in_a_bad_deploy():
-    # The summary lines sum a window's records the way lab 2.2 does (D-058). Nothing resolves
+    # The summary lines sum a window's errors and requests the way lab 2.2 does. Nothing resolves
     # an incident in --simulate, so each bad deploy fails 40 % of requests for 35 s: the three
     # windows ending 10, 20 and 30 s after it are fully bad, and the one ending at 40 s holds
     # 5 bad seconds (about 20 %).

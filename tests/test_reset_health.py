@@ -37,7 +37,7 @@ def test_the_output_topics_are_the_three_the_labs_write():
         "INSERT INTO `env` . `cluster` . `service_health` SELECT 1",
         "INSERT INTO `service_health`(a, b) SELECT 1, 2",
         "INSERT INTO service_health;",
-        "-- 2.4 pasted from the file\n-- more comments\nINSERT INTO `service_health` SELECT 1",
+        "-- 2.5 pasted from the file\n-- more comments\nINSERT INTO `service_health` SELECT 1",
         "/* a block\n   comment */\nINSERT INTO service_health SELECT 1",
         "-- c\n/* d */\n-- e\n  INSERT INTO remediation_decisions SELECT 1",
         "  \n INSERT INTO service_health SELECT 1",

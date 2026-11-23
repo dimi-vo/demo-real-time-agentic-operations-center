@@ -143,7 +143,7 @@ class Config:
     """All timings in seconds. They live here only: ops-sim has no timing flags (D-060)."""
 
     # The detector's warm-up: (minTrainingSize + 1) windows plus one window of margin, so the
-    # first incident is in a window the detector scores. 150 s with lab 2.3's minTrainingSize
+    # first incident is in a window the detector scores. 150 s with lab 2.4's minTrainingSize
     # 12; a test keeps the two in step.
     quiet_period: float = 150.0
     # D-065 (was a fixed 20 s, D-059): an incident lasts until an agent resolves it, or this

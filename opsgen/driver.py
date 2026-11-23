@@ -112,8 +112,8 @@ def schedule_settings(config: Config) -> str:
 def run_simulate(sim: Simulation, minutes: float, out=None) -> None:
     """Run a synthetic clock for `minutes` without sleeping, printing one summary line
     per service per 10-second window plus the deploy/incident log (brief section 4.5).
-    A line sums up the window's metrics records the way lab 2.2 does: total traffic,
-    average latency, and the share of failed requests (D-058)."""
+    A line sums up the window's metrics records the way the labs do: total traffic and
+    average latency (lab 2.3), and the share of failed requests (lab 2.2) (D-058, D-067)."""
     out = out if out is not None else sys.stdout
     names = service_names()
     total = round(minutes * 60)

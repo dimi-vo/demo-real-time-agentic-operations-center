@@ -2,7 +2,7 @@
 
 Offline scripts for tuning two things together: the **data** the simulator produces (traffic
 means, spike sizes and lengths, rests between incidents) and **our reference ARIMA detector**
-(the `ML_DETECT_ANOMALIES` settings in labs 2.3 and 2.4). They answer questions like "does
+(the `ML_DETECT_ANOMALIES` settings in labs 2.4 and 2.5, on checkout and payments). They answer questions like "does
 confidence 99.95 still catch every drop at 60 incidents an hour?" in seconds to minutes,
 without a live replay. They are the evidence behind D-059 (data and detector settings) and
 D-064 (window size).
@@ -129,8 +129,8 @@ c99.95 [conf=99.95] steady 59.2/h rests 390/300/300: 60.0 inc/h | mix 45/18/37% 
 - `w1:100.0`: % of incidents first flagged in window 1, 2, ... (`wmiss` = never flagged).
 
 Once a setup is chosen, carry it into the code: means in `opsgen/services.py`, spike sizes,
-`max_duration` and rests in `opsgen/engine.py`, detector settings in `sql/2.3_*.sql` and
-`sql/2.4_service_health.sql`. Then confirm it on the real
+`max_duration` and rests in `opsgen/engine.py`, detector settings in `sql/2.4_*.sql` and
+`sql/2.5_service_health.sql`. Then confirm it on the real
 generator with `scripts.tuning.sweep` and live with `evaluate`. `tune.py`'s service constants
 (`MEDIAN`, `TYPES_OF`, `WEIGHTS`) and `sampler.py` mirror the simulator: D-059/D-060, with
 D-067's candidates (checkout gets bad deploys and surges, payments bad deploys and drops;

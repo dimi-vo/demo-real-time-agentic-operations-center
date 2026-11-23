@@ -134,8 +134,8 @@ def main(argv: list[str] | None = None) -> None:
     if problems:
         print("\nReset finished with problems: " + "; ".join(problems))
         sys.exit(1)
-    print("\nReset complete. Both tables are still there, and nothing was rebuilt: start `uv run ops-sim`,")
-    print("then run the lab INSERTs (2.4 and 4.3) again, and create the agents again in lab 4.2.")
+    print("\nReset complete. The output tables are still there, and nothing was rebuilt: start `uv run ops-sim`,")
+    print("then run the lab INSERTs (2.2, 2.5 and 4.3) again, and create the agents again in lab 4.2.")
 
 
 if __name__ == "__main__":

@@ -144,7 +144,7 @@ def _load_rows(args, root: Path) -> list[dict]:
     if records is None:
         raise SystemExit(
             f"`{args.topic}` doesn't exist yet. Ask your platform team to re-apply, "
-            f"then run the INSERT in sql/2.4_service_health.sql."
+            f"then run the INSERT in sql/2.5_service_health.sql."
         )
     if args.dump:
         _dump(records, args.dump)

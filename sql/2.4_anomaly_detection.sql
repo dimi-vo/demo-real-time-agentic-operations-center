@@ -1,5 +1,6 @@
--- 2.3 Part 1: two ML_DETECT_ANOMALIES detectors in one statement, latency and traffic,
--- one ARIMA model per service per metric (PARTITION BY service_name). Both sources are
+-- 2.4 Part 1: two ML_DETECT_ANOMALIES detectors in one statement, latency and traffic,
+-- one ARIMA model per service per metric (PARTITION BY service_name), on checkout and
+-- payments (web-gateway is lab 2.2's threshold, D-067). Both sources are
 -- read from the earliest offset, so the detectors train on history immediately.
 -- The result fields are NULL until a service has minTrainingSize (12) windows.
 -- p=1, d=0, q=0 (AR(1) around the mean): see D-029 for why not auto-ARIMA, and D-059 for
@@ -20,6 +21,7 @@ WITH enriched AS (
   JOIN `service_deployments` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
     FOR SYSTEM_TIME AS OF m.event_time AS d
     ON m.service_name = d.service_name
+  WHERE m.service_name IN ('checkout', 'payments')
 ),
 windowed AS (
   SELECT

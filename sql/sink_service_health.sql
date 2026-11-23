@@ -3,10 +3,10 @@
 -- SINGLE SOURCE OF TRUTH for the service_health schema. The platform team's
 -- Terraform (platform-team/modules/developer/statements.tf) creates this table
 -- together with the source tables, so it exists before lab 2.1. Attendees only
--- write the INSERT in sql/2.4_service_health.sql; ops-wall and `uv run evaluate`
+-- write the INSERT in sql/2.5_service_health.sql; ops-wall and `uv run evaluate`
 -- read it, and the two agent INSERTs in section 4 read it too. (D-050)
 --
--- The 19 columns are the 19 columns of the 2.3 status query, in the same order: the
+-- The 19 columns are the 19 columns of the 2.4 status query, in the same order: the
 -- INSERT is positional, and tests/test_sql_pipeline.py checks the two lists against
 -- each other. Columns 13-14 and 16-18 are all DOUBLE, so a swapped pair would
 -- type-check silently; the test is what catches it.

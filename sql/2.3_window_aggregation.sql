@@ -1,4 +1,4 @@
--- 2.2 Part 2: join first, then window. The metrics from part 1 plus the deployment
+-- 2.3 Part 2: join first, then window. The metrics from part 1 plus the deployment
 -- context as of the end of each window. LAST_VALUE, not MAX: MAX on version strings is
 -- lexicographic and picks the wrong version in a window that contains a deploy.
 WITH enriched AS (
@@ -17,6 +17,7 @@ WITH enriched AS (
   JOIN `service_deployments` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
     FOR SYSTEM_TIME AS OF m.event_time AS d
     ON m.service_name = d.service_name
+  WHERE m.service_name IN ('checkout', 'payments')
 )
 SELECT
   window_start,

@@ -1,12 +1,13 @@
 """The 2.x pipeline files build on each other, so their shared pieces must stay identical.
 
-The walkthrough has attendees grow one statement step by step (join, window, detect,
-INSERT). These tests keep the canonical files in sql/ in step with each other and with
-the brief: the same `enriched` and `windowed` CTEs everywhere, the 2.4 INSERT body equal
-to the 2.3 status query, the same detector config for both metrics, the fixed 10-second
-window, source watermarks that let a window close on the tick at its end, explicit
-earliest-offset hints, and the service_health column list (in the 2.3 query and in the
-platform team's DDL).
+The walkthrough has attendees grow statements step by step: the temporal join (2.1), a fixed
+error-rate threshold on web-gateway (2.2, D-067), then ARIMA on checkout and payments (2.3
+window, 2.4 detect, 2.5 INSERT). These tests keep the canonical files in sql/ in step with
+each other and with the brief: the same `enriched` and `windowed` CTEs across the ARIMA
+files, each INSERT body equal to its query, the same detector config for both metrics, the
+fixed 10-second window, source watermarks that let a window close on the tick at its end,
+explicit earliest-offset hints, which services each lab covers, and the column lists of
+service_error_rate and service_health (in the queries and in the platform team's DDL).
 """
 
 import re
@@ -20,13 +21,17 @@ from opsgen.simulation import REEMIT_INTERVAL, SAMPLE_OFFSET_MS
 ROOT = Path(__file__).resolve().parents[1]
 SQL = ROOT / "sql"
 
+# ARIMA on checkout and payments (D-067).
 PIPELINE_FILES = (
-    "2.2_window_aggregation.sql",
-    "2.3_anomaly_detection.sql",
-    "2.3_anomaly_status.sql",
-    "2.4_service_health.sql",
+    "2.3_window_aggregation.sql",
+    "2.4_anomaly_detection.sql",
+    "2.4_anomaly_status.sql",
+    "2.5_service_health.sql",
 )
-DETECTION_FILES = ("2.3_anomaly_detection.sql", "2.3_anomaly_status.sql", "2.4_service_health.sql")
+DETECTION_FILES = ("2.4_anomaly_detection.sql", "2.4_anomaly_status.sql", "2.5_service_health.sql")
+ARIMA_FILTER = "WHERE m.service_name IN ('checkout', 'payments')"
+# The error-rate threshold on web-gateway (D-067): the query, then the INSERT.
+ERROR_RATE_FILES = ("2.2_error_rate.sql", "2.2_service_error_rate.sql")
 
 # D-014 tuned in D-029 and D-059: AR(1), minTrainingSize 12, confidence 99.95 (tuning
 # history in DECISIONS.md).
@@ -48,6 +53,14 @@ SERVICE_HEALTH_COLUMNS = (
     "ready_replicas", "tier",
     "latency_status", "expected_latency_ms", "latency_upper_bound",
     "traffic_status", "expected_traffic_count", "traffic_lower_bound", "traffic_upper_bound",
+    "detected_at",
+)  # fmt: skip
+
+# D-067, in the order of sql/sink_service_error_rate.sql.
+SERVICE_ERROR_RATE_COLUMNS = (
+    "service_name", "window_start", "window_end",
+    "traffic_count", "error_count", "error_rate", "error_status",
+    "version", "previous_version", "last_change", "seconds_since_deploy",
     "detected_at",
 )  # fmt: skip
 
@@ -81,26 +94,26 @@ def _cte(body: str, name: str) -> str:
 
 @pytest.mark.parametrize("name", PIPELINE_FILES)
 def test_enriched_cte_identical_everywhere(name):
-    reference = _cte(_body("2.2_window_aggregation.sql"), "enriched")
+    reference = _cte(_body("2.3_window_aggregation.sql"), "enriched")
     assert _norm(_cte(_body(name), "enriched")) == _norm(reference)
 
 
 @pytest.mark.parametrize("name", DETECTION_FILES)
-def test_windowed_cte_is_the_22_query(name):
-    # 2.2 part 2's SELECT becomes the `windowed` CTE of 2.3 and 2.4.
-    q22 = _body("2.2_window_aggregation.sql")
-    select_22 = q22[q22.index(")\nSELECT") + 2 :].rstrip(";")
+def test_windowed_cte_is_the_23_query(name):
+    # 2.3 part 2's SELECT becomes the `windowed` CTE of 2.4 and 2.5.
+    q23 = _body("2.3_window_aggregation.sql")
+    select_23 = q23[q23.index(")\nSELECT") + 2 :].rstrip(";")
     windowed = _cte(_body(name), "windowed")
     inner = windowed[windowed.index("(") + 1 : -1]
-    assert _norm(inner) == _norm(select_22)
+    assert _norm(inner) == _norm(select_23)
 
 
-def test_insert_body_is_the_23_status_query():
-    """D-050: the table is the platform team's, so 2.4 is the 2.3 query behind one line."""
-    insert = _body("2.4_service_health.sql")
+def test_insert_body_is_the_24_status_query():
+    """D-050: the table is the platform team's, so 2.5 is the 2.4 query behind one line."""
+    insert = _body("2.5_service_health.sql")
     head = "INSERT INTO `service_health`\n"
     assert insert.startswith(head)
-    assert _norm(insert[len(head) :]) == _norm(_body("2.3_anomaly_status.sql"))
+    assert _norm(insert[len(head) :]) == _norm(_body("2.4_anomaly_status.sql"))
 
 
 @pytest.mark.parametrize("name", DETECTION_FILES)
@@ -113,14 +126,14 @@ def test_two_detectors_same_config_same_window(name):
     assert "ML_DETECT_ANOMALIES( CAST(traffic_count AS DOUBLE), window_time," in body
 
 
-@pytest.mark.parametrize("name", PIPELINE_FILES)
+@pytest.mark.parametrize("name", [*PIPELINE_FILES, *ERROR_RATE_FILES])
 def test_both_sources_read_from_earliest_offset(name):
     body = _norm(_body(name))
     assert f"`service_metrics` {EARLIEST} m" in body
     assert f"`service_deployments` {EARLIEST} FOR SYSTEM_TIME AS OF m.event_time AS d" in body
 
 
-@pytest.mark.parametrize("name", [*PIPELINE_FILES, "2.2_window_metrics.sql"])
+@pytest.mark.parametrize("name", [*PIPELINE_FILES, "2.3_window_metrics.sql", *ERROR_RATE_FILES])
 def test_window_is_fixed_at_ten_seconds(name):
     body = _body(name)
     assert "TUMBLE(" in body
@@ -163,22 +176,24 @@ def test_a_window_closes_on_the_tick_at_its_end():
     assert deployments_delay >= 1
 
 
-def test_deployment_context_uses_last_value_not_max():
-    body = _body("2.2_window_aggregation.sql")
-    context = ("version", "previous_version", "last_change", "ready_replicas")
-    context += ("tier",)
+@pytest.mark.parametrize("name", ["2.3_window_aggregation.sql", "2.2_error_rate.sql"])
+def test_deployment_context_uses_last_value_not_max(name):
+    body = _body(name)
+    context = ("version", "previous_version", "last_change")
+    if name.startswith("2.3"):
+        context += ("ready_replicas", "tier")
     for col in context:
         assert f"LAST_VALUE({col}) AS {col}" in body
     assert "TIMESTAMPDIFF(SECOND, LAST_VALUE(deployed_at), window_end) AS seconds_since_deploy" in body
     assert not re.search(r"MAX\((version|previous_version|last_change|tier)\)", body)
 
 
-def test_service_health_columns_in_order():
-    body = _body("2.4_service_health.sql")
+def _final_columns(body: str, source: str) -> tuple[str, ...]:
+    """The output column names of a query's last SELECT, up to `FROM <source>`: each is the
+    last identifier of its select item."""
     final = body[body.rindex("\nSELECT") :]
-    # each output column is the last identifier of its select item
     items, depth, cur = [], 0, ""
-    for ch in final[len("\nSELECT") : final.rindex("FROM anomaly")]:
+    for ch in final[len("\nSELECT") : final.rindex(f"FROM {source}")]:
         if ch in "(":
             depth += 1
         elif ch == ")":
@@ -189,8 +204,11 @@ def test_service_health_columns_in_order():
         else:
             cur += ch
     items.append(cur)
-    names = [re.findall(r"\w+", item)[-1] for item in items]
-    assert tuple(names) == SERVICE_HEALTH_COLUMNS
+    return tuple(re.findall(r"\w+", item)[-1] for item in items)
+
+
+def test_service_health_columns_in_order():
+    assert _final_columns(_body("2.5_service_health.sql"), "anomaly") == SERVICE_HEALTH_COLUMNS
 
 
 def test_service_health_ddl_declares_the_columns_in_order():
@@ -209,7 +227,7 @@ def test_detected_at_is_the_instant_of_the_verdict():
     text = (SQL / "sink_service_health.sql").read_text()
     ddl = _norm(text[text.index("CREATE TABLE") :])
     assert "`detected_at` TIMESTAMP_LTZ(3) NOT NULL" in ddl
-    status = _norm(_body("2.3_anomaly_status.sql"))
+    status = _norm(_body("2.4_anomaly_status.sql"))
     assert status.endswith("CURRENT_TIMESTAMP AS detected_at FROM anomaly;")
     assert "PROCTIME" not in status
 
@@ -256,7 +274,7 @@ def test_per_version_counts_add_up_the_traffic(name):
     assert "COUNT(" not in body
 
 
-@pytest.mark.parametrize("name", ["2.2_window_metrics.sql", "2.2_window_aggregation.sql"])
+@pytest.mark.parametrize("name", ["2.3_window_metrics.sql", "2.3_window_aggregation.sql"])
 def test_windows_sum_the_traffic_and_average_the_latency(name):
     # D-058: 10 per-second samples per window; no error metrics, no MAX(latency_ms).
     body = _norm(_body(name))
@@ -268,12 +286,98 @@ def test_windows_sum_the_traffic_and_average_the_latency(name):
 
 
 def test_unread_columns_are_not_carried_through_the_pipeline():
-    """D-044, D-058: nothing downstream reads them, so attendees don't have to read them
-    either. The raw message fields stay in the source tables; error_count is display
-    only, so it stops at lab 2.1."""
-    for path in sorted((ROOT / "sql").glob("2.[2-4]_*.sql")):
-        body = path.read_text()
-        assert "error_count" not in body, path.name
-        assert "desired_replicas" not in body, path.name
+    """D-044, D-058, D-067: nothing downstream reads them, so attendees don't have to read
+    them either. The raw message fields stay in the source tables. error_count is read by
+    lab 2.2 only (web-gateway's threshold): the ARIMA labs never carry it."""
+    arima = sorted((ROOT / "sql").glob("2.[3-5]_*.sql"))
+    assert len(arima) == 5
+    for path in arima:
+        assert "error_count" not in path.read_text(), path.name
+    for path in sorted((ROOT / "sql").glob("2.[2-5]_*.sql")):
+        assert "desired_replicas" not in path.read_text(), path.name
     assert "`error_count`" in (ROOT / "sql/source_service_metrics.sql").read_text()
     assert "`desired_replicas`" in (ROOT / "sql/source_service_deployments.sql").read_text()
+
+
+# --- which lab covers which service (D-067) ---------------------------------------------
+
+
+@pytest.mark.parametrize("name", PIPELINE_FILES)
+def test_arima_covers_checkout_and_payments_only(name):
+    body = _norm(_body(name))
+    assert _norm(ARIMA_FILTER) in body
+    assert "web-gateway" not in body
+
+
+def test_the_windowing_step_covers_the_same_two_services():
+    body = _norm(_body("2.3_window_metrics.sql"))
+    assert "WHERE service_name IN ('checkout', 'payments') GROUP BY" in body
+
+
+def test_no_lab_runs_ml_detect_anomalies_on_web_gateway():
+    for path in sorted(SQL.glob("2.*.sql")):
+        body = _body(path.name)
+        if "ML_DETECT_ANOMALIES" in body:
+            assert ARIMA_FILTER in body and "web-gateway" not in body, path.name
+
+
+# --- lab 2.2: the error-rate threshold on web-gateway (D-067) ----------------------------
+
+
+def test_the_error_rate_query_reads_web_gateway_only():
+    enriched = _norm(_cte(_body("2.2_error_rate.sql"), "enriched"))
+    assert enriched.endswith("ON m.service_name = d.service_name WHERE m.service_name = 'web-gateway' )")
+    assert "m.error_count" in enriched
+
+
+def test_the_threshold_is_a_ratio_of_sums_at_25_percent():
+    # Every request counts once: the window's errors against the window's requests, not an
+    # average of per-second ratios. A window with no requests is never HIGH.
+    body = _norm(_body("2.2_error_rate.sql"))
+    windowed = _norm(_cte(_body("2.2_error_rate.sql"), "windowed"))
+    assert "SUM(traffic_count) AS traffic_count" in windowed
+    assert "SUM(error_count) AS error_count" in windowed
+    assert "CAST(error_count AS DOUBLE) / NULLIF(traffic_count, 0) AS error_rate" in body
+    assert (
+        "CASE WHEN traffic_count > 0 AND error_count >= 0.25 * traffic_count THEN 'HIGH' "
+        "ELSE 'NORMAL' END AS error_status"
+    ) in body
+    assert "AVG(" not in body
+
+
+def test_the_error_rate_insert_body_is_the_22_query():
+    """D-050: the table is the platform team's, so the INSERT is the query behind one line."""
+    insert = _body("2.2_service_error_rate.sql")
+    head = "INSERT INTO `service_error_rate`\n"
+    assert insert.startswith(head)
+    assert _norm(insert[len(head) :]) == _norm(_body("2.2_error_rate.sql"))
+
+
+def test_service_error_rate_columns_in_order():
+    assert _final_columns(_body("2.2_error_rate.sql"), "windowed") == SERVICE_ERROR_RATE_COLUMNS
+
+
+def test_service_error_rate_ddl_declares_the_columns_in_order():
+    ddl = (SQL / "sink_service_error_rate.sql").read_text()
+    declared = re.findall(r"^  `(\w+)` ", ddl, re.MULTILINE)
+    assert tuple(declared) == SERVICE_ERROR_RATE_COLUMNS
+
+
+def test_service_error_rate_ddl_types():
+    """A declared VARCHAR(n) would truncate (D-025); detected_at is an instant (D-054)."""
+    text = (SQL / "sink_service_error_rate.sql").read_text()
+    ddl = _norm(text[text.index("CREATE TABLE") :])
+    assert "`error_status` STRING NOT NULL" in ddl
+    assert "`error_rate` DOUBLE" in ddl
+    assert "`detected_at` TIMESTAMP_LTZ(3) NOT NULL" in ddl
+    assert "VARCHAR" not in ddl
+    assert "CREATE TABLE IF NOT EXISTS `service_error_rate`" in ddl
+    for option in ("'changelog.mode' = 'append'", "'kafka.consumer.isolation-level' = 'read-uncommitted'",
+                   "'kafka.cleanup-policy' = 'delete'"):  # fmt: skip
+        assert option in ddl
+
+
+def test_the_error_rate_verdict_is_stamped_like_service_health():
+    body = _norm(_body("2.2_error_rate.sql"))
+    assert body.endswith("CURRENT_TIMESTAMP AS detected_at FROM windowed;")
+    assert "PROCTIME" not in body

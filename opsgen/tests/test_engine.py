@@ -80,7 +80,7 @@ def _force(eng, itype, svc):
 def test_quiet_period_follows_the_detector_warm_up():
     # D-060: the detector scores nothing for its first minTrainingSize + 1 windows; the
     # quiet period covers them plus one window of margin, so every incident is scored.
-    sql = (Path(__file__).resolve().parents[2] / "sql/2.3_anomaly_status.sql").read_text()
+    sql = (Path(__file__).resolve().parents[2] / "sql/2.4_anomaly_status.sql").read_text()
     sizes = {int(m) for m in re.findall(r"'minTrainingSize'\s+VALUE\s+(\d+)", sql)}
     assert len(sizes) == 1, sizes
     (min_training,) = sizes
