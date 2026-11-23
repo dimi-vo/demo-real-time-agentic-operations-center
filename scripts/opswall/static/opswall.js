@@ -3,12 +3,17 @@
 /*  Ops wall — render code, driven by the live /ws snapshot (D-054).
  *
  *  The wall's state does all the counting; this page only draws what the snapshot says.
- *  One card per service; in it, one chart per metric (Latency, Traffic), and one time axis.
+ *  One card per service; in it, the charts the snapshot names (svc.charts) and one time axis:
+ *  Latency and Traffic for checkout and payments, Errors for web-gateway (D-067).
  *  A chart, back to front (D-066):
  *  - a translucent purple box per injected incident on that metric, the full plot height,
  *    from its start to its end (to the right edge while open); a missed one is dashed
+ *  - on the errors chart, a thin mark at every deploy and rollback (svc.deploys): solid for a
+ *    deploy, dashed for a rollback, good deploys included (D-067)
  *  - the raw service_metrics line (D-061): one point per second on a log y scale fitted to
- *    what's visible
+ *    what's visible; on the errors chart, the share of each second's requests that failed on
+ *    a fixed linear 0-100 % scale, with lab 2.2's threshold as a dashed line, and a gap for a
+ *    second without requests
  *  - under the plot, a marker strip with one set of marks per detection block: a cyan dot
  *    where the detector flagged it (hollow when no incident owns it: a false alarm), a cyan
  *    line from it to the agent's first decision (to "now" while it waits), and an amber
@@ -83,6 +88,7 @@ const ago = sec => sec >= AXIS ? "now" : `−${dur(AXIS - sec)}`;
 const range = (a, b) => `${ago(a)} to ${ago(b)}, ${dur(Math.min(b, AXIS) - a)}`;
 const human = t => ({
   BAD_DEPLOY: "Bad deploy",
+  BAD_DEPLOY_ERRORS: "Bad deploy (errors)",
   TRAFFIC_SURGE: "Traffic surge",
   UPSTREAM_DROP: "Upstream drop",
 }[t] || t.toLowerCase().replace(/_/g, " ").replace(/^./, c => c.toUpperCase()));
@@ -101,7 +107,9 @@ const ACTION = {
 
 // ---------- Model ----------
 // A chart's model is a filter of the snapshot: one service's incidents and blocks for one
-// metric ("latency" or "traffic"). Nothing is matched or counted here; the state did that.
+// metric ("latency", "traffic" or "errors"). Nothing is matched or counted here; the state
+// did that, the error share included.
+const VALUE = { latency: r => r.latency, traffic: r => r.traffic, errors: r => r.errorPct };
 function metricModel(svc, kind) {
   const byId = new Map((svc.groundTruth || []).map(g => [g.incidentId, g]));
   return {
@@ -111,14 +119,20 @@ function metricModel(svc, kind) {
     incidentOf: b => (b.incidentId == null ? null : byId.get(b.incidentId) || null),
     key: `${svc.name}/${kind}`,
     records: svc.metrics || [],  // service_metrics samples on the axis, oldest first
+    value: VALUE[kind],          // a record's value on this chart; null leaves a gap
+    deploys: svc.deploys || [],  // version changes on the axis, drawn on every chart of the card
   };
 }
 
 // ---------- Words ----------
-const METRIC = { latency: "Latency", traffic: "Traffic" };
-const TRIGGER = { LATENCY_HIGH: "Latency high", TRAFFIC_HIGH: "Traffic high", TRAFFIC_LOW: "Traffic low" };
+const METRIC = { latency: "Latency", traffic: "Traffic", errors: "Errors" };
+const TRIGGER = {
+  LATENCY_HIGH: "Latency high", TRAFFIC_HIGH: "Traffic high", TRAFFIC_LOW: "Traffic low",
+  ERROR_RATE_HIGH: "Error rate high",
+};
 const triggerLabel = b => TRIGGER[b.trigger]
-  || (b.metric === "latency" ? "Latency high" : b.direction === "down" ? "Traffic low" : "Traffic high");
+  || (b.metric === "latency" ? "Latency high" : b.metric === "errors" ? "Error rate high"
+    : b.direction === "down" ? "Traffic low" : "Traffic high");
 const actionLabel = a => ACTION[a] || esc(human(a || "unknown"));
 const actionWord = a => (a === "INVALID" ? "invalid" : actionLabel(a).toLowerCase());
 
@@ -150,6 +164,12 @@ function storyOf(t) {
   return `${detected} Waiting for the agent.`;
 }
 
+// A deploy mark's words: "Deploy: 3.4.3 → 3.4.4", and how long ago.
+function deployTip(d) {
+  const what = d.kind === "ROLLBACK" ? "Rollback" : "Deploy";
+  return `<strong>${what}: ${esc(d.previousVersion ?? "?")} → ${esc(d.version ?? "?")}</strong>${ago(d.t)}`;
+}
+
 function incidentTip(t) {
   const head = `<strong>Injected: ${human(t.type)}</strong>${range(t.start, t.end)}`;
   if (t.detectedAt != null) return `${head}<em>${storyOf(t)}</em>`;
@@ -175,14 +195,22 @@ function blockTip(m, b) {
 }
 
 // ---------- Scale ----------
-// The y scale is logarithmic: the incidents are ratios (x5, x0.1, x4), and on a log scale a
-// ratio has the same height wherever the service's normal level sits. It runs from a round
-// number just below the smallest visible value above 0 to one just above the largest, at
-// least x10 apart so a quiet chart doesn't blow plain noise up. A second with 0 requests
-// sits on the bottom edge (D-061).
+// The latency and traffic scales are logarithmic: the incidents are ratios (x5, x0.1, x4),
+// and on a log scale a ratio has the same height wherever the service's normal level sits.
+// Each runs from a round number just below the smallest visible value above 0 to one just
+// above the largest, at least x10 apart so a quiet chart doesn't blow plain noise up. A
+// second with 0 requests sits on the bottom edge (D-061). The errors scale is fixed and
+// linear, 0 to 100 %, so the threshold line never moves (D-067).
 const UNIT = { latency: "ms", traffic: "rps" };
 const num = v => `${+v.toPrecision(3)}`;
-const valueText = (kind, v) => kind === "latency" ? `${v >= 100 ? Math.round(v) : v.toFixed(1)} ms` : `${v} rps`;
+let THRESHOLD = 25;  // errorThresholdPct from the snapshot: lab 2.2's rule
+function valueText(kind, r) {
+  if (kind === "errors") {
+    return r.errorPct == null ? "No requests" : `${r.errorPct.toFixed(1)} % of ${plural(r.traffic, "request", "requests")}`;
+  }
+  const v = r[kind];
+  return kind === "latency" ? `${v >= 100 ? Math.round(v) : v.toFixed(1)} ms` : `${v} rps`;
+}
 
 // The nearest multiple of a fifth of the value's power of ten at or above / at or below it:
 // 152 → 160, 37 → 38, 248 → 260; 33 → 32, 170 → 160.
@@ -194,6 +222,10 @@ function ceilNice(v) {
 function floorNice(v) {
   const step = Math.pow(10, Math.floor(Math.log10(v))) / 5;
   return Math.floor(v / step + 1e-9) * step;
+}
+
+function errorScale() {
+  return { frac: v => Math.max(0, Math.min(1, v / 100)), label: `0–100 % · threshold ${num(THRESHOLD)} %` };
 }
 
 // y as a fraction of the plot height (0 = bottom, 1 = top), and the range's label.
@@ -243,7 +275,7 @@ function hostWidth(host) {
 function chartLayers(host) {
   if (!host._svg) {
     host._svg = s("svg", { class: "chart" }, host);
-    host._layers = Object.fromEntries(["boxes", "plot", "hover", "marks"].map(n => [n, s("g", {}, host._svg)]));
+    host._layers = Object.fromEntries(["boxes", "deploys", "plot", "hover", "marks"].map(n => [n, s("g", {}, host._svg)]));
   }
   return host._layers;
 }
@@ -254,11 +286,11 @@ function drawChart(host) {
   const w = hostWidth(host);
   const X = t => (Math.max(0, Math.min(t, AXIS)) / AXIS) * w;
   const recs = m.records.filter(r => r.t >= 0 && r.t <= AXIS);
-  const scale = logScale(m.kind, recs.map(r => r[m.kind]));
+  const scale = m.kind === "errors" ? errorScale() : logScale(m.kind, recs.map(m.value));
   const plotH = PLOT_BOTTOM - PLOT_TOP;
   const Y = v => PLOT_TOP + plotH * (1 - scale.frac(v));
 
-  const { boxes, plot, hover, marks } = chartLayers(host);
+  const { boxes, deploys, plot, hover, marks } = chartLayers(host);
   attrs(host._svg, { width: w, height: CHART_H, viewBox: `0 0 ${w} ${CHART_H}` });
 
   // The injected incidents on this metric (INCIDENT_METRIC in the state), by incident id.
@@ -271,16 +303,36 @@ function drawChart(host) {
     });
   });
 
-  // The label band, the baseline and the line. A missing second (the simulator stopped)
-  // breaks the line instead of bridging it.
+  // The version changes (D-067): a thin line across the plot at each deploy and rollback,
+  // a keyboard stop with its own tooltip; the pointer gets the same words on the line's.
+  sync(deploys, m.deploys, d => d.key, () => {
+    const g = s("g", { tabindex: 0 });
+    s("line", { class: "deploy-line" }, g);
+    return g;
+  }, (g, d) => {
+    const x = X(d.t);
+    setClass(g, d.kind === "ROLLBACK" ? "deploy rollback" : "deploy");
+    g.setAttribute("data-tip", deployTip(d));
+    attrs(g.firstChild, { x1: x, x2: x, y1: PLOT_TOP, y2: PLOT_BOTTOM });
+  });
+
+  // The label band, the baseline, the threshold (errors chart) and the line. A missing second
+  // (the simulator stopped), or one without requests on the errors chart, breaks the line
+  // instead of bridging it.
   plot.replaceChildren();
   const label = s("text", { class: "scale", x: 0, y: PLOT_TOP - 6 }, plot);
   s("tspan", { class: "metric-name" }, label).textContent = METRIC[m.kind];
   s("tspan", {}, label).textContent = ` · ${recs.length ? scale.label : "No records yet"}`;
   s("line", { class: "baseline", x1: 0, x2: w, y1: PLOT_BOTTOM + 0.5, y2: PLOT_BOTTOM + 0.5 }, plot);
+  if (m.kind === "errors") {
+    const y = Y(THRESHOLD);
+    s("line", { class: "threshold", x1: 0, x2: w, y1: y, y2: y }, plot);
+  }
   let d = "", prev = null;
   for (const r of recs) {
-    d += `${prev == null || r.t - prev > 1.5 ? "M" : "L"} ${X(r.t).toFixed(1)} ${Y(r[m.kind]).toFixed(1)} `;
+    const v = m.value(r);
+    if (v == null) { prev = null; continue; }
+    d += `${prev == null || r.t - prev > 1.5 ? "M" : "L"} ${X(r.t).toFixed(1)} ${Y(v).toFixed(1)} `;
     prev = r.t;
   }
   if (d) s("path", { class: "series", d }, plot);
@@ -302,13 +354,16 @@ function drawChart(host) {
     let i = 0, j = recs.length - 1;
     while (i < j) { const mid = (i + j) >> 1; if (recs[mid].t < t) i = mid + 1; else j = mid; }
     const r = i > 0 && t - recs[i - 1].t < recs[i].t - t ? recs[i - 1] : recs[i];
-    const x = X(r.t);
+    const x = X(r.t), v = m.value(r);
     attrs(cl, { x1: x, x2: x });
-    attrs(cd, { cx: x, cy: Y(r[m.kind]) });
+    // "inherit", not "visible": a visible child would still show once the group is hidden
+    attrs(cd, { cx: x, cy: Y(v ?? 0), visibility: v == null ? "hidden" : "inherit" });
     cross.setAttribute("visibility", "visible");
     const during = m.truth.find(g => r.t >= g.start && r.t <= g.end);
+    const deploy = m.deploys.find(dp => Math.abs(dp.t - r.t) <= 1.5);
     tipNode = null;
-    setHTML(tip, `<strong>${valueText(m.kind, r[m.kind])}</strong>${ago(r.t)}` +
+    setHTML(tip, `<strong>${valueText(m.kind, r)}</strong>${ago(r.t)}` +
+      (deploy ? `<span class="rule"></span>${deployTip(deploy)}` : "") +
       (during ? `<span class="rule"></span>${incidentTip(during)}` : ""));
     tip.dataset.owner = "line";
     tip.classList.add("on");
@@ -359,18 +414,8 @@ function createCard() {
   const status = card.querySelector(".status");
   card._ui = {
     name: card.querySelector("h2"), status, statusText: status.lastElementChild,
-    charts: [],
+    charts: [], chartsKey: null,
   };
-  const charts = card.querySelector(".charts");
-  for (const kind of ["latency", "traffic"]) {
-    const host = document.createElement("div");
-    host.className = "chart-host";
-    host.style.height = `${CHART_H}px`;
-    host._draw = () => drawChart(host);
-    ro.observe(host);
-    charts.appendChild(host);
-    card._ui.charts.push({ kind, host });
-  }
   const axis = card.querySelector(".axis");
   for (let i = 0; i <= 5; i++) {
     const sec = i * AXIS / 5;
@@ -382,8 +427,29 @@ function createCard() {
   return card;
 }
 
+// The card's chart hosts, one per kind the snapshot names (svc.charts, D-067): made on the
+// first update, before anything is drawn, and again only if the list changes.
+function ensureCharts(card, kinds) {
+  const ui = card._ui, key = kinds.join(",");
+  if (ui.chartsKey === key) return;
+  ui.chartsKey = key;
+  for (const c of ui.charts) ro.unobserve(c.host);
+  const charts = card.querySelector(".charts");
+  charts.replaceChildren();
+  ui.charts = kinds.map(kind => {
+    const host = document.createElement("div");
+    host.className = "chart-host";
+    host.style.height = `${CHART_H}px`;
+    host._draw = () => drawChart(host);
+    ro.observe(host);
+    charts.appendChild(host);
+    return { kind, host };
+  });
+}
+
 function updateCard(card, svc) {
   const ui = card._ui, status = svc.status || "healthy";
+  ensureCharts(card, svc.charts || ["latency", "traffic"]);
   setClass(card, `card ${status}`);
   setText(ui.name, svc.name);
   setClass(ui.status, `status ${status}`);
@@ -456,6 +522,7 @@ const ro = new ResizeObserver(entries => {
 
 function render(D) {
   AXIS = D.axisSeconds || 600;
+  THRESHOLD = D.errorThresholdPct ?? THRESHOLD;
   sync(document.getElementById("cards"), D.services || [], svc => svc.name, createCard, updateCard);
   renderSummary(D.summary || {});
   setText(document.getElementById("updated"),

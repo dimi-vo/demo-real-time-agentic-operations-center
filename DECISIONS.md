@@ -2494,7 +2494,31 @@ error-rate agent INSERT first; `evaluate`'s hint no longer says "two" agent INSE
 action and no other, instead of exactly one per action; both release legs write and tell their
 own trigger and parse the answer identically; the error-rate leg's input lines; no example
 pairs web-gateway with latency or traffic, SCALE_OUT on checkout, INVESTIGATE_UPSTREAM on
-payments), `tests/test_reset_health.py`, `tests/test_evaluate_decisions.py`. The spec's other
-issues add theirs.
+payments), `tests/test_reset_health.py`, `tests/test_evaluate_decisions.py`.
+Issue 07 (the wall): `scripts/opswall/state.py` (`ErrorRateRow` and `apply_error_rate`, kept
+like a health row; `Trigger.source` names the rows a trigger reads, and `ERROR_RATE_HIGH`
+reads `service_error_rate` onto the `errors` metric; `INCIDENT_METRIC` maps
+`BAD_DEPLOY_ERRORS` there; `MetricSample.error_count` is back and a card with the errors
+chart gets each second's `errorPct`, null for a second without requests; `DeployMark`, one per
+DEPLOY or ROLLBACK keyed by `deployed_at`, for a card with the errors chart; `charts` per card,
+`ERRORS_CHART_SERVICES = ("web-gateway",)`; `errorThresholdPct` in the snapshot, tied by a test
+to lab 2.2's `0.25`), `consumer.py` (a sixth topic, `service_error_rate`, from 10 minutes
+back), `app.py` (docstring), `static/opswall.js` (cards build their charts from
+`svc.charts`; the errors chart is linear 0-100 % with a dashed `--crit` threshold line and a
+gap for a second without requests; a deploy-mark layer, solid for a deploy and dashed for a
+rollback, each a keyboard stop, and the crosshair's tooltip names a deploy within 1.5 s;
+labels for the new type, trigger and metric), `opswall.css` (`--text` deploy marks and the
+`--crit` threshold: OKLab ΔE 20.1 and 18.3 from their nearest tokens, above the 15 floor),
+`index.html` (three legend rows). Tests: `tests/test_opswall_state.py` (charts per card; an
+error-rate breach is a block on the errors chart owned by its `BAD_DEPLOY_ERRORS`; the tile
+waits on "error rate high"; a latency decision doesn't close it; the two row sources don't
+overwrite each other; a window written twice; the error share per second; deploy and rollback
+marks, not heartbeats, and only where the chart shows them; trim; the threshold matches the
+SQL), `tests/test_opswall_ingest.py` (the consumer tails six topics). Rendered offline in
+headless Chrome at 1440 and 820 px: the real `Simulation` (seed 7), lab 2.2's verdict per
+window and a stand-in release agent answering ROLLBACK 1 s after each HIGH window; three bad
+deploys, all answered (detection 10.4 s, answer 0.6 s), five good deploys
+(`.scratch/web-gateway-threshold/research/wall_render.py`). Hover and keyboard focus were not
+exercised (screenshots only). The spec's other issues add theirs.
 
 Amends D-056, D-057, D-058, D-060 and D-066.

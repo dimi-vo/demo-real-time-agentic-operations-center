@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from scripts.opswall.state import AXIS_SECONDS, OpsWallState
+from scripts.opswall.state import AXIS_SECONDS, ERROR_RATE_THRESHOLD_PCT, OpsWallState
 
 NOW = 1_800_000_000.0  # fixed epoch so snapshots are deterministic; a multiple of 10
 T0 = NOW - 300         # incidents start here, on a window boundary
@@ -512,3 +512,133 @@ def test_concurrent_writes_do_not_raise():
     for t in threads:
         t.join()
     st.snapshot()  # no exception
+
+
+# --- web-gateway: the error-rate chart and deploy marks (D-067) ------------------------
+
+
+def _error_rate(st, window_end, status="NORMAL", detected_at="default", service="web-gateway"):
+    """One service_error_rate row (lab 2.2), as the consumer delivers it."""
+    errors = 200 if status == "HIGH" else 2
+    record = {"service_name": service, "window_start": _dt(window_end - 10), "window_end": _dt(window_end),
+              "traffic_count": 500, "error_count": errors, "error_rate": errors / 500, "error_status": status}
+    if detected_at == "default":
+        detected_at = window_end + DETECT
+    if detected_at is not None:
+        record["detected_at"] = datetime.fromtimestamp(detected_at, tz=timezone.utc)
+    st.apply_error_rate(record)
+
+
+def _deployment(st, service, deployed_at, last_change, version, previous_version):
+    st.apply_deployment({"service_name": service, "version": version, "previous_version": previous_version,
+                         "last_change": last_change, "deployed_at": _dt(deployed_at)})
+
+
+def test_each_card_names_its_charts():
+    charts = {s["name"]: s["charts"] for s in OpsWallState().snapshot(now=NOW)["services"]}
+    assert charts == {"web-gateway": ["errors"], "checkout": ["latency", "traffic"], "payments": ["latency", "traffic"]}
+
+
+def test_an_error_rate_breach_is_a_block_on_the_errors_chart_owned_by_its_bad_deploy():
+    st = OpsWallState()
+    _incident(st, "web-gateway", T0, T0 + 11, incident_type="BAD_DEPLOY_ERRORS")
+    _error_rate(st, T0 + 10, "HIGH")
+    _error_rate(st, T0 + 20)
+    _decide(st, "web-gateway", T0 + 10, at=T0 + 10 + DETECT + ANSWER, trigger="ERROR_RATE_HIGH", target="3.4.3")
+    s = _svc(st, "web-gateway")
+    [block] = s["blocks"]
+    assert (block["metric"], block["trigger"], block["direction"]) == ("errors", "ERROR_RATE_HIGH", "up")
+    assert (block["incidentId"], block["open"], block["action"]) == ("INC0001", False, "ROLLBACK")
+    assert block["timeToDetect"] == pytest.approx(10 + DETECT)
+    [truth] = s["groundTruth"]
+    assert (truth["metric"], truth["verdict"]) == ("errors", "answered")
+
+
+def test_the_tile_waits_for_the_agent_on_an_error_rate_breach():
+    st = OpsWallState()
+    _error_rate(st, NOW - 10, "HIGH", detected_at=NOW - 4)
+    s = _svc(st, "web-gateway")
+    assert s["status"] == "anomaly"
+    assert s["statusText"] == "Anomaly detected: error rate high, waiting for the agent"
+
+
+def test_a_latency_decision_does_not_close_an_error_rate_block():
+    st = OpsWallState()
+    _error_rate(st, NOW - 10, "HIGH", detected_at=NOW - 4)
+    _decide(st, "web-gateway", NOW - 10, at=NOW - 1, trigger="LATENCY_HIGH")
+    [block] = _svc(st, "web-gateway")["blocks"]
+    assert block["open"]
+
+
+def test_error_rate_rows_and_health_rows_do_not_overwrite_each_other():
+    # Two tables, two row sources: the same window in both keeps both verdicts.
+    st = OpsWallState()
+    _error_rate(st, T0 + 10, "HIGH")
+    _health(st, "web-gateway", T0 + 10)  # an old service_health row for the same window
+    _decide(st, "web-gateway", T0 + 10, at=T0 + 20, trigger="ERROR_RATE_HIGH")
+    assert [b["trigger"] for b in _svc(st, "web-gateway")["blocks"]] == ["ERROR_RATE_HIGH"]
+
+
+def test_an_error_rate_window_written_twice_keeps_its_first_detection_and_the_newest_status():
+    st = OpsWallState()
+    _error_rate(st, T0 + 10, "HIGH", detected_at=T0 + 16)
+    _error_rate(st, T0 + 10, "HIGH", detected_at=T0 + 40)  # the INSERT ran again
+    _decide(st, "web-gateway", T0 + 10, at=T0 + 50, trigger="ERROR_RATE_HIGH")
+    [block] = _svc(st, "web-gateway")["blocks"]
+    assert block["start"] == pytest.approx(_pos(T0 + 16))
+    _error_rate(st, T0 + 10, "NORMAL", detected_at=T0 + 60)
+    assert _svc(st, "web-gateway")["blocks"] == []
+
+
+def test_the_errors_chart_gets_the_error_share_of_each_second():
+    st = OpsWallState()
+    st.apply_metric({"service_name": "web-gateway", "event_time": _dt(NOW - 3.001), "traffic_count": 50,
+                     "latency_ms": 35.0, "error_count": 20})
+    st.apply_metric({"service_name": "web-gateway", "event_time": _dt(NOW - 2.001), "traffic_count": 0,
+                     "latency_ms": 35.0, "error_count": 0})
+    st.apply_metric({"service_name": "web-gateway", "event_time": _dt(NOW - 1.001), "traffic_count": 48,
+                     "latency_ms": 35.0, "error_count": None})
+    _sample(st, "checkout", NOW - 1.001)
+    shares = [m["errorPct"] for m in _svc(st, "web-gateway")["metrics"]]
+    assert shares == [40.0, None, 0.0]  # a second with no requests is a gap, not 0 %
+    assert "errorPct" not in _svc(st, "checkout")["metrics"][0]  # only where a chart reads it
+
+
+def test_deploys_and_rollbacks_become_marks_and_heartbeats_do_not():
+    st = OpsWallState()
+    _deployment(st, "web-gateway", NOW - 500, "INITIAL", "3.4.2", None)  # the bootstrap record
+    _deployment(st, "web-gateway", T0, "DEPLOY", "3.4.3", "3.4.2")
+    _deployment(st, "web-gateway", T0, "DEPLOY", "3.4.3", "3.4.2")  # its 5-s heartbeat
+    _deployment(st, "web-gateway", T0 + 11, "ROLLBACK", "3.4.2", "3.4.3")
+    _deployment(st, "checkout", T0, "DEPLOY", "4.2.2", "4.2.1")
+    marks = _svc(st, "web-gateway")["deploys"]
+    assert [(m["kind"], m["previousVersion"], m["version"]) for m in marks] == [
+        ("DEPLOY", "3.4.2", "3.4.3"),
+        ("ROLLBACK", "3.4.3", "3.4.2"),
+    ]
+    assert [m["t"] for m in marks] == pytest.approx([_pos(T0), _pos(T0 + 11)])
+    assert len({m["key"] for m in marks}) == 2
+    # Only a card whose chart shows them gets marks; the review of service_deployments
+    # decides about the others (opswall-redesign issue 01).
+    assert _svc(st, "checkout")["deploys"] == []
+
+
+def test_trim_drops_old_error_rate_rows_and_deploy_marks():
+    st = OpsWallState()
+    old = NOW - AXIS_SECONDS - 120
+    _error_rate(st, old, "HIGH")
+    _deployment(st, "web-gateway", old, "DEPLOY", "3.4.3", "3.4.2")
+    st.trim(NOW)
+    with st._lock:
+        s = st._services["web-gateway"]
+        assert s.error_rates == [] and s.deploys == []
+
+
+def test_the_threshold_line_is_lab_2_2s_rule():
+    import re
+    from pathlib import Path
+
+    sql = (Path(__file__).resolve().parents[1] / "sql/2.2_error_rate.sql").read_text()
+    (share,) = re.findall(r"error_count >= ([\d.]+) \* traffic_count", sql)
+    assert ERROR_RATE_THRESHOLD_PCT == pytest.approx(100 * float(share))
+    assert OpsWallState().snapshot(now=NOW)["errorThresholdPct"] == ERROR_RATE_THRESHOLD_PCT

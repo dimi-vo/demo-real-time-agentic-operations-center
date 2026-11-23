@@ -5,8 +5,9 @@ One ``OpsWallState`` is shared between the Kafka consumer threads, which call
 ``snapshot(now)`` and pushes it to every browser at ~4 Hz. All access is guarded
 by one lock; the write methods are tiny so contention is negligible.
 
-The appliers keep the raw facts: one health row per window, one decision per window
-and agent, one incident per id, one ``service_metrics`` sample per second.
+The appliers keep the raw facts: one health row and one error-rate row per window, one
+decision per window and agent, one incident per id, one ``service_metrics`` sample per
+second, and each version change.
 ``snapshot(now)`` derives everything the page shows from them, so the page only draws
 and the counting is tested here (D-054). Deriving
 at snapshot time also lets a late row or decision reshape what is drawn (records can land
@@ -14,8 +15,9 @@ out of order, and the consumer reads ``read_uncommitted``, so a row an aborted F
 transaction wrote comes again when the statement replays, D-063).
 
 - A **run** is consecutive flagged windows of one service for one trigger (latency
-  high, traffic high, traffic low), counting only windows whose ``window_end`` is on
-  the chart. One window without that flag ends the run.
+  high, traffic high, traffic low from ``service_health``; error rate high from
+  ``service_error_rate``, D-067), counting only windows whose ``window_end`` is on the
+  chart. One window without that flag ends the run.
 - Its **block** opens at the ``detected_at`` of the run's first window and closes at
   the Kafka write time of the first decision for any window of the run, whatever the
   action. Still unanswered 30 s after the run's last ``detected_at``, it is removed.
@@ -30,7 +32,12 @@ transaction wrote comes again when the statement replays, D-063).
 - The **samples** are the raw ``service_metrics`` records, one per service per second
   (D-058), kept for the axis plus a margin (``trim()``). The snapshot
   carries the ones on the chart; the page draws them as the latency and traffic lines
-  (D-061).
+  (D-061), and, for a card with the errors chart, the share of each second's requests
+  that failed (null for a second without requests, D-067).
+- The **charts** of a card: web-gateway's is the errors chart alone (lab 2.2's threshold,
+  D-067), checkout's and payments' are latency and traffic. A card with the errors chart
+  also gets a **deploy mark** per DEPLOY and ROLLBACK of its service, good deploys
+  included, keyed by ``deployed_at`` so the 5-s heartbeat adds nothing.
 
 State stores absolute epoch seconds everywhere. The snapshot turns positions into the
 axis-relative seconds the page draws with: ``t - (now - axis_seconds)``, clipped to
@@ -66,17 +73,30 @@ class Trigger:
     name: str        # as the agents write it in remediation_decisions.trigger
     metric: str      # the chart it is drawn on
     direction: str
-    column: str      # the HealthRow status it reads
+    source: str      # the ServiceState rows it reads: "health" or "error_rates"
+    column: str      # the row's status field it reads
     flag: str        # the status value that flags it
     words: str       # how the tile says it
 
 
 TRIGGERS = (
-    Trigger("LATENCY_HIGH", "latency", "up", "latency_status", "HIGH", "latency high"),
-    Trigger("TRAFFIC_HIGH", "traffic", "up", "traffic_status", "HIGH", "traffic high"),
-    Trigger("TRAFFIC_LOW", "traffic", "down", "traffic_status", "LOW", "traffic low"),
+    Trigger("LATENCY_HIGH", "latency", "up", "health", "latency_status", "HIGH", "latency high"),
+    Trigger("TRAFFIC_HIGH", "traffic", "up", "health", "traffic_status", "HIGH", "traffic high"),
+    Trigger("TRAFFIC_LOW", "traffic", "down", "health", "traffic_status", "LOW", "traffic low"),
+    Trigger("ERROR_RATE_HIGH", "errors", "up", "error_rates", "error_status", "HIGH", "error rate high"),
 )
-INCIDENT_METRIC = {"BAD_DEPLOY": "latency", "TRAFFIC_SURGE": "traffic", "UPSTREAM_DROP": "traffic"}
+INCIDENT_METRIC = {
+    "BAD_DEPLOY": "latency",
+    "TRAFFIC_SURGE": "traffic",
+    "UPSTREAM_DROP": "traffic",
+    "BAD_DEPLOY_ERRORS": "errors",
+}
+# The cards whose only chart is the errors chart: the services lab 2.2 reads (D-067).
+ERRORS_CHART_SERVICES = ("web-gateway",)
+# Lab 2.2's rule (sql/2.2_error_rate.sql), drawn as a line on the errors chart; a test keeps
+# the two in step.
+ERROR_RATE_THRESHOLD_PCT = 25.0
+DEPLOY_CHANGES = ("DEPLOY", "ROLLBACK")
 
 
 @dataclass
@@ -88,11 +108,29 @@ class HealthRow:
 
 
 @dataclass
+class ErrorRateRow:
+    """One ``service_error_rate`` row: one web-gateway window of lab 2.2 (D-067)."""
+    window_end: float  # epoch seconds
+    error_status: str
+    detected_at: float | None = None
+
+
+@dataclass
 class MetricSample:
     """One ``service_metrics`` record: one second of one service (D-058)."""
     event_time: float  # epoch seconds; the end of the second it covers
     traffic_count: int
     latency_ms: float
+    error_count: int = 0
+
+
+@dataclass
+class DeployMark:
+    """A version change of one service, from ``service_deployments`` (D-067)."""
+    at: float                     # deployed_at, epoch seconds
+    kind: str                     # DEPLOY or ROLLBACK
+    version: str | None           # the version it went to
+    previous_version: str | None  # the version it left
 
 
 @dataclass
@@ -124,6 +162,8 @@ class ServiceState:
     last_change: str | None = None
     deployed_at: float | None = None
     health: list[HealthRow] = field(default_factory=list)
+    error_rates: list[ErrorRateRow] = field(default_factory=list)
+    deploys: list[DeployMark] = field(default_factory=list)  # by at
     incidents: list[IncidentEvent] = field(default_factory=list)
     decisions: list[DecisionMark] = field(default_factory=list)
     samples: list[MetricSample] = field(default_factory=list)  # by event_time
@@ -169,6 +209,12 @@ class OpsWallState:
             s.last_change = record.get("last_change") or s.last_change
             if record.get("deployed_at") is not None:
                 s.deployed_at = _to_seconds(record["deployed_at"])
+            # A version change is a mark, once: the heartbeat repeats the record every 5 s.
+            at = _to_seconds(record.get("deployed_at"))
+            change = record.get("last_change")
+            if change in DEPLOY_CHANGES and at is not None and all(_ms(d.at) != _ms(at) for d in s.deploys):
+                s.deploys.append(DeployMark(at, change, record.get("version"), record.get("previous_version")))
+                s.deploys.sort(key=lambda d: d.at)
 
     def apply_health(self, record: dict) -> None:
         name = record.get("service_name")
@@ -194,6 +240,29 @@ class OpsWallState:
                     s.health[i] = row
                     return
             s.health.append(row)
+
+    def apply_error_rate(self, record: dict) -> None:
+        """One ``service_error_rate`` row (lab 2.2, D-067): kept like a health row, one per
+        window, the newer status winning and the first detection kept."""
+        name = record.get("service_name")
+        if not name or name not in self._services:
+            return
+        w = _to_seconds(record.get("window_end"))
+        if w is None:
+            return
+        row = ErrorRateRow(
+            window_end=w,
+            error_status=record.get("error_status") or "NORMAL",
+            detected_at=_to_seconds(record.get("detected_at")),
+        )
+        with self._lock:
+            rows = self._services[name].error_rates
+            for i, prior in enumerate(rows):
+                if prior.window_end == w:
+                    row.detected_at = _earliest(prior.detected_at, row.detected_at)
+                    rows[i] = row
+                    return
+            rows.append(row)
 
     def apply_decision(self, record: dict, kafka_ts: float | None = None) -> None:
         name = record.get("service_name")
@@ -251,7 +320,7 @@ class OpsWallState:
         traffic, latency = record.get("traffic_count"), record.get("latency_ms")
         if t is None or traffic is None or latency is None:
             return
-        sample = MetricSample(t, traffic, latency)
+        sample = MetricSample(t, traffic, latency, record.get("error_count") or 0)
         with self._lock:
             samples = self._services[name].samples
             if not samples or t > samples[-1].event_time:
@@ -281,6 +350,8 @@ class OpsWallState:
         with self._lock:
             for s in self._services.values():
                 s.health = [h for h in s.health if h.window_end >= cutoff]
+                s.error_rates = [r for r in s.error_rates if r.window_end >= cutoff]
+                s.deploys = [d for d in s.deploys if d.at >= cutoff]
                 s.samples = [m for m in s.samples if m.event_time >= cutoff]
                 s.decisions = [d for d in s.decisions if d.at >= cutoff]
                 s.incidents = [i for i in s.incidents
@@ -299,6 +370,7 @@ class OpsWallState:
             services = [_snapshot_service(s, now, left, rel) for s in self._services.values()]
             return {
                 "axisSeconds": self.axis_seconds,
+                "errorThresholdPct": ERROR_RATE_THRESHOLD_PCT,
                 "updatedAt": now,
                 "connectionErrors": dict(self._connection_errors),
                 "summary": _summary([inc for svc in services for inc in svc["groundTruth"]],
@@ -310,10 +382,12 @@ class OpsWallState:
 # ---- snapshot helpers ---------------------------------------------------------
 
 def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
-    health = sorted((h for h in s.health if h.window_end >= left), key=lambda h: h.window_end)
+    rows = {source: sorted((r for r in getattr(s, source) if r.window_end >= left), key=lambda r: r.window_end)
+            for source in ("health", "error_rates")}
     incidents = sorted((i for i in s.incidents if _incident_end(i, now) >= left),
                        key=lambda i: i.started_at)
-    blocks = _blocks(health, s.decisions, now)
+    blocks = _blocks(rows, s.decisions, now)
+    charts = _charts(s.name)
     for b in blocks:
         b.incident = _owner(b, incidents, now)
 
@@ -328,26 +402,47 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
         "groundTruth": [_incident_json(i, [b for b in blocks if b.incident is i], now, rel)
                         for i in incidents],
         "blocks": [_block_json(b, now, rel) for b in blocks],
-        "metrics": _samples_json(s.samples, left, now),
+        "charts": charts,
+        "metrics": _samples_json(s.samples, left, now, errors="errors" in charts),
+        "deploys": [_deploy_json(d, rel) for d in s.deploys if d.at >= left] if "errors" in charts else [],
     }
 
 
-def _samples_json(samples: list[MetricSample], left: float, now: float) -> list[dict]:
+def _charts(name: str) -> list[str]:
+    """The charts a card shows, top to bottom (D-067)."""
+    return ["errors"] if name in ERRORS_CHART_SERVICES else ["latency", "traffic"]
+
+
+def _samples_json(samples: list[MetricSample], left: float, now: float, errors: bool = False) -> list[dict]:
     """The samples on the chart, oldest first: ``t`` is the axis position of ``event_time``.
     A sample stamped after ``now`` (it covers the second still running) waits for the next
-    snapshot. Latency is rounded to 0.1 ms, which is all the page shows."""
+    snapshot. Latency is rounded to 0.1 ms, which is all the page shows. With ``errors``,
+    ``errorPct`` is the share of the second's requests that failed, in %, to 0.1; a second
+    without requests has none (the page leaves a gap)."""
     start = bisect.bisect_left(samples, left, key=lambda m: m.event_time)
-    return [{"t": round(m.event_time - left, 3), "traffic": m.traffic_count,
-             "latency": round(m.latency_ms, 1)}
-            for m in samples[start:] if m.event_time <= now]
+    out = []
+    for m in samples[start:]:
+        if m.event_time > now:
+            continue
+        sample = {"t": round(m.event_time - left, 3), "traffic": m.traffic_count, "latency": round(m.latency_ms, 1)}
+        if errors:
+            sample["errorPct"] = round(100 * m.error_count / m.traffic_count, 1) if m.traffic_count else None
+        out.append(sample)
+    return out
 
 
-def _blocks(health: list[HealthRow], decisions: list[DecisionMark], now: float) -> list[_Block]:
+def _deploy_json(d: DeployMark, rel) -> dict:
+    return {"key": f"{d.kind}@{_ms(d.at)}", "t": rel(d.at), "kind": d.kind,
+            "version": d.version, "previousVersion": d.previous_version}
+
+
+def _blocks(rows: dict[str, list], decisions: list[DecisionMark], now: float) -> list[_Block]:
     """The blocks still on the wall, by start: answered ones, and unanswered ones until
-    ``ANSWER_WAIT_SECONDS`` after their run's last detection."""
+    ``ANSWER_WAIT_SECONDS`` after their run's last detection. ``rows`` holds each source's
+    rows on the chart, by window (``Trigger.source``)."""
     blocks = []
     for trigger in TRIGGERS:
-        for run in _runs(health, trigger):
+        for run in _runs(rows[trigger.source], trigger):
             if run[0].detected_at is None:
                 continue  # a row from before detected_at existed: no block
             windows = {_ms(r.window_end) for r in run}
@@ -361,11 +456,11 @@ def _blocks(health: list[HealthRow], decisions: list[DecisionMark], now: float) 
     return sorted(blocks, key=lambda b: b.start)
 
 
-def _runs(health: list[HealthRow], trigger: Trigger) -> list[list[HealthRow]]:
+def _runs(rows: list, trigger: Trigger) -> list[list]:
     """Consecutive rows flagged for ``trigger``; any other row ends a run."""
-    runs: list[list[HealthRow]] = []
-    current: list[HealthRow] = []
-    for row in health:
+    runs: list[list] = []
+    current: list = []
+    for row in rows:
         if getattr(row, trigger.column) == trigger.flag:
             current.append(row)
         elif current:

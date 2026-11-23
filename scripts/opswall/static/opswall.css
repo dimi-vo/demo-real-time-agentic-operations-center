@@ -199,6 +199,11 @@ tbody tr:last-child td { border-bottom: 0; }
 .false-alarm .det { fill: var(--midnight); stroke: var(--cyan); stroke-width: 1.5; }
 .link     { fill: none; stroke: var(--cyan); stroke-width: 1.25; opacity: 0.75; }
 .ans      { fill: var(--amber); stroke: var(--midnight); stroke-width: 1; }
+/* D-067, web-gateway's errors chart. Both clear the OKLab ΔE 15 floor against every token
+   (--text: 20.1 from --cyan at the closest; --crit: 18.3 from --amber). */
+.threshold { stroke: var(--crit); stroke-width: 1; stroke-dasharray: 4 3; opacity: 0.85; }
+.deploy-line { stroke: var(--text); stroke-width: 1.25; opacity: 0.6; }
+.rollback .deploy-line { stroke-dasharray: 3 2; }
 
 .chart { display: block; overflow: visible; }
 .chart .scale     { fill: var(--text-3); font-size: 11px; }
@@ -210,6 +215,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .chart .mark-hit  { fill: transparent; }
 .chart [data-tip] { cursor: default; outline: none; }
 .chart .box:focus-visible { stroke: var(--text); stroke-width: 2; stroke-dasharray: none; }
+.chart .deploy:focus-visible .deploy-line { opacity: 1; stroke-width: 2.5; }
 .chart .mark:focus-visible .det,
 .chart .mark:focus-visible .ans { stroke: var(--text); stroke-width: 2; }
 

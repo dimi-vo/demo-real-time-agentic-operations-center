@@ -1,6 +1,6 @@
 """`uv run ops-wall` — local live dashboard for the Self-Healing IT workshop.
 
-Reads the attendee's five topics with the Kafka + Schema Registry keys on their
+Reads the attendee's six topics with the Kafka + Schema Registry keys on their
 credential card (``credentials.env`` or ``--creds <prefix>.env``) into an
 OpsWallState (``scripts/opswall/consumer.py``), serves a FastAPI + static-JS
 single-page app at http://localhost:8000, and pushes updates over a websocket at

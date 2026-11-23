@@ -230,7 +230,7 @@ def test_live_metrics_records_reach_the_charts_and_the_rail(registry):
 # --- the topics the consumer tails ---------------------------------------------------
 
 
-def test_the_consumer_tails_service_metrics_from_about_11_minutes_back(monkeypatch):
+def test_the_consumer_tails_its_topics_from_where_the_chart_starts(monkeypatch):
     """start_threads is what a new wall calls."""
     tails, seeks = [], []
     monkeypatch.setattr(consumer, "_schema_registry", lambda card: object())
@@ -243,13 +243,19 @@ def test_the_consumer_tails_service_metrics_from_about_11_minutes_back(monkeypat
         t.join()
 
     by_topic = {kw["topic"]: kw for kw in tails}
-    assert set(by_topic) == {"service_deployments", "service_health", "remediation_decisions",
-                             "service_incidents", "service_metrics"}
+    assert set(by_topic) == {"service_deployments", "service_health", "service_error_rate",
+                             "remediation_decisions", "service_incidents", "service_metrics"}
     metrics = by_topic[METRICS_TOPIC]
     assert metrics["apply"] == st.apply_metric
     assert metrics["key_deserializer"] is None and metrics["use_kafka_ts"] is False
     assert metrics["assign"](object()) is True
     assert seeks == [(METRICS_TOPIC, 660.0)]  # the 10-minute chart plus the 60 s margin
+    # lab 2.2's table (D-067), read like service_health: from the chart's 10 minutes back
+    errors = by_topic["service_error_rate"]
+    assert errors["apply"] == st.apply_error_rate
+    assert errors["key_deserializer"] is None and errors["use_kafka_ts"] is False
+    assert errors["assign"](object()) is True
+    assert seeks[-1] == ("service_error_rate", 600)
 
 
 def test_the_consumer_reads_uncommitted_records(monkeypatch):

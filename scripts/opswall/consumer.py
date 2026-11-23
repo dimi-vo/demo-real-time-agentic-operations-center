@@ -1,10 +1,10 @@
 """Kafka → OpsWallState consumer threads, one per topic.
 
-The dashboard reads five topics with the keys on the attendee's credential card:
+The dashboard reads six topics with the keys on the attendee's credential card:
 ``service_deployments`` (keyed upsert, from earliest), ``service_health``,
-``remediation_decisions`` and ``service_incidents`` (from ~10 min ago by timestamp), and
-``service_metrics`` (from ~11 min ago by timestamp: the chart's 10 minutes plus the margin
-the state keeps, D-061).
+``service_error_rate`` (lab 2.2, D-067), ``remediation_decisions`` and ``service_incidents``
+(from ~10 min ago by timestamp), and ``service_metrics`` (from ~11 min ago by timestamp:
+the chart's 10 minutes plus the margin the state keeps, D-061).
 
 Each topic gets one thread with a dedicated consumer group id (so partitions
 aren't shared across threads and nothing is ever committed; we always tail). The
@@ -37,6 +37,7 @@ logger = logging.getLogger("ops-wall.consumer")
 
 DEPLOYMENTS_TOPIC = "service_deployments"
 HEALTH_TOPIC = "service_health"
+ERROR_RATE_TOPIC = "service_error_rate"
 DECISIONS_TOPIC = "remediation_decisions"
 INCIDENTS_TOPIC = "service_incidents"
 METRICS_TOPIC = "service_metrics"
@@ -219,7 +220,7 @@ def _tail(
 
 
 def start_threads(state: OpsWallState, card: dict[str, str], stop: threading.Event) -> list[threading.Thread]:
-    """Start five daemon consumer threads and return them, each attached from its usual
+    """Start six daemon consumer threads and return them, each attached from its usual
     starting point."""
     sr = _schema_registry(card)
 
@@ -231,6 +232,8 @@ def start_threads(state: OpsWallState, card: dict[str, str], stop: threading.Eve
          lambda c: _assign_from_earliest(c, DEPLOYMENTS_TOPIC), True, False),
         (HEALTH_TOPIC, state.apply_health,
          lambda c: _assign_from_timestamp(c, HEALTH_TOPIC, STARTUP_BACKREAD_SECONDS), False, False),
+        (ERROR_RATE_TOPIC, state.apply_error_rate,
+         lambda c: _assign_from_timestamp(c, ERROR_RATE_TOPIC, STARTUP_BACKREAD_SECONDS), False, False),
         (DECISIONS_TOPIC, state.apply_decision,
          lambda c: _assign_from_timestamp(c, DECISIONS_TOPIC, STARTUP_BACKREAD_SECONDS), False, True),
         (INCIDENTS_TOPIC, state.apply_incident,
