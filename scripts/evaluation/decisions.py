@@ -7,14 +7,15 @@ are:
 - **Valid action.** The parsed `action` is one of the agent's allowed actions. The SQL
   maps a failed agent call, or an answer outside the set, to `INVALID` (D-007), so
   anything but `INVALID` is valid. Brief section 11 wants at least 95% valid.
-- **Routing.** `LATENCY_HIGH` belongs to the release agent, `TRAFFIC_HIGH` and
-  `TRAFFIC_LOW` to the capacity agent. A decision whose agent doesn't match its trigger
+- **Routing.** `LATENCY_HIGH` and `ERROR_RATE_HIGH` (D-067) belong to the release agent,
+  `TRAFFIC_HIGH` and `TRAFFIC_LOW` to the capacity agent. A decision whose agent doesn't match its trigger
   is a routing error. **Mutual exclusivity**: no (service, window) may appear under both
   agents.
 - **Coverage.** Every anomalous `service_health` row should produce exactly one decision,
   and no other row should produce any: agent calls track anomalies, not windows. A row is
   *expected to call* the capacity agent when `traffic_status` is HIGH or LOW, and the
-  release agent when `latency_status` is HIGH and traffic is normal.
+  release agent when `latency_status` is HIGH and traffic is normal, or when a
+  `service_error_rate` row's `error_status` is HIGH.
   Coverage is counted **from the first decision in range, not from the start of the
   range**: the INSERT statements read `service_health` from the latest offset, so
   anomalies from before they were created have no decision by design and are not
@@ -30,7 +31,7 @@ are:
   `previous_version`, a `SCALE_OUT` should carry the replica count the SQL computed
   (recomputed here); any other action should carry none.
 - **Context.** The decision rows hold no metrics, so everything else is read from the
-  `service_health` row with the same (service_name, window_end).
+  `service_health` (or `service_error_rate`) row with the same (service_name, window_end).
 - **Outside incidents.** Decisions on rows outside every incident span of their service.
   These follow the detector's false positives; `OBSERVE` is the appropriate answer there.
 """
@@ -43,11 +44,13 @@ from dataclasses import dataclass, field
 
 from scripts.common.topic_reader import epoch_seconds
 from scripts.evaluation.detection import (
+    ERROR_RATE_HIGH,
     LATENCY_HIGH,
     TRAFFIC_HIGH,
     TRAFFIC_LOW,
     HealthRow,
     Incident,
+    error_rate_text,
 )
 
 RELEASE_AGENT = "release_agent"
@@ -68,6 +71,7 @@ ALLOWED_ACTIONS = {
 }
 AGENT_FOR_TRIGGER = {
     LATENCY_HIGH: RELEASE_AGENT,
+    ERROR_RATE_HIGH: RELEASE_AGENT,  # D-067
     TRAFFIC_HIGH: CAPACITY_AGENT,
     TRAFFIC_LOW: CAPACITY_AGENT,
 }
@@ -138,7 +142,7 @@ def expected_agent(row: HealthRow) -> str | None:
     """Which agent a `service_health` row should call, per the routing rules."""
     if row.traffic_status in ("HIGH", "LOW"):
         return CAPACITY_AGENT
-    if row.latency_status == "HIGH":
+    if row.latency_status == "HIGH" or row.error_status == "HIGH":
         return RELEASE_AGENT
     return None
 
@@ -146,9 +150,13 @@ def expected_agent(row: HealthRow) -> str | None:
 def describe(d: DecisionRow, health: HealthRow | None) -> str:
     """The numbers behind a decision, read from its `service_health` row."""
     if health is None:
-        return "no matching service_health row in range"
-    if d.trigger == LATENCY_HIGH:
-        body = f"{_num(health.avg_latency_ms)}ms vs {_num(health.expected_latency_ms)}ms expected"
+        return "no matching service_health or service_error_rate row in range"
+    if d.trigger in (LATENCY_HIGH, ERROR_RATE_HIGH):
+        body = (
+            error_rate_text(health)
+            if d.trigger == ERROR_RATE_HIGH
+            else f"{_num(health.avg_latency_ms)}ms vs {_num(health.expected_latency_ms)}ms expected"
+        )
         if health.seconds_since_deploy is not None:
             body += f", {health.last_change or 'no change'} {health.seconds_since_deploy}s ago"
         return body

@@ -261,7 +261,7 @@ def test_context_comes_from_the_matching_health_row():
 
 def test_a_decision_without_its_health_row_says_so():
     rep = _score([_dec("checkout", 40)], [], [])
-    assert "no matching service_health row" in rep.context(rep.outside[0])
+    assert "no matching service_health or service_error_rate row" in rep.context(rep.outside[0])
 
 
 # --- the decisions table always exists now (D-050) ----------------------------------
@@ -284,7 +284,8 @@ def _main_with_tables(monkeypatch, capsys, decisions):
         evaluate.SERVICE_INCIDENTS: [],
         evaluate.REMEDIATION_DECISIONS: decisions,
     }
-    monkeypatch.setattr(evaluate, "_read_table", lambda topic, creds, root: tables[topic])
+    # a table not listed doesn't exist, as `_read_table` reports it (service_error_rate here)
+    monkeypatch.setattr(evaluate, "_read_table", lambda topic, creds, root: tables.get(topic))
     evaluate.main([])
     return " ".join(capsys.readouterr().out.split())  # rich wraps long lines
 
@@ -299,3 +300,78 @@ def test_an_empty_decisions_topic_skips_the_decision_half(monkeypatch, capsys):
 def test_a_missing_decisions_topic_skips_the_decision_half_too(monkeypatch, capsys):
     out = _main_with_tables(monkeypatch, capsys, decisions=None)
     assert "decision half is skipped" in out
+
+
+# --- the release agent's error-rate leg (D-067) ---------------------------------------
+
+
+def _err(service, k, status="NORMAL", prev="3.4.3"):
+    errors = 200 if status == "HIGH" else 2
+    return HealthRow(
+        service_name=service, window_start=T0 + 10 * k, window_end=T0 + 10 * k + 10,
+        latency_status=None, traffic_status=None, traffic_count=500, error_count=errors,
+        error_rate=errors / 500, error_status=status, version="3.4.4", previous_version=prev,
+        last_change="DEPLOY", seconds_since_deploy=10,
+    )  # fmt: skip
+
+
+def test_an_error_rate_decision_belongs_to_the_release_agent():
+    assert _dec("web-gateway", 40, trigger="ERROR_RATE_HIGH").routed_correctly
+    assert not _dec("web-gateway", 40, agent=CAPACITY_AGENT, trigger="ERROR_RATE_HIGH").routed_correctly
+
+
+def test_a_high_error_rate_row_expects_one_release_agent_call():
+    assert expected_agent(_err("web-gateway", 40, "HIGH")) == RELEASE_AGENT
+    assert expected_agent(_err("web-gateway", 41)) is None
+
+
+def test_an_error_rate_rollback_is_scored_against_the_rows_previous_version():
+    rows = [_err("web-gateway", k, "HIGH" if k == 40 else "NORMAL") for k in range(60)]
+    inc = _inc("web-gateway", 40, 0, 11, trigger="ERROR_RATE_HIGH", typ="BAD_DEPLOY_ERRORS")
+    right = _score([_dec("web-gateway", 40, trigger="ERROR_RATE_HIGH", target="3.4.3")], rows, [inc])
+    [item] = right.incidents
+    assert item.matched and item.target_ok is True
+    assert "error rate 40.0 %" in right.context(item.headline)
+    wrong = _score([_dec("web-gateway", 40, trigger="ERROR_RATE_HIGH", target="3.4.4")], rows, [inc])
+    assert wrong.incidents[0].target_ok is False
+    assert right.coverage.expected == right.coverage.decided == 1
+
+
+def _main_with_error_rate(monkeypatch, capsys, health, argv=()):
+    """Run `evaluate` against fake Kafka reads: lab 2.2's rows for a web-gateway bad deploy
+    and its ground truth, with `health` as service_health (None: the table is missing)."""
+    from scripts import evaluate
+    from scripts.common.topic_reader import iso
+
+    def rec(k, status):
+        return {"service_name": "web-gateway", "window_start": iso(T0 + 10 * k), "window_end": iso(T0 + 10 * k + 10),
+                "traffic_count": 500, "error_count": 200 if status == "HIGH" else 2,
+                "error_rate": 0.4 if status == "HIGH" else 0.004, "error_status": status, "version": "3.4.4",
+                "previous_version": "3.4.3", "last_change": "DEPLOY", "seconds_since_deploy": 10}  # fmt: skip
+
+    start = T0 + 400
+    incident = {"incident_id": "INC0001", "incident_type": "BAD_DEPLOY_ERRORS", "service_name": "web-gateway",
+                "started_at": iso(start), "ended_at": iso(start + 11), "event_time": iso(start + 11),
+                "expected_trigger": "ERROR_RATE_HIGH", "expected_action": "ROLLBACK"}  # fmt: skip
+    tables = {
+        evaluate.SERVICE_ERROR_RATE: [rec(k, "HIGH" if k == 40 else "NORMAL") for k in range(80)],
+        evaluate.SERVICE_INCIDENTS: [incident],
+        evaluate.REMEDIATION_DECISIONS: [],
+    }
+    if health is not None:
+        tables[evaluate.SERVICE_HEALTH] = health
+    monkeypatch.setattr(evaluate, "_read_table", lambda topic, creds, root: tables.get(topic))
+    evaluate.main(["--minutes", "11", "--to", iso(T0 + 700), *argv])
+    return " ".join(capsys.readouterr().out.split())
+
+
+def test_evaluate_scores_the_error_rate_table_without_service_health(monkeypatch, capsys):
+    out = _main_with_error_rate(monkeypatch, capsys, health=None)
+    assert "`service_health` doesn't exist yet" in out and "sql/2.5_service_health.sql" in out
+    assert "BAD_DEPLOY_ERRORS: 1/1 detected within 3 windows" in out
+
+
+def test_evaluate_dumps_and_rereads_the_error_rate_rows(monkeypatch, capsys, tmp_path):
+    dump = tmp_path / "error_rate.jsonl"
+    _main_with_error_rate(monkeypatch, capsys, health=None, argv=["--dump-error-rate", str(dump)])
+    assert len(dump.read_text().splitlines()) == 80

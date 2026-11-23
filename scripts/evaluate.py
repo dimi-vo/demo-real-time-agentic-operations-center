@@ -1,9 +1,9 @@
 """`uv run evaluate` — developer tool (not part of the walkthrough) that compares the
 pipeline's output against the generator's incident ground truth.
 
-Detection half (Phase 3): reads `service_health` over Kafka (no Flink statement, no
-cost), compares it with the generator's ground truth in `service_incidents` (D-046),
-and prints:
+Detection half (Phase 3): reads `service_health` and `service_error_rate` (lab 2.2,
+web-gateway, D-067) over Kafka (no Flink statement, no cost), compares them with the
+generator's ground truth in `service_incidents` (D-046), and prints:
 
 - pipeline checks per service: rows, duplicate or missing windows, warm-up rows;
 - per incident: whether and when it was detected (window number after onset), with
@@ -21,9 +21,11 @@ reads that and prints:
 
 Offline: `--dump FILE` saves the rows it read as JSONL; `--rows FILE` evaluates such a
 file without connecting (so a run can be shared and re-scored without credentials).
-`--dump-decisions` / `--decision-rows` do the same for `remediation_decisions`, and
+`--dump-error-rate` / `--error-rate-rows` do the same for `service_error_rate`,
+`--dump-decisions` / `--decision-rows` for `remediation_decisions`, and
 `--dump-incidents` / `--incidents` for `service_incidents`. `--rows` needs
-`--incidents`: offline, there is no other ground truth.
+`--incidents`: offline, there is no other ground truth. Either detection table may be
+missing (the other is scored alone); with neither, there is nothing to score.
 Definitions are in `scripts/evaluation/detection.py` (D-021) and
 `scripts/evaluation/decisions.py` (D-032).
 """
@@ -60,11 +62,13 @@ from scripts.evaluation.detection import (
     Incident,
     default_range,
     incidents_from_records,
+    merge_rows,
     rescale_confidence,
     score,
 )
 
 SERVICE_HEALTH = "service_health"
+SERVICE_ERROR_RATE = "service_error_rate"
 REMEDIATION_DECISIONS = "remediation_decisions"
 SERVICE_INCIDENTS = "service_incidents"
 FP_TARGET_PER_HOUR = 1.0
@@ -94,6 +98,13 @@ def _parse_args(argv):
     p.add_argument("--dump-incidents", help="also write the incident records read to this JSONL file")
     p.add_argument("--dump", help="also write the rows read to this JSONL file")
     p.add_argument("--rows", help="evaluate this JSONL dump instead of reading Kafka")
+    p.add_argument(
+        "--error-rate-topic",
+        default=SERVICE_ERROR_RATE,
+        help=f"lab 2.2's table, scored next to --topic (default: {SERVICE_ERROR_RATE})",
+    )
+    p.add_argument("--error-rate-rows", help="score this JSONL dump of the error-rate table instead of reading Kafka")
+    p.add_argument("--dump-error-rate", help="also write the error-rate rows read to this JSONL file")
     p.add_argument(
         "--decisions-topic",
         default=REMEDIATION_DECISIONS,
@@ -137,17 +148,39 @@ def _read_table(topic: str, creds, root: Path) -> list[dict] | None:
     return [jsonable(r) for r in records]
 
 
+def _missing(topic: str, insert: str) -> None:
+    console.print(
+        f"[yellow]`{topic}` doesn't exist yet. Ask your platform team to re-apply, "
+        f"then run the INSERT in {insert}.[/yellow]"
+    )
+
+
 def _load_rows(args, root: Path) -> list[dict]:
+    """The `service_health` records; none when the table is missing (warned)."""
     if args.rows:
         return _read_jsonl(args.rows)
     records = _read_table(args.topic, args.creds, root)
     if records is None:
-        raise SystemExit(
-            f"`{args.topic}` doesn't exist yet. Ask your platform team to re-apply, "
-            f"then run the INSERT in sql/2.5_service_health.sql."
-        )
+        _missing(args.topic, "sql/2.5_service_health.sql")
+        return []
     if args.dump:
         _dump(records, args.dump)
+    return records
+
+
+def _load_error_rate_rows(args, root: Path) -> list[dict]:
+    """The `service_error_rate` records (D-067); none when the table is missing (warned), or
+    offline without --error-rate-rows."""
+    if args.error_rate_rows:
+        return _read_jsonl(args.error_rate_rows)
+    if args.rows:  # offline health dump, no credentials in play
+        return []
+    records = _read_table(args.error_rate_topic, args.creds, root)
+    if records is None:
+        _missing(args.error_rate_topic, "sql/2.2_service_error_rate.sql")
+        return []
+    if args.dump_error_rate:
+        _dump(records, args.dump_error_rate)
     return records
 
 
@@ -189,10 +222,10 @@ def _load_decisions(args, root: Path) -> list[dict] | None:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     root = get_project_root()
-    records = _load_rows(args, root)
-    if not records:
-        raise SystemExit(f"`{args.topic}` has no rows yet.")
-    rows = [HealthRow.from_record(r) for r in records]
+    records, error_records = _load_rows(args, root), _load_error_rate_rows(args, root)
+    if not records and not error_records:
+        raise SystemExit(f"Neither `{args.topic}` nor `{args.error_rate_topic}` has rows yet.")
+    rows = merge_rows([HealthRow.from_record(r) for r in records], [HealthRow.from_record(r) for r in error_records])
     if args.rescale:
         base, target = (float(x) for x in args.rescale.split(":"))
         rows = rescale_confidence(rows, base, target)
@@ -207,7 +240,9 @@ def main(argv: list[str] | None = None) -> None:
 
     incidents, gt_source = _load_incidents(args, root)
     report = score(rows, incidents, range_from, range_to)
-    _render(report, args.rows or args.topic, gt_source, len(incidents), args.details)
+    sources = [s for s, recs in ((args.rows or args.topic, records),
+                                 (args.error_rate_rows or args.error_rate_topic, error_records)) if recs]  # fmt: skip
+    _render(report, " + ".join(sources), gt_source, len(incidents), args.details)
 
     records = _load_decisions(args, root)
     if records is None:

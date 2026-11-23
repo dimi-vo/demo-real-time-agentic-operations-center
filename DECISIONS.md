@@ -2519,6 +2519,20 @@ headless Chrome at 1440 and 820 px: the real `Simulation` (seed 7), lab 2.2's ve
 window and a stand-in release agent answering ROLLBACK 1 s after each HIGH window; three bad
 deploys, all answered (detection 10.4 s, answer 0.6 s), five good deploys
 (`.scratch/web-gateway-threshold/research/wall_render.py`). Hover and keyboard focus were not
-exercised (screenshots only). The spec's other issues add theirs.
+exercised (screenshots only).
+Issue 08 (evaluate): `scripts/evaluation/detection.py` (`ERROR_RATE_HIGH`; `HealthRow` reads a
+`service_error_rate` record too, its `error_status`, `error_count` and `error_rate`, and a HIGH
+status is a signal; `merge_rows` makes a window found in both tables one row with both
+verdicts), `scripts/evaluation/decisions.py` (`ERROR_RATE_HIGH` routes to the release agent; a
+HIGH error-rate row expects one release-agent call; the context names the error rate),
+`scripts/evaluate.py` (reads `service_error_rate` next to `service_health`, with
+`--error-rate-topic`, `--error-rate-rows` and `--dump-error-rate`; either table may be missing,
+with a hint naming its INSERT). Tests: `tests/test_evaluate_detection.py`,
+`tests/test_evaluate_decisions.py`. Offline on dumps from the real `Simulation` (seed 7, 2 h:
+the ARIMA replica's `service_health` for checkout and payments, lab 2.2's rule for web-gateway,
+a stand-in release agent; `.scratch/web-gateway-threshold/research/evaluate_dumps.py`), 100
+scored minutes: `BAD_DEPLOY_ERRORS` 50/50 in window 1; `BAD_DEPLOY` 26/26, `TRAFFIC_SURGE`
+17/17 and `UPSTREAM_DROP` 17/17; no false positives or fresh-start noise on any service; 50
+release-agent decisions, all valid, no routing errors, no wrong targets.
 
 Amends D-056, D-057, D-058, D-060 and D-066.

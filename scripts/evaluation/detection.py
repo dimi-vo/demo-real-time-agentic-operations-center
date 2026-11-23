@@ -1,11 +1,15 @@
-"""Score `service_health` against the generator's ground truth (`service_incidents`, D-046).
+"""Score `service_health` and `service_error_rate` against the generator's ground truth
+(`service_incidents`, D-046).
 
 Pure functions over plain data, so they're unit-tested offline. The definitions
 (D-021) are:
 
 - **Signal.** A row carries `LATENCY_HIGH` when `latency_status = 'HIGH'`, and
-  `TRAFFIC_HIGH` / `TRAFFIC_LOW` when `traffic_status` is `HIGH` / `LOW`. These names
-  are the incidents' `expected_trigger` values. `WARMING_UP` rows carry no signal.
+  `TRAFFIC_HIGH` / `TRAFFIC_LOW` when `traffic_status` is `HIGH` / `LOW`. A
+  `service_error_rate` row (lab 2.2, web-gateway, D-067) carries `ERROR_RATE_HIGH` when
+  `error_status = 'HIGH'`; it has no ARIMA statuses and never warms up, and a window found in
+  both tables is one row with both verdicts (`merge_rows`). These names are the incidents'
+  `expected_trigger` values. `WARMING_UP` rows carry no signal.
 - **Incident span.** The 10-second windows of the incident's service that overlap
   its degradation, `[started_at, ended_at)`. The **onset window** is the window that
   contains `started_at`; it is window 1 of the span, the next one window 2, and so on.
@@ -48,6 +52,7 @@ UNLOGGED_TAIL_SECONDS = 100.0
 LATENCY_HIGH = "LATENCY_HIGH"
 TRAFFIC_HIGH = "TRAFFIC_HIGH"
 TRAFFIC_LOW = "TRAFFIC_LOW"
+ERROR_RATE_HIGH = "ERROR_RATE_HIGH"  # D-067
 OPPOSITE = {TRAFFIC_HIGH: TRAFFIC_LOW, TRAFFIC_LOW: TRAFFIC_HIGH}
 
 DETECTED = "DETECTED"
@@ -77,9 +82,15 @@ class HealthRow:
     # the decision row, and the targets are checked against it.
     previous_version: str | None = None
     ready_replicas: int | None = None
+    # A service_error_rate row's verdict and its counts (D-067); None on a service_health row.
+    error_status: str | None = None
+    error_count: int | None = None
+    error_rate: float | None = None
 
     @classmethod
     def from_record(cls, rec: dict) -> HealthRow:
+        """A `service_health` row, or a `service_error_rate` row: the shared columns have the
+        same names, and each table's own columns are None in the other's rows."""
         def status(v):
             return v.strip() if isinstance(v, str) else v
 
@@ -101,6 +112,9 @@ class HealthRow:
             seconds_since_deploy=rec.get("seconds_since_deploy"),
             previous_version=rec.get("previous_version"),
             ready_replicas=rec.get("ready_replicas"),
+            error_status=status(rec.get("error_status")),
+            error_count=rec.get("error_count"),
+            error_rate=rec.get("error_rate"),
         )
 
     @property
@@ -116,10 +130,14 @@ class HealthRow:
             out.append(TRAFFIC_HIGH)
         elif self.traffic_status == "LOW":
             out.append(TRAFFIC_LOW)
+        if self.error_status == "HIGH":
+            out.append(ERROR_RATE_HIGH)
         return tuple(out)
 
     def describe(self, signal: str) -> str:
         """`410 ms vs expected 120 (upper 160)`-style evidence for one signal."""
+        if signal == ERROR_RATE_HIGH:
+            return f"{error_rate_text(self)} ({self.error_count} of {self.traffic_count} requests)"
         if signal == LATENCY_HIGH:
             return (
                 f"{_num(self.avg_latency_ms)} ms vs expected {_num(self.expected_latency_ms)} "
@@ -132,6 +150,27 @@ class HealthRow:
 
 def _num(v: float | None) -> str:
     return "?" if v is None else f"{v:.0f}"
+
+
+def error_rate_text(row: HealthRow) -> str:
+    return "error rate ?" if row.error_rate is None else f"error rate {100 * row.error_rate:.1f} %"
+
+
+def merge_rows(health: Iterable[HealthRow], error_rates: Iterable[HealthRow]) -> list[HealthRow]:
+    """The rows of both tables as one list (D-067). A window found in both (an old
+    service_health row for web-gateway) becomes one row: the health row with the error-rate
+    verdict added, so it isn't counted as a duplicate."""
+    from dataclasses import replace
+
+    out = {(r.service_name, r.window_end): r for r in health}
+    for e in error_rates:
+        key = (e.service_name, e.window_end)
+        h = out.get(key)
+        out[key] = e if h is None else replace(
+            h, error_status=e.error_status, error_count=e.error_count, error_rate=e.error_rate,
+            previous_version=h.previous_version or e.previous_version,
+        )  # fmt: skip
+    return sorted(out.values(), key=lambda r: (r.service_name, r.window_end))
 
 
 @dataclass(frozen=True)

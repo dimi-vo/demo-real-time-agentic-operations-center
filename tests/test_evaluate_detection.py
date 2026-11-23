@@ -282,3 +282,66 @@ def test_incident_timestamps_load_from_kafka_a_dump_or_epoch_millis():
     for rec in (end, as_datetime, as_dump):
         [inc] = incidents_from_records([rec])
         assert (inc.started_at, inc.ended_at) == (T0, T0 + 40), rec
+
+
+# --- web-gateway's error-rate rows (service_error_rate, D-067) -----------------------
+
+
+def _err(service, k, status="NORMAL"):
+    """Window k of lab 2.2's table: no ARIMA statuses, an error_status instead."""
+    errors = 200 if status == "HIGH" else 2
+    return HealthRow(
+        service_name=service, window_start=T0 + 10 * k, window_end=T0 + 10 * k + 10,
+        latency_status=None, traffic_status=None, traffic_count=500, error_count=errors,
+        error_rate=errors / 500, error_status=status, version="3.4.4", previous_version="3.4.3",
+        last_change="DEPLOY", seconds_since_deploy=10,
+    )  # fmt: skip
+
+
+def test_a_high_error_rate_window_detects_a_bad_deploy_errors():
+    from scripts.evaluation.detection import ERROR_RATE_HIGH
+
+    rows = [_err("web-gateway", k, "HIGH" if k == 40 else "NORMAL") for k in range(60)]
+    inc = _inc("web-gateway", 40, 0, 11, trigger="ERROR_RATE_HIGH", typ="BAD_DEPLOY_ERRORS")
+    rep = _score(rows, [inc])
+    r = rep.incidents[0]
+    assert (r.status, r.first_window) == (DETECTED, 1)
+    assert r.detected_row.describe(ERROR_RATE_HIGH) == "error rate 40.0 % (200 of 500 requests)"
+    assert rep.by_type() == {"BAD_DEPLOY_ERRORS": (1, 1)}
+
+
+def test_a_high_error_rate_window_outside_every_incident_is_a_false_alarm():
+    rows = [_err("web-gateway", k, "HIGH" if k == 70 else "NORMAL") for k in range(90)]
+    s = _score(rows, []).services["web-gateway"]
+    assert [fp.signal for fp in s.false_positives] == ["ERROR_RATE_HIGH"]
+
+
+def test_error_rate_rows_never_warm_up():
+    rows = [_err("web-gateway", k) for k in range(40)]
+    assert not any(r.warming_up for r in rows)
+    assert _score(rows, []).services["web-gateway"].warmup_rows == 0
+
+
+def test_an_error_rate_record_reads_like_a_health_record():
+    rec = {
+        "service_name": "web-gateway", "window_start": iso(T0), "window_end": iso(T0 + 10),
+        "traffic_count": 500, "error_count": 206, "error_rate": 0.412, "error_status": "HIGH",
+        "version": "3.4.4", "previous_version": "3.4.3", "last_change": "DEPLOY",
+        "seconds_since_deploy": 10, "detected_at": iso(T0 + 10.4),
+    }  # fmt: skip
+    row = HealthRow.from_record(rec)
+    assert row.signals == ("ERROR_RATE_HIGH",)
+    assert (row.error_count, row.error_rate, row.previous_version) == (206, 0.412, "3.4.3")
+    assert not row.warming_up
+
+
+def test_merge_keeps_both_verdicts_of_a_window_found_in_both_tables():
+    from scripts.evaluation.detection import merge_rows
+
+    health = [_row("web-gateway", 5, lat="HIGH"), _row("checkout", 5)]
+    errors = [_err("web-gateway", 5, "HIGH"), _err("web-gateway", 6)]
+    merged = merge_rows(health, errors)
+    assert len(merged) == 3
+    [both] = [r for r in merged if r.service_name == "web-gateway" and r.window_end == T0 + 60]
+    assert both.signals == ("LATENCY_HIGH", "ERROR_RATE_HIGH")
+    assert _score(merged, []).services["web-gateway"].duplicates == 0
