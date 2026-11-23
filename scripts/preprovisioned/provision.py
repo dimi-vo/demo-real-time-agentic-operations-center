@@ -2,10 +2,10 @@
 and check the environment is ready.
 
 The platform team already built the environment (cluster, Flink pool, the three source
-tables, the two output tables, the model). This deploy runs no Terraform: it mints a
+tables, the three output tables, the model). This deploy runs no Terraform: it mints a
 Global key with the Confluent CLI (as the logged-in developer), uses it to mint a Kafka
 and a Schema Registry key over REST, writes the credential card, and verifies that all
-five tables and `llm_textgen_model` exist. Key IDs are recorded in deployment.env the moment
+six tables and `llm_textgen_model` exist. Key IDs are recorded in deployment.env the moment
 each exists; a run that stops before the card is written deletes the keys it minted, so
 a premature run never burns a Global-key slot.
 """
@@ -32,7 +32,7 @@ KEY_LOCATION = "Console → API keys → My account"
 MODEL_NAME = "llm_textgen_model"
 SOURCE_TABLES = ("service_metrics", "service_deployments", "service_incidents")
 # The labs fill these with INSERT statements; the platform team's Terraform creates them (D-050).
-OUTPUT_TABLES = ("service_health", "remediation_decisions")
+OUTPUT_TABLES = ("service_error_rate", "service_health", "remediation_decisions")
 PLATFORM_TABLES = SOURCE_TABLES + OUTPUT_TABLES
 
 CARD_FIELDS = {

@@ -2445,7 +2445,22 @@ alike; 40 % errors with traffic and latency unchanged; `--no-incidents`); `test_
 the clock), `test_simulation.py` (a resolved `BAD_DEPLOY_ERRORS` and its records),
 `test_output.py` (the banner, deploy lines per service, the quiet period with the clock's
 opening, about 40 % errors only in a bad deploy's windows, the `deploy` JSON). Until issues 07
-and 08, the wall and `evaluate` count each `BAD_DEPLOY_ERRORS` as missed. The spec's other
-issues add theirs.
+and 08, the wall and `evaluate` count each `BAD_DEPLOY_ERRORS` as missed.
+Issue 04 (the table): `sql/sink_service_error_rate.sql` (new, 12 columns); its copy in
+`platform-team/modules/developer/statements.tf`, chained after `service_incidents` and before
+`service_health` (lab order), and in the module's `flink_statements` output; two column
+comments that D-067 made stale, in `sql/` and `statements.tf` alike
+(`service_metrics.error_count` is no longer display only; `remediation_decisions.trigger`
+and `window_end` name `ERROR_RATE_HIGH` and `service_error_rate`). `OUTPUT_TOPICS`
+(`scripts/common/topics.py`), so `uv run reset-health` stops `INSERT INTO service_error_rate`
+statements and empties the topic, and `uv run reset` empties it; the readiness check's
+`OUTPUT_TABLES` (`scripts/preprovisioned/provision.py`); the table counts in docstrings,
+`platform-team/{main.tf,variables.tf,README.md}` (13 resources per person). Tests:
+`tests/test_platform_team_sync.py` (six tables), `tests/test_reset_health.py`,
+`tests/test_reset.py`, `platform-team/tests/developer_module.tftest.hcl` (the statement key;
+the run block is now `the_three_output_tables_are_created`). Offline only: `terraform fmt`,
+`validate` and `test` pass; the user runs the apply, which creates the table. The two
+comment changes reach an existing table only after a DROP TABLE, which nothing needs. The
+spec's other issues add theirs.
 
 Amends D-056, D-057, D-058, D-060 and D-066.

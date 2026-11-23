@@ -1,10 +1,12 @@
 """`uv run reset-health` — a clean slate for your detection and your agents.
 
-Deletes the Flink statements that write `service_health` and `remediation_decisions`, waits
-until they are gone, then empties both topics. Nothing else is touched.
+Deletes the Flink statements that write `service_error_rate`, `service_health` and
+`remediation_decisions`, waits until they are gone, then empties those three topics. Nothing
+else is touched.
 
-Use it to change your `service_health` INSERT and run it again without duplicate history:
-the SQL stays in your workspace, so click Run to start a statement again (D-052).
+Use it to change your `service_error_rate` or `service_health` INSERT and run it again without
+duplicate history: the SQL stays in your workspace, so click Run to start a statement again
+(D-052).
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ def _strip_leading_comments(sql: str) -> str:
 
 
 def writes_output_table(sql: str) -> bool:
-    """True when the statement is `INSERT INTO <service_health | remediation_decisions> ...`.
+    """True when the statement is `INSERT INTO <an output table> ...` (OUTPUT_TOPICS).
 
     Matching is on the text: leading comments, backticks, catalog and database prefixes and
     letter case are ignored. A SELECT, or an INSERT into another table, is not a target."""
@@ -64,8 +66,9 @@ def _targets(session: FlinkSession) -> list[tuple[str, str]]:
 
 def _print_next_steps() -> None:
     print("\nNext, start your statements again with Run in the Flink workspace, in this order:")
-    print("  1. Your `INSERT INTO service_health` first. It replays up to 24 hours of history.")
-    print("  2. The two agent INSERTs (`INSERT INTO remediation_decisions`) only once the ops wall's")
+    print("  1. Your `INSERT INTO service_error_rate` and `INSERT INTO service_health` first. Each")
+    print("     replays up to 24 hours of history.")
+    print("  2. The agent INSERTs (`INSERT INTO remediation_decisions`) only once the ops wall's")
     print("     charts reach the right-hand edge again. Agents started during the replay would call")
     print("     the model for every replayed anomaly.")
     print("\nRestart the ops wall (Ctrl-C, then `uv run ops-wall`) for a clean view.")
@@ -74,8 +77,8 @@ def _print_next_steps() -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Delete the statements that write service_health and remediation_decisions, "
-            "wait until they are gone, and empty both topics."
+            "Delete the statements that write service_error_rate, service_health and "
+            "remediation_decisions, wait until they are gone, and empty those topics."
         ),
         epilog="Your SQL stays in your workspace: click Run to start a statement again.",
     )
@@ -105,7 +108,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         print(f"\nNo running statement writes {' or '.join(OUTPUT_TOPICS)}.")
 
-    problems = empty_topics(card, OUTPUT_TOPICS, "Emptying the two output topics...")
+    problems = empty_topics(card, OUTPUT_TOPICS, "Emptying the output topics...")
     if problems:
         print("\nreset-health finished with problems: " + "; ".join(problems))
         sys.exit(1)

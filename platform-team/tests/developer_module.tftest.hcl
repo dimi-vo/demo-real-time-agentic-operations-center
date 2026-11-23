@@ -108,11 +108,12 @@ run "statements_signed_as_principal_in_the_developer_catalog" {
       contains(keys(output.flink_statements), "service_metrics") &&
       contains(keys(output.flink_statements), "service_deployments") &&
       contains(keys(output.flink_statements), "service_incidents") &&
+      contains(keys(output.flink_statements), "service_error_rate") &&
       contains(keys(output.flink_statements), "service_health") &&
       contains(keys(output.flink_statements), "remediation_decisions") &&
       contains(keys(output.flink_statements), "llm_textgen_model")
     )
-    error_message = "the module must create the three source tables, the two output tables and the model"
+    error_message = "the module must create the three source tables, the three output tables and the model"
   }
 }
 
@@ -144,13 +145,24 @@ run "the_source_tables_and_model_are_created" {
   }
 }
 
-# The two lab output tables exist before the labs start: attendees only INSERT into them
-# (D-050). Both are append-only and readable before commit, like the source tables.
-run "the_two_output_tables_are_created" {
+# The three lab output tables exist before the labs start: attendees only INSERT into them
+# (D-050, D-067). All are append-only and readable before commit, like the source tables.
+run "the_three_output_tables_are_created" {
   command = plan
 
   module {
     source = "./modules/developer"
+  }
+
+  assert {
+    condition = (
+      can(regex("^CREATE TABLE IF NOT EXISTS `service_error_rate`", confluent_flink_statement.create_service_error_rate_table.statement)) &&
+      can(regex("`error_status` STRING NOT NULL", confluent_flink_statement.create_service_error_rate_table.statement)) &&
+      can(regex("'changelog.mode' = 'append'", confluent_flink_statement.create_service_error_rate_table.statement)) &&
+      can(regex("'kafka.consumer.isolation-level' = 'read-uncommitted'", confluent_flink_statement.create_service_error_rate_table.statement)) &&
+      can(regex("'kafka.cleanup-policy' = 'delete'", confluent_flink_statement.create_service_error_rate_table.statement))
+    )
+    error_message = "service_error_rate must be an append-only, read-uncommitted table with delete cleanup and a STRING error_status"
   }
 
   assert {
@@ -176,10 +188,11 @@ run "the_two_output_tables_are_created" {
   assert {
     condition = alltrue([
       for s in [
+        confluent_flink_statement.create_service_error_rate_table,
         confluent_flink_statement.create_service_health_table,
         confluent_flink_statement.create_remediation_decisions_table,
       ] : can(regex("DISTRIBUTED INTO 1 BUCKETS", s.statement)) && can(regex("'kafka.retention.time' = '24 h'", s.statement))
     ])
-    error_message = "both output tables must use one bucket and 24 h retention, like the source tables"
+    error_message = "every output table must use one bucket and 24 h retention, like the source tables"
   }
 }

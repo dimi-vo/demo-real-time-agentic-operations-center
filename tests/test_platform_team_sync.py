@@ -1,5 +1,5 @@
 """platform-team/ must work when copied out of the repo, so its developer module
-carries its own copies of the five CREATE TABLE statements (three source tables, two
+carries its own copies of the six CREATE TABLE statements (three source tables, three
 output tables). This test keeps those copies byte-for-byte (normalized) in step with
 the single source of truth in sql/."""
 
@@ -16,6 +16,7 @@ COPIED_TABLES = (
     ("service_metrics", "sql/source_service_metrics.sql"),
     ("service_deployments", "sql/source_service_deployments.sql"),
     ("service_incidents", "sql/source_service_incidents.sql"),
+    ("service_error_rate", "sql/sink_service_error_rate.sql"),  # D-067
     ("service_health", "sql/sink_service_health.sql"),
     ("remediation_decisions", "sql/sink_remediation_decisions.sql"),
 )
@@ -58,11 +59,12 @@ def test_statements_tf_matches_sql_source(table, sql_path):
     )
 
 
-def test_all_five_tables_are_present():
+def test_all_six_tables_are_present():
     assert set(_heredoc_tables()) == {
         "service_metrics",
         "service_deployments",
         "service_incidents",
+        "service_error_rate",
         "service_health",
         "remediation_decisions",
     }

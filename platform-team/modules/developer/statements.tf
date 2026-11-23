@@ -1,6 +1,7 @@
 # The workshop's tables and model, created as the platform team: the three source tables
-# (service_metrics, service_deployments, service_incidents), the two output tables the
-# labs fill with INSERT statements (service_health, remediation_decisions), and the model.
+# (service_metrics, service_deployments, service_incidents), the three output tables the
+# labs fill with INSERT statements (service_error_rate, service_health,
+# remediation_decisions), and the model.
 # Each statement is signed with the Global key and runs as that key's owner (principal_id).
 #
 # The DDL is all IF NOT EXISTS, so re-running apply is a no-op for anything already
@@ -33,7 +34,7 @@ resource "confluent_flink_statement" "create_service_metrics_table" {
       `service_name` STRING COMMENT 'Which River Shop service the sample describes (foreign key to service_deployments)',
       `traffic_count` INT COMMENT 'Requests served in that second',
       `latency_ms` DOUBLE COMMENT 'Mean latency of the requests in that second, in milliseconds; set even when traffic_count is 0',
-      `error_count` INT COMMENT 'Failed requests in that second (display only)',
+      `error_count` INT COMMENT 'Failed requests in that second; lab 2.2 reads it for web-gateway',
       WATERMARK FOR `event_time` AS `event_time` - INTERVAL '1' SECOND
     )
     DISTRIBUTED INTO 1 BUCKETS
@@ -146,6 +147,52 @@ resource "confluent_flink_statement" "create_service_incidents_table" {
   depends_on = [confluent_flink_statement.create_service_deployments_table]
 }
 
+resource "confluent_flink_statement" "create_service_error_rate_table" {
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE TABLE IF NOT EXISTS `service_error_rate` (
+      `service_name` STRING COMMENT 'River Shop service this window describes (web-gateway)',
+      `window_start` TIMESTAMP(3) NOT NULL COMMENT 'Start of the 10-second tumbling window',
+      `window_end` TIMESTAMP(3) NOT NULL COMMENT 'End of the window; with service_name, the row identity',
+      `traffic_count` INT COMMENT 'Requests in the window (SUM of the per-second traffic_count)',
+      `error_count` INT COMMENT 'Failed requests in the window (SUM of the per-second error_count)',
+      `error_rate` DOUBLE COMMENT 'error_count / traffic_count, from 0 to 1; null when the window has no requests',
+      `error_status` STRING NOT NULL COMMENT 'HIGH when errors are at least 25 percent of the requests, else NORMAL',
+      `version` STRING COMMENT 'Version live at the end of the window (temporal join, LAST_VALUE)',
+      `previous_version` STRING COMMENT 'Version before it; null until the first deploy',
+      `last_change` STRING COMMENT 'INITIAL, DEPLOY or ROLLBACK',
+      `seconds_since_deploy` INT COMMENT 'Seconds from the last deploy to window_end',
+      `detected_at` TIMESTAMP_LTZ(3) NOT NULL COMMENT 'When the rule produced this verdict (CURRENT_TIMESTAMP, an instant)'
+    )
+    DISTRIBUTED INTO 1 BUCKETS
+    WITH (
+      'changelog.mode' = 'append',
+      'connector' = 'confluent',
+      'kafka.cleanup-policy' = 'delete',
+      'kafka.consumer.isolation-level' = 'read-uncommitted',
+      'kafka.retention.time' = '24 h',
+      'scan.startup.mode' = 'earliest-offset',
+      'value.format' = 'avro-registry'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_service_incidents_table]
+}
+
 resource "confluent_flink_statement" "create_service_health_table" {
   organization { id = data.confluent_organization.main.id }
   environment { id = confluent_environment.main.id }
@@ -196,7 +243,7 @@ resource "confluent_flink_statement" "create_service_health_table" {
     "sql.current-database" = confluent_kafka_cluster.main.display_name
   }
 
-  depends_on = [confluent_flink_statement.create_service_incidents_table]
+  depends_on = [confluent_flink_statement.create_service_error_rate_table]
 }
 
 resource "confluent_flink_statement" "create_remediation_decisions_table" {
@@ -212,10 +259,10 @@ resource "confluent_flink_statement" "create_remediation_decisions_table" {
 
   statement = <<-EOT
     CREATE TABLE IF NOT EXISTS `remediation_decisions` (
-      `window_end` TIMESTAMP(3) NOT NULL COMMENT 'End of the service_health window the decision was made on',
+      `window_end` TIMESTAMP(3) NOT NULL COMMENT 'End of the window (service_health or service_error_rate) the decision was made on',
       `service_name` STRING NOT NULL,
       `agent_name` STRING NOT NULL COMMENT 'release_agent or capacity_agent',
-      `trigger` STRING NOT NULL COMMENT 'LATENCY_HIGH, TRAFFIC_HIGH or TRAFFIC_LOW',
+      `trigger` STRING NOT NULL COMMENT 'LATENCY_HIGH, ERROR_RATE_HIGH, TRAFFIC_HIGH or TRAFFIC_LOW',
       `action` STRING NOT NULL COMMENT 'ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM, OBSERVE, or INVALID',
       `target` STRING COMMENT 'Version for ROLLBACK, replica count for SCALE_OUT, otherwise null',
       `reason` STRING COMMENT 'The agent explanation, one or two sentences',

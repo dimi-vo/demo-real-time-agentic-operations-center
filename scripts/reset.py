@@ -6,15 +6,15 @@ Troubleshooting only; the continuous workshop never needs it in the normal flow.
 2. stops the developer's running Flink statements and waits until they are gone;
 3. drops the two agents (`CREATE AGENT` has no `IF NOT EXISTS`, so lab 4.2 could not be
    run again otherwise);
-4. empties five topics, all with delete cleanup: the three source topics and the two lab
-   output topics (`service_health`, `remediation_decisions`);
+4. empties six topics, all with delete cleanup: the three source topics and the three lab
+   output topics (`service_error_rate`, `service_health`, `remediation_decisions`);
 5. deletes the generator's persisted state (versions and incident counter). Step 4
    already emptied the ground truth: it lives in the `service_incidents` topic (D-046).
 
-The two output tables are the platform team's (Terraform creates them, D-050), so they are
+The output tables are the platform team's (Terraform creates them, D-050), so they are
 emptied, never dropped: a dropped table would not come back. Nothing is rebuilt
 automatically afterwards: run the lab INSERTs again. `--keep-source` skips the three source
-topics in step 4; the two output topics are always emptied, because they would otherwise
+topics in step 4; the output topics are always emptied, because they would otherwise
 hold duplicates once their INSERTs run again. Everything reports whether it worked;
 anything that didn't exits nonzero. To clear only the detection and the agents' output,
 use `uv run reset-health`.
@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--keep-source",
         action="store_true",
-        help="Keep the accumulated data in the three source topics (the two output topics are always emptied)",
+        help="Keep the accumulated data in the three source topics (the output topics are always emptied)",
     )
     parser.add_argument("--force", action="store_true", help="Reset even if a local ops-sim seems to be running")
     args = parser.parse_args(argv)

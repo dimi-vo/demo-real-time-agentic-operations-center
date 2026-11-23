@@ -26,8 +26,8 @@ def test_source_topics_are_exactly_the_generator_streams():
     assert set(SOURCE_TOPICS) == {"service_metrics", "service_deployments", "service_incidents"}
 
 
-def test_output_topics_are_exactly_the_two_lab_tables():
-    assert set(OUTPUT_TOPICS) == {"service_health", "remediation_decisions"}
+def test_output_topics_are_exactly_the_three_lab_tables():
+    assert set(OUTPUT_TOPICS) == {"service_error_rate", "service_health", "remediation_decisions"}  # D-067
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ def run_reset(install_fakes):
     return run
 
 
-def test_empties_all_five_topics(run_reset):
+def test_empties_all_six_topics(run_reset):
     h = run_reset()
     assert sorted(h.admin.emptied) == sorted(ALL_TOPICS)
 

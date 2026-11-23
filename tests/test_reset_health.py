@@ -13,7 +13,12 @@ def statement(name: str, sql: str, phase: str = "RUNNING") -> dict:
 
 
 HEALTH = "INSERT INTO `service_health`\nWITH enriched AS (SELECT 1) SELECT * FROM enriched;"
+ERRORS = "INSERT INTO `service_error_rate`\nWITH enriched AS (SELECT 1) SELECT * FROM enriched;"  # lab 2.2, D-067
 AGENT = "INSERT INTO `remediation_decisions` SELECT 1;"
+
+
+def test_the_output_topics_are_the_three_the_labs_write():
+    assert OUTPUT_TOPICS == ("service_error_rate", "service_health", "remediation_decisions")
 
 
 # --- the matcher: what counts as "writes an output table" --------------------------
@@ -36,6 +41,8 @@ AGENT = "INSERT INTO `remediation_decisions` SELECT 1;"
         "/* a block\n   comment */\nINSERT INTO service_health SELECT 1",
         "-- c\n/* d */\n-- e\n  INSERT INTO remediation_decisions SELECT 1",
         "  \n INSERT INTO service_health SELECT 1",
+        "INSERT INTO `service_error_rate` SELECT 1",
+        "INSERT INTO remediation_decisions SELECT 1",
     ],
 )
 def test_matches_every_way_of_writing_an_insert_into_an_output_table(sql):
@@ -79,9 +86,10 @@ def run(install_fakes, monkeypatch):
     return go
 
 
-def test_deletes_both_agents_and_the_health_insert_but_not_other_statements(run):
+def test_deletes_the_agents_and_both_detection_inserts_but_not_other_statements(run):
     h = run(
         statements=[
+            statement("errors", ERRORS),
             statement("health", HEALTH),
             statement("release", "-- release\n" + AGENT),
             statement("capacity", AGENT.lower()),
@@ -91,7 +99,7 @@ def test_deletes_both_agents_and_the_health_insert_but_not_other_statements(run)
         ],
     )
     deleted = {name for kind, name in h.events if kind == "deleted"}
-    assert deleted == {"health", "release", "capacity"}
+    assert deleted == {"errors", "health", "release", "capacity"}
     assert set(h.session.statements) == {"my-exploration", "other-insert", "incidents-watch"}
 
 
@@ -107,13 +115,13 @@ def test_ignores_statements_that_have_already_finished(run):
     assert [e for e in h.events if e[0] == "deleted"] == [("deleted", "live")]
 
 
-def test_empties_exactly_the_two_output_topics_after_the_statements_are_gone(run):
+def test_empties_exactly_the_output_topics_after_the_statements_are_gone(run):
     h = run(
         statements=[statement("health", HEALTH), statement("agent", AGENT)],
         topics=(*OUTPUT_TOPICS, "service_metrics", "service_deployments", "service_incidents"),
     )
     assert sorted(h.admin.emptied) == sorted(OUTPUT_TOPICS)  # never the source topics
-    assert [kind for kind, _ in h.events] == ["deleted", "deleted", "emptied", "emptied"]
+    assert [kind for kind, _ in h.events] == ["deleted", "deleted", "emptied", "emptied", "emptied"]
 
 
 def test_a_statement_that_never_goes_away_means_nothing_is_emptied(install_fakes, monkeypatch, capsys):

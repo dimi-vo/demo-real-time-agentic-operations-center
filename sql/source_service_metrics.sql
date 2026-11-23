@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS `service_metrics` (
   `service_name` STRING COMMENT 'Which River Shop service the sample describes (foreign key to service_deployments)',
   `traffic_count` INT COMMENT 'Requests served in that second',
   `latency_ms` DOUBLE COMMENT 'Mean latency of the requests in that second, in milliseconds; set even when traffic_count is 0',
-  `error_count` INT COMMENT 'Failed requests in that second (display only)',
+  `error_count` INT COMMENT 'Failed requests in that second; lab 2.2 reads it for web-gateway',
   WATERMARK FOR `event_time` AS `event_time` - INTERVAL '1' SECOND
 )
 DISTRIBUTED INTO 1 BUCKETS

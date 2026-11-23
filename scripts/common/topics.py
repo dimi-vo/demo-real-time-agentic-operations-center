@@ -7,10 +7,11 @@ its schema subject and the table on top of it stay in place; only the records go
 
 from __future__ import annotations
 
-# The three topics the generator writes to, and the two the labs' INSERTs write to. All five
-# are created by the platform team's Terraform (D-050).
+# The three topics the generator writes to, and the three the labs' INSERTs write to (lab 2.2's
+# error-rate rule, D-067; the ARIMA detection; the agents). All six are created by the platform
+# team's Terraform (D-050).
 SOURCE_TOPICS = ("service_metrics", "service_deployments", "service_incidents")
-OUTPUT_TOPICS = ("service_health", "remediation_decisions")
+OUTPUT_TOPICS = ("service_error_rate", "service_health", "remediation_decisions")
 
 
 def kafka_admin(card: dict):

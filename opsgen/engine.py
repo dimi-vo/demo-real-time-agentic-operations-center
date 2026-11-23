@@ -98,7 +98,7 @@ EXPECTED_ACTION = {
 # latency alone. The sizes barely matter to the detector, whose band grows with the spike
 # windows it has trained on; they are big enough to read at a glance on the wall's charts.
 BAD_DEPLOY_LATENCY_MULT = 4.0
-BAD_DEPLOY_ERROR_RATE = 0.12  # share of failed requests, for error_count (display only)
+BAD_DEPLOY_ERROR_RATE = 0.12  # share of failed requests; nothing reads checkout's or payments' errors
 SURGE_LAMBDA_MULT = 5.0
 DROP_LAMBDA_MULT = 0.1
 # D-067: well above lab 2.2's 25 % threshold, so the first window after the deploy always
