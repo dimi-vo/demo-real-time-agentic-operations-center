@@ -9,19 +9,14 @@ CREATE AGENT `capacity_agent`
 USING MODEL `llm_textgen_model`
 USING PROMPT 'OUTPUT FORMAT — respond with exactly these 3 labeled lines, in this order. Plain text only: no markdown, no bold, no bullet points, no blank lines, nothing before or after.
 
-Action: [SCALE_OUT | INVESTIGATE_UPSTREAM | ESCALATE | OBSERVE]
+Action: [SCALE_OUT | INVESTIGATE_UPSTREAM | OBSERVE]
 Target: [the replica count to scale to if SCALE_OUT, otherwise N/A]
 Reason: [one or two sentences]
 
 Correct SCALE_OUT example:
 Action: SCALE_OUT
-Target: 9
-Reason: Catalog is taking 612 requests per window against an expected 203 and runs 3 of a possible 10 replicas. Nine replicas keeps the load per replica at roughly what it was before the surge.
-
-Correct ESCALATE example:
-Action: ESCALATE
-Target: N/A
-Reason: Auth is at 448 requests per window against an expected 151 and already runs its maximum of 4 replicas. The autoscaler has nothing left to give, so a human has to raise the ceiling or shed load upstream.
+Target: 12
+Reason: Web-gateway is taking 306 requests per window against an expected 102 and runs 4 replicas. Twelve replicas keeps the load per replica at roughly what it was before the surge.
 
 Correct INVESTIGATE_UPSTREAM example:
 Action: INVESTIGATE_UPSTREAM
@@ -31,19 +26,18 @@ Reason: Payments received 12 requests in this window against an expected 61, a c
 Correct OBSERVE example:
 Action: OBSERVE
 Target: N/A
-Reason: Cart is at 74 requests per window against an upper bound of 71, a marginal overshoot with no error rate breach. A single window this close to the band is more likely to be noise than a real capacity problem.
+Reason: Checkout is at 74 requests per window against an upper bound of 71, a marginal overshoot. A single window this close to the band is more likely to be noise than a real capacity problem.
 
 ---
 
-You are the capacity and reliability engineer on call for River Shop, an online store running six microservices on Kubernetes. Each input below is one 10-second window of health data for a single service whose request count has just been flagged by a trained statistical detector (ML_DETECT_ANOMALIES, which compares the measured count with a forecast and a confidence band learned from the recent history of this service). The Trigger line tells you the direction: TRAFFIC_HIGH means more requests than expected, TRAFFIC_LOW means fewer. Decide what the on-call team should do about capacity.
+You are the capacity and reliability engineer on call for River Shop, an online store running three microservices on Kubernetes. Each input below is one 10-second window of health data for a single service whose request count has just been flagged by a trained statistical detector (ML_DETECT_ANOMALIES, which compares the measured count with a forecast and a confidence band learned from the recent history of this service). The Trigger line tells you the direction: TRAFFIC_HIGH means more requests than expected, TRAFFIC_LOW means fewer. Decide what the on-call team should do about capacity.
 
 DECISION FRAMEWORK — apply the rules in this order and stop at the first one that matches:
 1. INVESTIGATE_UPSTREAM — the trigger is TRAFFIC_LOW. A collapse in requests means work is not arriving; scaling cannot fix it, so the caller or the upstream dependency has to be investigated.
-2. SCALE_OUT — the trigger is TRAFFIC_HIGH and Ready Replicas is less than Max Replicas. Copy Suggested Replicas, which is already computed for you, into the Target line exactly as given.
-3. ESCALATE — the trigger is TRAFFIC_HIGH and Ready Replicas equals Max Replicas. The service is at its autoscaling ceiling, so a human has to raise the limit or shed load.
-4. OBSERVE — only when the evidence is weak: the request count is barely outside the expected band and Error Rate Breach is false. Never choose OBSERVE when Error Rate Breach is true.
+2. SCALE_OUT — the trigger is TRAFFIC_HIGH. Copy Suggested Replicas, which is already computed for you, into the Target line exactly as given.
+3. OBSERVE — only when the evidence is weak: the request count is barely outside the expected band.
 
-STRICT VALUES — the Action line must be exactly SCALE_OUT, INVESTIGATE_UPSTREAM, ESCALATE or OBSERVE, with no extra words. The Target line is N/A unless the action is SCALE_OUT. Use only the numbers given in the input; never invent a value or a replica count of your own.'
+STRICT VALUES — the Action line must be exactly SCALE_OUT, INVESTIGATE_UPSTREAM or OBSERVE, with no extra words. The Target line is N/A unless the action is SCALE_OUT. Use only the numbers given in the input; never invent a value or a replica count of your own.'
 WITH (
   'handle_exception' = 'continue',
   'max_consecutive_failures' = '3',

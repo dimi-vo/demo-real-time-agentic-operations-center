@@ -1,14 +1,20 @@
 """Kafka → OpsWallState consumer threads, one per topic.
 
-The dashboard reads four topics with the keys on the attendee's credential card:
-``service_deployments`` (keyed upsert, from earliest), ``service_health`` and
-``remediation_decisions`` (from ~10 min ago by timestamp), ``service_incidents``
-(from ~10 min ago by timestamp).
+The dashboard reads five topics with the keys on the attendee's credential card:
+``service_deployments`` (keyed upsert, from earliest), ``service_health``,
+``remediation_decisions`` and ``service_incidents`` (from ~10 min ago by timestamp), and
+``service_metrics`` (from ~11 min ago by timestamp: the chart's 10 minutes plus the margin
+the state keeps, D-061).
 
 Each topic gets one thread with a dedicated consumer group id (so partitions
-aren't shared across threads and nothing is ever committed; we always tail).
+aren't shared across threads and nothing is ever committed; we always tail). The
+consumers read uncommitted records: Flink's transactional sinks commit about once a
+minute, and the wall shouldn't wait for that (D-063).
 Avro deserialization is per-topic, driven off the Schema Registry's latest
-version for each ``*-value`` subject. A missing topic is NOT fatal — it stays
+version for each subject. ``service_deployments`` also decodes its key and merges
+``service_name`` into the record, because Flink keeps the primary key out of the
+value (D-027, D-048). Timestamps arrive as ``datetime``s; OpsWallState converts
+them. A missing topic is NOT fatal — it stays
 silent until Flink registers it; the connection banner on the page surfaces the
 reason so an empty wall never leaves the attendee guessing.
 """
@@ -25,7 +31,7 @@ from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroDeserializer
 from confluent_kafka.serialization import MessageField, SerializationContext
 
-from scripts.opswall.state import AXIS_SECONDS, OpsWallState
+from scripts.opswall.state import AXIS_SECONDS, RETAIN_MARGIN_SECONDS, OpsWallState
 
 logger = logging.getLogger("ops-wall.consumer")
 
@@ -33,11 +39,13 @@ DEPLOYMENTS_TOPIC = "service_deployments"
 HEALTH_TOPIC = "service_health"
 DECISIONS_TOPIC = "remediation_decisions"
 INCIDENTS_TOPIC = "service_incidents"
+METRICS_TOPIC = "service_metrics"
 
 STARTUP_BACKREAD_SECONDS = AXIS_SECONDS  # read ~10 minutes of history on connect
+METRICS_BACKREAD_SECONDS = AXIS_SECONDS + RETAIN_MARGIN_SECONDS  # ~11 minutes
 POLL_TIMEOUT_SEC = 0.5
 
-BENIGN_ERROR_CODES = frozenset({
+IGNORED_ERROR_CODES = frozenset({
     KafkaError.UNKNOWN_TOPIC_OR_PART,
     KafkaError._UNKNOWN_TOPIC,
     KafkaError._UNKNOWN_PARTITION,
@@ -79,7 +87,11 @@ def _build_consumer(card: dict[str, str], topic: str) -> Consumer:
         "group.id": f"ops-wall-{topic}-{uuid.uuid4().hex[:8]}",
         "enable.auto.commit": False,
         "auto.offset.reset": "latest",  # overridden by explicit assignment below
-        "isolation.level": "read_committed",
+        # Flink commits its sink transactions about once a minute; read_committed held
+        # service_health and remediation_decisions back that long. The appliers keep one
+        # record per natural key, so a row an aborted transaction wrote and the replay
+        # rewrote counts once (D-063).
+        "isolation.level": "read_uncommitted",
         "log_level": 0,  # silence librdkafka's own noise; we route via callbacks
     })
 
@@ -115,6 +127,35 @@ def _assign_from_earliest(consumer: Consumer, topic: str) -> bool:
     return True
 
 
+def make_deserializer(sr: SchemaRegistryClient) -> AvroDeserializer:
+    # schema_str=None + use.latest.version=True resolves the registered schema per
+    # subject, same pattern as opsgen/kafka_io.py on the produce side.
+    return AvroDeserializer(sr, schema_str=None, conf={"use.latest.version": True})
+
+
+def decode_record(
+    value: bytes,
+    key: bytes | None,
+    topic: str,
+    value_deserializer: AvroDeserializer,
+    key_deserializer: AvroDeserializer | None = None,
+) -> dict | None:
+    """One Kafka message as the dict OpsWallState.apply_* expects.
+
+    With a `key_deserializer`, the key's fields are merged in: Flink keeps a table's
+    primary key out of the value, so a `service_deployments` value has no `service_name`
+    (D-027, D-048). Fields already in the value win."""
+    record = value_deserializer(value, SerializationContext(topic, MessageField.VALUE))
+    if record is None or key_deserializer is None or key is None:
+        return record
+    key_record = key_deserializer(key, SerializationContext(topic, MessageField.KEY))
+    if isinstance(key_record, dict):
+        return {**key_record, **record}
+    if isinstance(key_record, str):  # a primitive string key schema
+        return {"service_name": key_record, **record}
+    return record
+
+
 def _tail(
     state: OpsWallState,
     card: dict[str, str],
@@ -123,11 +164,11 @@ def _tail(
     stop: threading.Event,
     assign: callable,
     deserializer: AvroDeserializer,
+    key_deserializer: AvroDeserializer | None = None,
     use_kafka_ts: bool = False,
 ) -> None:
     """One consumer thread: wait for topic, assign, poll, deserialize, apply, repeat."""
     consumer = _build_consumer(card, topic)
-    ctx = SerializationContext(topic, MessageField.VALUE)
     assigned = False
     try:
         while not stop.is_set():
@@ -137,16 +178,18 @@ def _tail(
                 except KafkaException as exc:
                     state.record_error(topic, "ASSIGN_FAILED", str(exc))
                 if not assigned:
-                    time.sleep(2.0)
+                    stop.wait(2.0)  # wakes at once on a stop
                     continue
                 logger.info("Tailing %s", topic)
                 state.clear_error(topic)
             msg = consumer.poll(POLL_TIMEOUT_SEC)
+            if stop.is_set():
+                break  # shutting down: leave the record
             if msg is None:
                 continue
             if msg.error():
                 err = msg.error()
-                if err.code() in BENIGN_ERROR_CODES:
+                if err.code() in IGNORED_ERROR_CODES:
                     continue
                 logger.warning("[%s] %s: %s", topic, err.name(), err)
                 state.record_error(topic, err.name(), err.str() or str(err))
@@ -157,7 +200,7 @@ def _tail(
             try:
                 # One bad record must not kill the tail: catch anything the
                 # deserializer raises and surface it in /healthz, continue polling.
-                record = deserializer(value, ctx)
+                record = decode_record(value, msg.key(), topic, deserializer, key_deserializer)
             except Exception as exc:
                 logger.warning("[%s] deserialize failed: %s", topic, exc)
                 state.record_error(topic, "DESERIALIZE_FAILED", str(exc))
@@ -176,30 +219,33 @@ def _tail(
 
 
 def start_threads(state: OpsWallState, card: dict[str, str], stop: threading.Event) -> list[threading.Thread]:
-    """Start four daemon consumer threads and return them."""
+    """Start five daemon consumer threads and return them, each attached from its usual
+    starting point."""
     sr = _schema_registry(card)
 
-    def deser(subject: str) -> AvroDeserializer:
-        # schema_str=None + use.latest.version=True resolves the registered schema
-        # per topic, same pattern as opsgen/kafka_io.py on the produce side.
-        return AvroDeserializer(sr, schema_str=None, conf={"use.latest.version": True})
-
+    # (topic, apply, assign, decode the key?, use the Kafka timestamp?). Only
+    # service_deployments needs its key: it is the only topic whose value lacks
+    # service_name. service_incidents keys are raw strings, not Avro.
     topics = [
         (DEPLOYMENTS_TOPIC, state.apply_deployment,
-         lambda c: _assign_from_earliest(c, DEPLOYMENTS_TOPIC), False),
+         lambda c: _assign_from_earliest(c, DEPLOYMENTS_TOPIC), True, False),
         (HEALTH_TOPIC, state.apply_health,
-         lambda c: _assign_from_timestamp(c, HEALTH_TOPIC, STARTUP_BACKREAD_SECONDS), False),
+         lambda c: _assign_from_timestamp(c, HEALTH_TOPIC, STARTUP_BACKREAD_SECONDS), False, False),
         (DECISIONS_TOPIC, state.apply_decision,
-         lambda c: _assign_from_timestamp(c, DECISIONS_TOPIC, STARTUP_BACKREAD_SECONDS), True),
+         lambda c: _assign_from_timestamp(c, DECISIONS_TOPIC, STARTUP_BACKREAD_SECONDS), False, True),
         (INCIDENTS_TOPIC, state.apply_incident,
-         lambda c: _assign_from_timestamp(c, INCIDENTS_TOPIC, STARTUP_BACKREAD_SECONDS), False),
+         lambda c: _assign_from_timestamp(c, INCIDENTS_TOPIC, STARTUP_BACKREAD_SECONDS), False, False),
+        (METRICS_TOPIC, state.apply_metric,
+         lambda c: _assign_from_timestamp(c, METRICS_TOPIC, METRICS_BACKREAD_SECONDS), False, False),
     ]
     threads = []
-    for topic, apply, assign, uses_ts in topics:
+    for topic, apply, assign, uses_key, uses_ts in topics:
+        deser = make_deserializer(sr)
         t = threading.Thread(
             target=_tail,
             kwargs=dict(state=state, card=card, topic=topic, apply=apply,
-                         stop=stop, assign=assign, deserializer=deser(topic),
+                         stop=stop, assign=assign, deserializer=deser,
+                         key_deserializer=deser if uses_key else None,
                          use_kafka_ts=uses_ts),
             name=f"ops-wall-{topic}", daemon=True,
         )

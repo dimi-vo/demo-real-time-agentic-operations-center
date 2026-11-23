@@ -3,7 +3,7 @@
 Usage: uv run python -m scripts.tuning.calibrate --rows DUMP.jsonl [--min-training 12] ...
 
 For every service and metric it feeds the recorded actual values (avg_latency_ms,
-request_count) through the replica and compares the forecasts, bound half-widths and
+traffic_count) through the replica and compares the forecasts, bound half-widths and
 statuses with the ones Confluent stored in service_health.
 """
 
@@ -21,8 +21,8 @@ METRICS = (
     ("latency", "avg_latency_ms", "expected_latency_ms", None, "latency_upper_bound", "latency_status"),
     (
         "traffic",
-        "request_count",
-        "expected_request_count",
+        "traffic_count",
+        "expected_traffic_count",
         "traffic_lower_bound",
         "traffic_upper_bound",
         "traffic_status",
@@ -82,7 +82,7 @@ def main(argv=None) -> None:
     p.add_argument("--rows", required=True)
     p.add_argument("--min-training", type=int, default=12)
     p.add_argument("--max-training", type=int, default=360)
-    p.add_argument("--confidence", type=float, default=99.9)
+    p.add_argument("--confidence", type=float, default=DetectorConfig.confidence, help="the dump's live value")
     p.add_argument("--update-interval", type=int, default=5)
     p.add_argument("--warmup-extra", type=int, default=1)
     p.add_argument("--ddof", type=int, default=0)

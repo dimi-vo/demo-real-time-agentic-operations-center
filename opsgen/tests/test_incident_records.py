@@ -11,18 +11,16 @@ _TRIGGER = {BAD_DEPLOY: "LATENCY_HIGH", TRAFFIC_SURGE: "TRAFFIC_HIGH", UPSTREAM_
 _ACTION = {BAD_DEPLOY: "ROLLBACK", TRAFFIC_SURGE: "SCALE_OUT", UPSTREAM_DROP: "INVESTIGATE_UPSTREAM"}
 
 
-def _inc(itype=BAD_DEPLOY, good="1.0.0", bad="1.0.1"):
+def _inc(itype=BAD_DEPLOY):
     return Incident(
         incident_id="INC0007",
         type=itype,
         service_name="checkout",
-        t0=1000.0,
         degradation_start=1010.0,
         degradation_end=1070.0,
         expected_trigger=_TRIGGER[itype],
         expected_action=_ACTION[itype],
-        bad_version=bad if itype == BAD_DEPLOY else None,
-        good_version=good if itype == BAD_DEPLOY else None,
+        scheduled_end=1070.0,
     )
 
 
@@ -36,7 +34,6 @@ def test_start_record_has_null_end_and_both_ids():
     assert r["ended_at"] is None
     assert r["expected_trigger"] == "LATENCY_HIGH"
     assert r["expected_action"] == "ROLLBACK"
-    assert r["good_version"] == "1.0.0"
     assert r["event_time"] == 1_010_500
 
 
@@ -47,10 +44,12 @@ def test_end_record_carries_both_timestamps():
     assert r["event_time"] == 1_070_000
 
 
-def test_good_version_only_set_for_bad_deploy():
-    assert end_record(_inc(TRAFFIC_SURGE), now=1070.0)["good_version"] is None
-    assert end_record(_inc(UPSTREAM_DROP), now=1070.0)["good_version"] is None
-    assert end_record(_inc(BAD_DEPLOY), now=1070.0)["good_version"] == "1.0.0"
+def test_ground_truth_carries_no_versions():
+    # D-045: a ROLLBACK target is judged against service_health, so the answer key
+    # holds only what happened and what the right action is.
+    for itype in (BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP):
+        for rec in (start_record(_inc(itype), now=1010.0), end_record(_inc(itype), now=1070.0)):
+            assert not any("version" in key for key in rec)
 
 
 def test_schema_fields_match_the_avsc():
@@ -69,7 +68,7 @@ class _RecordingSink:
         self.events, self.incidents = [], []
 
     def emit_deployments(self, rs): pass
-    def emit_requests(self, rs): pass
+    def emit_metrics(self, rs): pass
     def emit_event(self, ev): self.events.append(ev)
     def emit_incident(self, r): self.incidents.append(r)
     def flush(self): pass
@@ -84,18 +83,18 @@ def test_driver_emits_two_records_per_incident(monkeypatch):
     sink = _RecordingSink()
 
     # Drive the loop by hand with a KeyboardInterrupt stop-gap after enough ticks
-    # to guarantee at least one incident at this seed's cadence (~3 minutes in).
+    # to guarantee incidents: the first ones start at 150 s (D-060).
     k_counter = {"k": 0}
     real_tick = sim.tick
 
-    def stopping_tick(now):
+    def stopping_tick(now, decisions=()):
         k_counter["k"] += 1
         if k_counter["k"] > 600:  # 10 simulated minutes
             raise KeyboardInterrupt
-        return real_tick(now)
+        return real_tick(now, decisions)
 
     sim.tick = stopping_tick
-    run_realtime(sim, sink, root=None, write_groundtruth=False)
+    run_realtime(sim, sink, root=None)
 
     starts_sent = [r for r in sink.incidents if r["ended_at"] is None]
     ends_sent = [r for r in sink.incidents if r["ended_at"] is not None]

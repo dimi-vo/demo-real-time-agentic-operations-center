@@ -49,20 +49,20 @@ def _patch(monkeypatch, *, tables=None, tables_error=None, model=None, model_err
 
 
 def test_all_present(monkeypatch, capsys, card_path):
-    _patch(monkeypatch, tables=provision.SOURCE_TABLES, model=True)
+    _patch(monkeypatch, tables=provision.PLATFORM_TABLES, model=True)
     assert provision._verify_ready(card_path.parent, card_path) is True
     out = capsys.readouterr().out
-    for table in provision.SOURCE_TABLES:
+    for table in provision.PLATFORM_TABLES:
         assert f"✓ table {table}" in out
     assert f"✓ model {provision.MODEL_NAME}" in out
     assert "✗" not in out and "?" not in out
 
 
 def test_one_table_missing(monkeypatch, capsys, card_path):
-    _patch(monkeypatch, tables=("service_requests",), model=True)
+    _patch(monkeypatch, tables=("service_metrics",), model=True)
     assert provision._verify_ready(card_path.parent, card_path) is False
     out = capsys.readouterr().out
-    assert "✓ table service_requests" in out
+    assert "✓ table service_metrics" in out
     assert "✗ table service_deployments is missing" in out
     assert "✗ table service_incidents is missing" in out
 
@@ -71,7 +71,7 @@ def test_table_check_error_prints_question_mark_not_missing(monkeypatch, capsys,
     _patch(monkeypatch, tables_error=RuntimeError("submit failed (401): Unauthorized"), model=True)
     assert provision._verify_ready(card_path.parent, card_path) is False
     out = capsys.readouterr().out
-    for table in provision.SOURCE_TABLES:
+    for table in provision.PLATFORM_TABLES:
         assert f"? could not check table {table}" in out
         assert "401" in out
         assert f"✗ table {table} is missing" not in out
@@ -81,20 +81,32 @@ def test_table_check_network_error_is_also_a_question_mark(monkeypatch, capsys, 
     _patch(monkeypatch, tables_error=requests.ConnectionError("DNS fail"), model=True)
     assert provision._verify_ready(card_path.parent, card_path) is False
     out = capsys.readouterr().out
-    assert "? could not check table service_requests" in out
+    assert "? could not check table service_metrics" in out
     assert "DNS fail" in out
 
 
 def test_model_check_error_surfaces(monkeypatch, capsys, card_path):
     _patch(
         monkeypatch,
-        tables=provision.SOURCE_TABLES,
+        tables=provision.PLATFORM_TABLES,
         model_error=RuntimeError("submit failed (500): Internal Server Error"),
     )
     assert provision._verify_ready(card_path.parent, card_path) is False
     out = capsys.readouterr().out
     assert "? could not check llm_textgen_model" in out
     assert "500" in out
+
+
+def test_the_two_output_tables_are_checked_and_a_missing_one_names_the_platform_team(
+    monkeypatch, capsys, card_path
+):
+    _patch(monkeypatch, tables=provision.SOURCE_TABLES, model=True)
+    assert provision._verify_ready(card_path.parent, card_path) is False
+    out = capsys.readouterr().out
+    for table in ("service_health", "remediation_decisions"):
+        assert f"✗ table {table} is missing — ask your platform team to re-run their apply." in out
+    for table in provision.SOURCE_TABLES:
+        assert f"✓ table {table}" in out
 
 
 def test_source_tables_includes_service_incidents():

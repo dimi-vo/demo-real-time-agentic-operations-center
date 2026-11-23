@@ -4,42 +4,88 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Ops wall — Self-Healing IT</title>
+  <link rel="icon" type="image/svg+xml" href="/static/confluent-mark.svg" />
   <link rel="stylesheet" href="/static/opswall.css" />
 </head>
 <body>
-  <!-- Shared SVG defs: the warm-up hatch is referenced by every chart. -->
-  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-    <defs>
-      <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-        <rect width="6" height="6" fill="rgba(163,174,198,0.04)" />
-        <line x1="0" y1="0" x2="0" y2="6" stroke="rgba(163,174,198,0.16)" stroke-width="2" />
-      </pattern>
-    </defs>
-  </svg>
+  <div class="page">
+    <header class="top">
+      <div class="brand">
+        <img class="logo" src="/static/confluent-logo.svg" alt="Confluent, an IBM Company" width="150" height="31" />
+        <span class="brand-rule" aria-hidden="true"></span>
+        <h1>Ops wall</h1>
+      </div>
+      <div class="clock">
+        Updated <time id="updated">—</time>
+        <span id="conn" class="conn connecting"><span class="lamp" aria-hidden="true"></span><span class="conn-label">connecting…</span></span>
+      </div>
+    </header>
 
-  <header class="top">
-    <div>
-      <h1>Ops wall</h1>
-      <p class="sub">What the simulator injected, against what <code>service_health</code> detected and what the agent did about it. Last 10 minutes.</p>
+    <div class="layout">
+      <aside class="side side-left">
+        <div class="panel">
+          <table class="summary">
+            <caption>Last 10 minutes</caption>
+            <thead>
+              <tr><th scope="col">Metric</th><th scope="col">Value</th></tr>
+            </thead>
+            <tbody id="summary">
+              <tr><th scope="row">Injected</th><td data-k="injected">0</td></tr>
+              <tr><th scope="row">Answered</th><td data-k="answered">0</td></tr>
+              <tr><th scope="row">Open</th><td data-k="pending">0</td></tr>
+              <tr><th scope="row">Missed</th><td data-k="missed">0</td></tr>
+              <tr><th scope="row">False alarms</th><td data-k="falseAlarms">0</td></tr>
+              <tr><th scope="row">Median time to detect (s)</th><td data-k="medianTimeToDetect">0</td></tr>
+              <tr><th scope="row">Median time to answer (s)</th><td data-k="medianTimeToAnswer">0</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </aside>
+
+      <main class="wall" id="cards"></main>
+
+      <aside class="side side-right">
+        <div class="panel">
+          <table class="legend">
+            <caption>Legend</caption>
+            <thead>
+              <tr><th scope="col">Symbol</th><th scope="col">Meaning</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><svg width="30" height="14"><path class="series" d="M 1 10 L 6 7 L 10 9 L 15 3 L 19 8 L 24 5 L 29 6" /></svg></td>
+                <td>Value per second</td>
+              </tr>
+              <tr>
+                <td><svg width="30" height="14"><rect class="box" x="1" y="1" width="28" height="12" rx="2" /></svg></td>
+                <td>Injected incident</td>
+              </tr>
+              <tr>
+                <td><svg width="30" height="14"><rect class="box missed" x="1" y="1" width="28" height="12" rx="2" /></svg></td>
+                <td>Missed incident</td>
+              </tr>
+              <tr>
+                <td><svg width="30" height="14"><circle class="det" cx="15" cy="7" r="3.5" /></svg></td>
+                <td>Anomaly detected</td>
+              </tr>
+              <tr>
+                <td><svg width="30" height="14"><g class="false-alarm"><circle class="det" cx="15" cy="7" r="3.5" /></g></svg></td>
+                <td>False alarm (detected, no incident)</td>
+              </tr>
+              <tr>
+                <td><svg width="30" height="14"><path class="link" d="M 5 7 H 29" /><circle class="det" cx="5" cy="7" r="3.5" /></svg></td>
+                <td>Waiting for the agent</td>
+              </tr>
+              <tr>
+                <td><svg width="30" height="14"><path class="ans" d="M 15 2 L 20 7 L 15 12 L 10 7 Z" /></svg></td>
+                <td>Agent answered</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </aside>
     </div>
-    <div class="clock">Updated <time id="updated">—</time><span id="conn" class="conn">connecting…</span></div>
-  </header>
-
-  <p class="summary" id="summary">Waiting for the first snapshot…</p>
-  <div class="legend" id="legend"></div>
-
-  <main class="wall">
-    <div class="axis-row" aria-hidden="true">
-      <div class="rail-spacer"></div>
-      <div class="axis-gutter"></div>
-      <div class="axis" id="axis"></div>
-    </div>
-    <div id="rows"></div>
-  </main>
-
-  <footer id="footer">
-    Hover or tab to any bar or marker for its times. When the live pipeline is quiet this reads as empty charts — that's fine, nothing is wrong.
-  </footer>
+  </div>
 
   <div class="tip" id="tip" role="tooltip"></div>
 

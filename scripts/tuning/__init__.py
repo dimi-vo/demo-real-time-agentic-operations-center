@@ -4,4 +4,6 @@
 `calibrate` checks the replica against what Confluent Cloud actually computed (the
 expected values and bounds stored in service_health); `sweep` runs the real generator
 code at any settings through the replica and scores it with evaluate's own scoring.
+`research/` holds the harnesses behind D-059 and D-064 (data x detector settings, window
+size, live vs replica); see research/README.md.
 """

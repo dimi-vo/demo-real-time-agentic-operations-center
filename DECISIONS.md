@@ -283,6 +283,10 @@ pool/catalog as the existing model check). Six new tests
 missing, table-check error (`?` not `✗`), model-check error.
 
 ## Phase 3
+**Amended by D-050.** The two lab output tables (`service_health`, `remediation_decisions`)
+are the platform team's now, so the check lists five tables: a missing output table says
+"ask your platform team to re-run their apply" like a missing source table
+(`provision.PLATFORM_TABLES`).
 
 ### D-021 · DECISION · How `uv run evaluate` reads and scores `service_health`
 **What.** The data path and the scoring definitions for the detection half (brief §7.2).
@@ -301,7 +305,7 @@ the fresh-start measurement. `--dump`/`--rows` save and re-score a run offline;
   containing `started_at` is window 1; *detected in time* = expected trigger in window
   1–3, *late* after that, else *missed*; an opposite traffic signal is flagged as wrong
   direction; for `BAD_DEPLOY`, rows are also checked to carry `bad_version` (and the
-  rollback window `good_version`);
+  rollback window `good_version`) — check removed by D-045;
 - *false positive*: any signal outside every incident span of its service, tagged *echo*
   (within 60 s after an incident ended) or *after deploy* (deploy < 60 s earlier);
 - *fresh start*: signals in the first 5 minutes after each service's first window, outside
@@ -319,6 +323,11 @@ the fresh-start measurement. `--dump`/`--rows` save and re-score a run offline;
 (Phase 5) reuses the reader. Explicit definitions make the acceptance numbers reproducible.
 **Impact.** `evaluate` needs the Kafka + SR keys from the card (it has them). Rows lag
 by up to one Flink checkpoint because of `read_committed`; the 100 s tail covers that.
+
+**Amended by D-057.** The *after deploy* tag is gone, and so is its column in `evaluate`'s
+false-positive table. With no benign deploys, every deploy is a bad deploy (inside its
+incident's span) or its rollback (at the incident's end, where the *echo* minute starts), so
+the tag could no longer fire.
 
 ### D-022 · DECISION (raise at Break 3) · 2.1 adds per-version count queries; the anti-pattern reads new requests only
 **What.** How the walkthrough makes the regular join's re-attribution visible (brief §5.1).
@@ -338,6 +347,11 @@ all of that service's joined rows. From the earliest offset, with hours of histo
 that's millions of rows per re-emit on the attendee's pool.
 **Impact.** Two more short queries in 2.1 (user-visible flow; confirm at Break 3).
 
+**Amended by D-058.** A record is now one second of one service, so the per-version
+queries add up `SUM(traffic_count)` instead of counting rows; their columns are
+`traffic_count`, `first_sample` and `last_sample`. Both anti-pattern queries read
+`service_metrics` from the latest offset. The lesson is unchanged.
+
 ### D-023 · DECISION · Step structure and shared CTEs for 2.2–2.4
 **What.** How the 2.x solution files are cut.
 **Choice.** As in F1, each step has two parts: 2.2 = metrics only, then with deployment
@@ -350,7 +364,13 @@ asks for explicit hints on both from 2.3 on, and one identical CTE is easier to 
 `tests/test_sql_pipeline.py` enforces that the CTEs, the detector config and window, and
 the CTAS body stay identical across files.
 **Why.** F1 pedagogy; attendees grow one statement step by step.
-**Impact.** `reset --with-labs` submits only `2.4_service_health.sql` (from Phase 2).
+**Impact.** `reset --with-labs` submits only `2.4_service_health.sql` (from Phase 2) (removed by D-051).
+**Amended by D-050.** 2.4 is now `INSERT INTO service_health` in front of the unchanged 2.3
+status query, not a CTAS: the table already exists, created by the platform team. The
+test is `test_insert_body_is_the_23_status_query`. `reset --with-labs` is gone (D-051).
+**Amended by D-054.** The 2.3 status query ends with `detected_at` (`CURRENT_TIMESTAMP` cast to
+`TIMESTAMP(3)`), so attendees see the real-time delay before they write the INSERT and 2.4
+stays the 2.3 query behind one line.
 
 ### D-024 · DECISION · Metric expressions and types in the window aggregation
 **What.** Expressions the brief left open.
@@ -362,6 +382,15 @@ AVG(CAST(response_bytes AS DOUBLE))` (DOUBLE; `AVG` of an INT would truncate to 
 to `service_health`. `owner_team` is not carried (not in the brief's column list).
 **Why.** Plain SQL attendees can read; no integer-division surprises.
 **Impact.** Column types of `service_health` follow from these.
+**Amended by D-050.** The types of `service_health` are no longer left to the query: they
+are declared in `sql/sink_service_health.sql`. The ones above are still what the DDL was
+derived from, and the first `terraform apply` is the live check (only the two status
+columns were ever observed).
+
+**Amended by D-058.** No error expressions (`error_count`, `error_rate`) and no
+`MAX(latency_ms)`. `traffic_count = SUM(traffic_count)` is an INT (nullable, like its source
+column), cast to DOUBLE only inside the traffic detector; `avg_latency_ms = AVG(latency_ms)`
+is the unweighted mean of the window's ten per-second samples.
 
 ### D-025 · CONFIRMED · Warm-up is detected as `is_anomaly IS NULL`; status columns come out as STRING
 **Status (Phase 3, live).** `DESCRIBE service_health` shows `latency_status` as
@@ -377,6 +406,10 @@ VARCHAR for the second, but I haven't seen it in Confluent Cloud.
 **Impact.** Verify with `sql/checks/service_health_describe.sql` and by `WARMING_UP`
 appearing exactly in each service's first 6 windows. `evaluate` trims statuses anyway.
 If they come out as `CHAR(10)`, wrap each `CASE` in `CAST(... AS STRING)`.
+**Amended by D-050.** The status columns are declared `STRING` in the table's DDL, so the
+"wrap each `CASE` in `CAST(... AS STRING)`" fallback is moot: the INSERT converts the
+query's `VARCHAR(10)` implicitly, and a declared `VARCHAR(n)` is avoided on purpose
+because Confluent Cloud truncates to it.
 
 ### D-026 · DECISION · Developer check queries live in `sql/checks/`
 **What.** Where verification-only SQL lives.
@@ -385,8 +418,13 @@ version hash in `instance_id` vs `SHA1` of the joined version; `SHA1` and `LEFT`
 joins are both in the current Confluent docs), deploy windows (`LAST_VALUE`), anomalous
 rows, and `DESCRIBE service_health`.
 **Why.** They prove acceptance criteria but aren't walkthrough steps; the drift test (Phase
-6) and `reset --with-labs` read only top-level `sql/*.sql`.
+6) and `reset --with-labs` (removed by D-051) read only top-level `sql/*.sql`.
 **Impact.** None for attendees.
+**Amended by D-050 and D-051.** `service_health_describe.sql` now shows the types declared
+in the DDL, not derived ones. `reset --with-labs` no longer exists.
+
+**Amended by D-058.** The attribution check (`temporal_join_attribution.sql`) is deleted:
+a metrics sample has no `instance_id` to prove the version with.
 
 ### D-027 · DECISION · `.avsc` copies aligned with the schemas Confluent registered
 **What.** Two Phase 1 assumptions about the registered schemas were wrong; checked
@@ -431,6 +469,12 @@ for "closing the loop".
 `test_tick_timestamps_never_collide_with_the_next_tick`,
 `test_deploy_record_and_its_requests_share_the_new_version`,
 `test_incident_ends_on_a_tick_at_the_logged_ended_at`.
+
+**Amended by D-058.** A `service_metrics` record carries exactly `tick_ms + 999`, the end of
+the second it covers, instead of a random offset in 0–999 ms: still after the tick's deploy
+record and before the next tick's. The attribution check that found defect (1) is deleted.
+The tests are now `test_records_sit_at_the_end_of_their_tick` and
+`test_a_record_follows_the_deploy_record_of_its_tick`.
 
 ### D-029 · DECISION · ARIMA tuning history and final config (AR(1), minTrainingSize 12)
 **What.** Tuning `ML_DETECT_ANOMALIES` against the acceptance criteria (brief §5.3, §11),
@@ -520,6 +564,10 @@ topic head excluded):
 - Surges now flag `LATENCY_HIGH` in every window too (latency ×1.5 is sustained and AR(1)
   doesn't absorb it). Routing (Phase 4) sends those rows to the capacity agent anyway.
 
+**Amended by D-059.** `confidencePercentage` is 99.95 (tuned offline for the simplified
+demo's 20 s spikes and ~60 incidents/h). AR(1), 12 and 360 stay. Surges no longer touch
+latency, so the `LATENCY_HIGH` flags on surges above are gone.
+
 ### D-030 · DEVIATION · Request rates divided by ~3; slow outliers softened (chosen by the user at Break 3)
 **What.** `ops-sim` request rates and the latency outlier rule (brief §4.1, §4.2).
 **Why it came up.** The user saw the `service_health` statement hold the pool at 10 CFU
@@ -564,6 +612,14 @@ original rates gave payments. **Proposed fix (needs the user's decision):** cart
 payments at 6 requests/s, web-gateway 10, catalog 8, auth 5 (~41 msg/s, about half the
 brief's volume, web-gateway still the busiest). Alternatives: the brief's original rates, or
 accept missed drops on low-volume services.
+
+**Amended by D-056.** `auth`, `catalog` and `cart` are gone. The rates of the three kept
+services are unchanged (web-gateway 10, checkout 6, payments 6 since D-031).
+
+**Amended by D-058.** The rates are now the means of a per-second `traffic_count`. The
+topic carries three messages per second (one per service) whatever the rates, so the
+replay cost that motivated this decision no longer grows with them. The softened outliers
+apply to the per-request draws a sample's `latency_ms` averages.
 
 ### D-031 · DEVIATION · Drop services at 6 requests/s, aligned generator start, chosen with an offline tuning harness
 **Status.** **Confirmed live on 2026-11-12.** After a fresh `reset` at 09:31, the
@@ -620,6 +676,22 @@ at most 10 s), as the F1 race aligned its laps to 20-second boundaries. Outliers
 **Impact.** Volume and replay work ~1.4× the D-030 rates, still about half the brief's. To be
 confirmed in one live run (fresh `reset` → `ops-sim` → `service_health`, then `evaluate`).
 
+**Amended by D-056.** Three services: the drop services are now two (`checkout` and
+`payments`, both still at 6 requests/s) and the total is ~22 requests/s instead of ~41. The
+tables above were measured on six services and are not re-run. `sweep.py`'s rate profiles
+keep only the kept services (brief ~39, D-030 ~13, 5/s ~19) and its drop columns are
+`chkout` and `paymt`.
+
+**Amended by D-058.** `sweep.py` builds each window from the per-second samples
+(`SUM(traffic_count)`, unweighted `AVG(latency_ms)`), and its `msg/s` column is `req/s`
+(messages are always three per second). The windows have the same statistics as the
+per-request ones (`.scratch/simplify-demo/research/ps_compare.out`), so the findings above
+carry over.
+
+**Amended by D-059.** The traffic means are 50/30/30 (the drop services well above the
+~6 requests/s floor found here). `sweep.py`'s current profile is ~110 requests/s and its
+`CURRENT` detector uses confidence 99.95.
+
 ---
 
 ### D-032 · DECISION · What `uv run evaluate` counts as a good decision
@@ -640,8 +712,9 @@ decision on its first anomalous window, and report the rest as context.
 - **Per incident**: the **headline** decision is the one on the earliest window of the
   span — the first recommendation the on-call team would see — and it matches when its
   action equals the incident's `expected_action`. A `ROLLBACK` must name the incident's
-  `good_version`; a `SCALE_OUT` must carry the replica count the SQL computed (recomputed
-  in Python from the row's stored context). Later windows are reported as an action mix,
+  `good_version` (since D-045: the health row's `previous_version`); a `SCALE_OUT` must
+  carry the replica count the SQL computed (recomputed in Python from the row's stored
+  context). Later windows are reported as an action mix,
   and a late match is marked, not counted.
 **Why.** An incident spans several windows and AR(1) keeps it flagged for most of them
 (D-029), so counting rows would weight long incidents more heavily and hide what matters:
@@ -649,6 +722,9 @@ what the team is told first. Scoring the headline keeps one number per incident.
 **Impact.** `scripts/evaluation/decisions.py`, rendered by `evaluate`; new flags
 `--decision-rows`, `--dump-decisions`, `--decisions-topic`, `--no-decisions`. The decision
 half is skipped silently when `remediation_decisions` doesn't exist yet.
+**Amended by D-050.** The table always exists (Terraform creates it), so the decision half is
+skipped, with a message, when `remediation_decisions` exists but is empty, not only when it
+is missing.
 
 ### D-033 · DEVIATION · Agent SQL follows the docs, not the reference, on three points
 **Status.** **Confirmed live on 2026-11-12**: both agents and both INSERT statements were
@@ -706,7 +782,8 @@ happened, who answered, what to do — and read everything else from `service_he
   `Target Replicas` collapse into one free-text `target`; `Summary` and `Reasoning`
   collapse into one or two sentences; `Confidence` is dropped.
 - **One shared action vocabulary**: `ROLLBACK`, `SCALE_OUT`, `INVESTIGATE_UPSTREAM`,
-  `ESCALATE`, `OBSERVE` (`OBSERVE` replaces the brief's `WATCH`), plus `INVALID`. Each
+  `ESCALATE`, `OBSERVE` (`OBSERVE` replaces the brief's `WATCH`), plus `INVALID` (`ESCALATE`
+  later removed by D-043). Each
   prompt still offers only its own agent's subset, and each INSERT validates against that
   subset, so the two statements differ only in the agent, the filter and the list.
 - **The target is stored as the agent wrote it** (with `N/A` mapped to null). The SQL no
@@ -728,6 +805,9 @@ an explicit target — untyped rather than typed.
 `HealthRow` gained `ready_replicas` and `max_replicas`, which the decision half needs to
 recompute the replica suggestion. The walkthrough (Phase 6) must describe the three-line
 format, not the brief's six.
+**Amended by D-050.** The 8-column table is created by the platform team's Terraform
+(`sql/sink_remediation_decisions.sql`, with `IF NOT EXISTS`, delete cleanup and 24 h
+retention); lab 4.3 keeps only the two INSERTs. Its columns are unchanged.
 
 ### D-035 · DEVIATION · Ops wall is dark-only
 **What.** Brief §7.3 asks for "readable in light and dark mode"; the dashboard ships
@@ -763,6 +843,14 @@ offset* in a single chart per metric, which is the thing the dashboard exists to
 **Impact.** `scripts/opswall/static/{opswall.css,opswall.js}` implement this shape;
 `scripts/opswall/state.py` emits axis-relative seconds for every span so the renderer
 doesn't do arithmetic with absolute timestamps.
+**Amended by D-054.** The lower half is no longer the flagged windows in data time: it is one
+block per anomaly run, from the `detected_at` of its first window to the write time of the
+agent's first decision for it. The decision pins are gone from the chart (the block's tooltip
+names the action), so is the warm-up band, and the state computes the verdicts and the summary
+the page used to count.
+
+**Amended by D-066.** The mirror is gone: one chart per metric, the incident a translucent box
+behind the raw line, the detection and the answer marks under the plot.
 
 ### D-037 · DECISION · New `service_incidents` topic, two records per incident
 **What.** Simulator ground truth is published to a Kafka topic (`service_incidents`),
@@ -770,7 +858,7 @@ not just the `incidents.jsonl` file. One record at `degradation_start` (`ended_a
 and one at `degradation_end` (both timestamps set), tied by `incident_id`. Append-only,
 keyed by `service_name`, 9 columns: `event_time`, `incident_id`, `service_name`,
 `incident_type`, `started_at`, `ended_at`, `expected_trigger`, `expected_action`,
-`good_version`.
+`good_version` (8 columns since D-045 removed `good_version`).
 **Options.** (a) Platform-team Terraform resource, same shape as `service_requests` /
 `service_deployments`; (b) attendee creates the topic in the workshop; (c) generator
 creates the topic over the admin API.
@@ -785,7 +873,7 @@ CREATE TABLE heredoc, model statement's `depends_on` moves to it so the chain st
 linear). Generator emits via `opsgen/kafka_io.py::emit_incident`. `reset.py` purges it on
 every reset. **Pending: `terraform apply` on your environment to register the subject.**
 
-### D-038 · DECISION · `evaluate` keeps reading `incidents.jsonl`
+### D-038 · DECISION · `evaluate` keeps reading `incidents.jsonl` (superseded by D-046)
 **What.** The decision scorer in `scripts/evaluate.py` stays on the file, not the topic.
 **Why.** The generator writes both from the same `Incident` object so they can't disagree;
 `evaluate` was live-validated on 2026-11-12 against the file; rewriting a working loader
@@ -825,3 +913,1519 @@ by revealing whole panels. One fewer piece of state and one fewer thing the walk
 has to explain.
 **Impact.** `scripts/opswall/static/` has no unlock logic. The Phase 6 walkthrough must
 describe the chart's lane-by-lane fill-in, not the brief's progressive-reveal pattern.
+
+### D-042 · DEVIATION · Incidents start at once, last 40 s, sit on window boundaries; 7-min cooldown
+**What.** The brief (§4.5) has a BAD_DEPLOY degrade 10 s after its deploy, incidents last
+40–70 s (uniform) and start at any second, and a service waits 15 min between incidents.
+All four change.
+**Options.** (a) Keep the brief's timing; (b) make the cause and the anomaly coincide and
+make every incident the same, whole-window shape.
+**Choice.** (b), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`):
+- **No onset delay.** A BAD_DEPLOY's DEPLOY record and its degradation start on the same
+  tick. The "onset" requests (new version, baseline metrics) no longer exist.
+- **A fixed 40 s duration.** `Config.duration` replaces `duration_min`/`duration_max`;
+  `--duration` replaces `--duration-min`/`--duration-max`.
+- **Window-aligned starts.** The end of the quiet period and every spacing are rounded up
+  to the next 10-second boundary (epoch seconds, like Flink's tumbling windows), so an
+  incident covers exactly 4 whole windows and ends — and a BAD_DEPLOY rolls back — on a
+  boundary. Benign deploys stay unaligned: they don't move the metrics.
+- **Cooldown 900 → 420 s.**
+**Why.** This is a workshop, and the point it makes is "anomaly → agent reacts → anomaly
+gone". With the delay, attendees saw a deploy, then 10 s of nothing, then the anomaly.
+With unaligned starts the first and last windows were half degraded and flagged or not
+by chance — the fuzzy edges on the charts. Now an anomaly starts on the same window as
+its cause, and every incident has the same 4-window shape. The shorter cooldown keeps
+repeats possible on the 3-service surge/drop lists now that incidents are short.
+**Impact.** `opsgen/engine.py` (`WINDOW_SECONDS`, `next_window_boundary`, `Config`; the
+BAD_DEPLOY deploy and the start events fire in `_maybe_start_incident`; `Incident.t0` and
+the `_deploy_fired`/`_start_fired` flags are gone), `opsgen/cli.py`, `opsgen/driver.py`
+(`aligned_start` reuses `next_window_boundary`), and the tests. Dropping the duration
+draw changes the RNG sequence, so `--seed` schedules differ from earlier runs. The
+detector, request rates (D-030/D-031) and spacing are unchanged.
+
+**Amended by D-056.** The surge and drop lists are now one service (`web-gateway`) and two
+(`checkout`, `payments`). Under this schedule surges fall from about 26% to 17% of
+incidents, because `web-gateway`'s cooldown often blocks one.
+
+**Amended by D-057.** There are no benign deploys any more, so "Benign deploys stay
+unaligned" no longer applies: every deploy and rollback sits on a window boundary.
+
+**Amended by D-059.** The fixed duration is 20 s: an incident covers 2 whole windows. The
+detector flags a spike in its first window; more windows only add after-spike false alarms.
+
+**Amended by D-060.** The single slot is gone: every service runs its own schedule, so
+incidents on different services overlap (at most one per service). The spacing and the
+420 s cooldown are replaced by a 20 s gap per service and per-type rests (`BAD_DEPLOY` 390 s,
+`TRAFFIC_SURGE` 300 s, `UPSTREAM_DROP` 300 s); the first three incidents are one of each
+type; the quiet period is 150 s, tied to the detector's warm-up. Starts still sit on window
+boundaries. `--duration` and the other timing flags are removed: timing lives in `Config`.
+
+### D-043 · DEVIATION · One answer per incident type: `ESCALATE` and `max_replicas` removed
+**What.** The brief puts `auth` at its replica ceiling (ready = max = 4) so a surge on
+`auth` expects `ESCALATE`, and gives the release agent `ESCALATE` for "latency is high but
+no recent deploy explains it". Both go, along with `max_replicas`.
+**Options.** (a) Keep `ESCALATE` and the ceiling; (b) raise `auth`'s ceiling so it never
+binds but keep the field and the rule; (c) remove the ceiling and `ESCALATE` everywhere.
+**Choice.** (c), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`). Every incident type now has exactly one correct
+answer, whatever the service:
+- `BAD_DEPLOY` → `ROLLBACK` (Target = the previous version) on any of the six services;
+- `TRAFFIC_SURGE` → `SCALE_OUT` (Target = Suggested Replicas) on `web-gateway`, `catalog`
+  and `auth`;
+- `UPSTREAM_DROP` → `INVESTIGATE_UPSTREAM` on `cart`, `checkout` and `payments`.
+The vocabulary is `ROLLBACK`, `SCALE_OUT`, `INVESTIGATE_UPSTREAM`, `OBSERVE`, plus
+`INVALID`. The release agent's framework is rule 1 `ROLLBACK` (unchanged conditions),
+rule 2 `OBSERVE` for everything else; its "never OBSERVE when Error Rate Breach is true"
+rule goes, since nothing else is left to pick. The capacity agent loses its `ESCALATE`
+rule and the "Ready Replicas is less than Max Replicas" condition on `SCALE_OUT`; its other
+rules keep their order and wording. Suggested Replicas is
+`GREATEST(ready + 1, CEIL(ready × count / expected))`, with no `LEAST(max_replicas, …)`.
+`OBSERVE` stays as the answer to a false alarm (detection on normal traffic).
+**Why.** The workshop's point is "anomaly → agent reacts → anomaly gone", and it is easier
+to follow when each incident has one concrete action. After D-042 a bad deploy degrades on
+its own tick, so the release agent's `ESCALATE` could only ever answer a false alarm; and
+the capacity agent's `ESCALATE` existed only for `auth`'s artificial ceiling. With no
+environment running, removing the field costs nothing to roll out.
+**Impact.** `max_replicas` is gone from `opsgen/` (`Service`, `DeploymentState`, the
+deployment record), `schemas/service_deployments.avsc`, `sql/source_service_deployments.sql`
+and its copy in `platform-team/modules/developer/statements.tf`, the 2.2–2.4 statements and
+`service_health`, `evaluate` (`HealthRow`, `suggested_replicas`) and the ops wall (state,
+Replicas tile). `ESCALATE` is gone from both prompts, both INSERTs, the
+`remediation_decisions` comment, `evaluate`, the ops wall (closer set, pin, legend, status
+label) and the mock (the `auth` scene; issue 06 rebuilds the rest). Environments must be
+recreated: `service_deployments` changes shape.
+
+**Amended by D-056.** Three services: `BAD_DEPLOY` → `ROLLBACK` on all three,
+`TRAFFIC_SURGE` → `SCALE_OUT` on `web-gateway` only, `UPSTREAM_DROP` →
+`INVESTIGATE_UPSTREAM` on `checkout` and `payments`.
+
+### D-044 · DECISION · `avg_response_bytes` and `desired_replicas` no longer carried through the pipeline
+**What.** The 2.2–2.4 statements computed `avg_response_bytes` and carried
+`desired_replicas` from the deployment record into `service_health`. Nothing downstream
+reads either: not the agents, not `evaluate`, not the ops wall.
+**Options.** (a) Keep them for completeness; (b) drop them from the SQL and keep the raw
+message fields; (c) drop the raw fields too.
+**Choice.** (b), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`). `response_bytes` stays in `service_requests` and
+`desired_replicas` in `service_deployments` — in the simulator, the `.avsc` files and the
+source DDL — because they make the messages look real and cost no SQL.
+**Why.** Attendees read the 2.x statements line by line; every column there should matter
+to something they will see later.
+**Impact.** `sql/2.2_window_metrics.sql`, `sql/2.2_window_aggregation.sql`,
+`sql/2.3_anomaly_detection.sql`, `sql/2.3_anomaly_status.sql`,
+`sql/2.4_service_health.sql` (and so the `service_health` schema), and
+`tests/test_sql_pipeline.py`, which now guards against either column coming back.
+
+**Amended by D-058.** `response_bytes` is gone with the per-request records. The guard
+test now keeps `error_count` (display only) and `desired_replicas` out of labs 2.2–2.4,
+and checks that both stay in their source tables.
+
+### D-045 · DECISION · No versions in the ground truth; `ROLLBACK` targets scored against `service_health`
+**What.** The ground truth carried `good_version` (topic and file) and `bad_version`
+(file only). Three things used them: `evaluate` checked a `ROLLBACK` target against
+`good_version`; `evaluate`'s version-mismatch check compared each incident window's
+`version` with `bad_version`/`good_version`; the ops wall stored `good_version` and never
+showed it. The agent never sees either — it reads `Previous Version` from `service_health`.
+**Options.** (a) Add `bad_version` to the topic so `evaluate` can switch to it (D-046);
+(b) drop the version-mismatch check and judge `ROLLBACK` targets against the health row
+the agent answered; (c) derive `bad_version` from `good_version` + 1 patch in `evaluate`.
+**Choice.** (b), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`). A `ROLLBACK` is right when its target equals the
+`previous_version` of the `service_health` row with the decision's `(service_name,
+window_end)` — the same row `SCALE_OUT` targets are already checked against — and
+unscorable when there is no such row or no previous version (a missing target is still
+wrong). The ground truth keeps only: incident id, type, service, start, end, expected
+trigger, expected action.
+**Why.** Less to carry and nothing lost: the target check now asks "did the agent use the
+Previous Version it was given", and `sql/checks/temporal_join_attribution.sql` already
+checks version attribution per request, more strictly than the per-window check did.
+**Impact.** `good_version` is gone from `schemas/service_incidents.avsc`,
+`sql/source_service_incidents.sql` and its copy in `platform-team/…/statements.tf`
+(environments must be recreated), `opsgen/groundtruth.py`, `opsgen/engine.Incident` (the
+console log already uses `Event.old_version`/`new_version`), the ops-wall state and the
+mock. `bad_version` is gone from `incidents.jsonl`. `evaluate`: `HealthRow` gains
+`previous_version`; `check_target` loses its incident argument; `Incident` loses both
+versions; `IncidentResult.version_mismatches` and its report column are gone.
+`scripts/tuning/sweep.py` builds `Incident` without them. Amends D-021, D-032 and D-037.
+
+**Amended by D-058.** `temporal_join_attribution.sql` is deleted (a metrics sample has no
+`instance_id`). Version attribution is now checked per window only
+(`sql/checks/service_health_deploy_windows.sql`).
+
+### D-046 · DECISION · `service_incidents` is the only answer key; `incidents.jsonl` removed
+**What.** The generator wrote the ground truth twice: the `service_incidents` topic
+(ops wall) and `runs/pre-provisioned/incidents.jsonl` (`evaluate`, and the generator's
+own incident numbering across restarts). D-038 kept the file only because `evaluate`
+already worked against it.
+**Options.** (a) Keep both; (b) make the topic the only answer key, and give the file's
+two side jobs a new home.
+**Choice.** (b), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`):
+- **`evaluate` reads `service_incidents`** through the same `read_topic` path as
+  `service_health` and `remediation_decisions`. `incidents_from_records` keeps each
+  incident's end record (keyed by `incident_id` and `started_at`), in whatever order the
+  two records arrive, and ignores incidents that haven't ended — the file only ever held
+  finished incidents, so scoring is unchanged.
+- **Offline**: `--dump-incidents FILE` saves the records read, and `--incidents FILE`
+  scores against such a dump, like `--dump`/`--rows` and
+  `--dump-decisions`/`--decision-rows`. `--rows` without `--incidents` exits with a
+  message: offline there is no other ground truth.
+- **Incident numbering** moves into the generator state file, which `ops-sim` already
+  saves every 5 s and `reset` already deletes: `{"services": {...}, "incident_counter": n}`.
+  Ids must not repeat because the ops wall pairs start and end records by `incident_id`.
+  State files in the old shape aren't migrated: `reset` deletes them and environments are
+  recreated.
+**Why.** One answer key instead of two, and the same read path for all three tables.
+`reset` already clears the topic (step 4), so a fresh run starts with a clean answer key
+either way.
+**Impact.** `opsgen/groundtruth.py` keeps only `start_record`/`end_record`;
+`opsgen/driver.run_realtime` loses `write_groundtruth`; `opsgen/simulation.py`
+(`state_snapshot`, `initial_state`), `opsgen/state.py` and `opsgen/cli.py` carry the
+counter; `scripts/reset.py` step 5 deletes only the state file; `scripts/evaluate.py`
+and `scripts/evaluation/detection.py` (`incidents_from_records` replaces
+`load_incidents`; `Incident.from_record` reads the topic's `incident_type`). Supersedes
+D-038.
+
+### D-047 · DECISION · The ops-wall mock follows the simplified rules
+**What.** `uv run ops-wall --mock` scripted 8 scenes in a 12-minute loop, with 60 s
+incidents at arbitrary offsets, `OBSERVE` as a lead-in to real actions, an `ESCALATE`
+scene, a "resolved without action" scene, surges on `cart` (which can't surge in ops-sim)
+and starting versions shuffled between services (its `checkout` ran `payments`' 2.9.4).
+**Options.** (a) Leave the mock as a free-standing showcase; (b) make it obey the same
+rules as ops-sim.
+**Choice.** (b), decided with the user in the simplify-simulator grilling session
+(`.scratch/simplify-simulator/spec.md`). Six scenes, 80 s apart after the 120 s warm-up,
+in a 10-minute loop: `checkout` bad deploy → `ROLLBACK` to 4.2.1; `catalog` surge →
+`SCALE_OUT` to 9; `payments` drop → `INVESTIGATE_UPSTREAM`; `web-gateway` false alarm →
+`OBSERVE`; `cart` drop → `INVALID`; `payments` bad deploy, missed. Every incident starts
+on a 10-second boundary (the driver's start is aligned) and lasts 40 s; each detected
+incident flags its 4 windows (the false alarm 2); the first decision lands 18 s after the
+start, i.e. after the first window closes. Services start on their catalogue versions,
+and a bad-deploy scene deploys the next patch at its start and rolls it back at its end.
+The incident mapping comes from `opsgen.engine` (`TRIGGER`, `EXPECTED_ACTION`), not a copy.
+**Why.** The mock is what most people will see first; if it shows things the simulator
+never does (an `OBSERVE` before every fix, an anomaly that fades on its own), it teaches
+the wrong story. Note that the mock now shows the open loop honestly: the wall closes a
+detection at the agent's decision while the injected incident runs its full 40 s. That
+gap is what closing the loop (later) removes.
+**Impact.** `scripts/opswall/mock.py` (scenes, timing, versions, `aligned_start`; the
+unused `POST_WINDOWS_AFTER_CLOSE` and `PRESEED_VERSIONS` are gone), `scripts/opswall/app.py`
+(aligned start) and `tests/test_opswall_mock.py`, which now checks the mapping, the
+timing, `OBSERVE`-only-on-false-alarms and the deploy/rollback on the tile.
+**Replaced by D-055.** The mock is removed; the wall needs a live feed.
+
+### D-048 · DECISION · The live ops wall decodes records the way Kafka delivers them
+**What.** Read in the simplify-simulator session and reproduced offline: the live ops
+wall would drop most of what it reads. (1) The Avro decoder turns Flink's `TIMESTAMP(3)`
+columns (registered as `local-timestamp-millis`, D-027) into naive `datetime`s, and
+`OpsWallState._to_seconds` returned `None` for them — so every `service_health` row was
+discarded (no sparklines, statuses or detection spans) and incident start times fell back
+to 0.0. (2) `service_deployments` values carry no `service_name` (it is only in the key,
+D-027), the consumer decoded only the value, and `apply_deployment` returned at once — so
+tiles never showed the live version or a rollback. The mock and the tests fed the state
+plain dicts with epoch milliseconds and a `service_name`, so neither path was exercised.
+A third suspicion — decisions overwriting each other — was ruled out by running it.
+**Evidence.** The Phase 4 dumps read from Confluent Cloud hold the timestamps as the ISO
+text `jsonable` writes only for `datetime`s; D-027 checked the deployments schemas against
+the live Schema Registry; an Avro round trip through the real serializer/deserializer
+pair reproduced both drops.
+**Options.** For (2): (a) decode the key in the consumer and merge it into the record;
+(b) change the source DDL so the key is also written into the value.
+**Choice.** (a), decided with the user: local to the ops wall, no schema or attendee-facing
+change, testable offline. For (1), `_to_seconds` reads a naive `datetime` as UTC
+wall-clock (the same rule as `topic_reader.epoch_seconds`).
+**Impact.** `scripts/opswall/state.py` (`_to_seconds`), `scripts/opswall/consumer.py`
+(`make_deserializer`, `decode_record`; only `service_deployments` decodes its key), and
+`tests/test_opswall_ingest.py` with `tests/fixtures/opswall/` — real `service_health` and
+`remediation_decisions` rows from the Phase 4 run (the payments bad deploy, minus the
+columns D-043/D-044 dropped), plus deployments and incidents through the real Avro pair in
+an in-memory Schema Registry. `.gitignore` now admits `tests/fixtures/` (credential
+patterns still excluded). Still to confirm in a live run against a recreated environment.
+
+### D-049 · FIX · `service_incidents` has no key columns (`DISTRIBUTED INTO 1 BUCKETS`)
+**What.** D-037's DDL said `DISTRIBUTED BY HASH(service_name) INTO 1 BUCKETS` with
+`service_name` as the third column. Phase 5 never applied it; the first live
+`terraform apply` (2026-11-13) failed with "Key columns must appear at the beginning of
+the table schema": `DISTRIBUTED BY` makes `service_name` a Flink key column, which
+Confluent Cloud requires first and registers as an Avro key. That also contradicted the
+generator, which writes a raw-string key and expects no key subject
+(`opsgen/kafka_io.emit_incident`, "same shape as service_requests").
+**Choice.** `DISTRIBUTED INTO 1 BUCKETS`, exactly like `service_requests` (proven live
+since Phase 2): no key columns, `service_name` stays in the value where ops-wall and
+`evaluate` read it. One bucket keeps per-service order anyway.
+**Impact.** `sql/source_service_incidents.sql` and its copy in
+`platform-team/modules/developer/statements.tf`. An environment where the old statement
+already created the table must drop it before re-applying (`CREATE TABLE IF NOT EXISTS`
+won't change an existing table).
+
+### D-050 · DECISION · Terraform creates `service_health` and `remediation_decisions`; lab 2.4 is an INSERT
+**What.** Attendees created the two lab output tables themselves: `service_health` with a
+CTAS in lab 2.4, `remediation_decisions` with a `CREATE TABLE` in lab 4.3. That cost lab
+time on table plumbing, left the ops wall with no topics to read until the labs were done,
+and made improving the detection a drop-and-replay (a plain re-run of the INSERT appends a
+second copy of the history).
+**Options.** (a) The platform team's Terraform runs `CREATE TABLE IF NOT EXISTS` for both,
+the same pattern as the source tables; (b) a `confluent_kafka_topic` plus a registered
+schema, with Flink inferring the table.
+**Choice.** (a), decided with the user in `.scratch/terraform-lab-tables/`. (b) needs new
+per-developer Kafka and Schema Registry keys (Global keys do not cover Standard clusters),
+gives an inferred table with an extra leading `key` column that breaks a positional INSERT,
+and defaults to `read-committed`. Both tables: append-only, read-uncommitted, `delete`
+cleanup (it is what lets the reset tools empty a topic), 24 h retention, earliest offset,
+`avro-registry` values, `DISTRIBUTED INTO 1 BUCKETS`, no custom watermark. `service_health`
+has the 22 columns of the 2.3 status query, with both status columns declared `STRING`;
+`remediation_decisions` keeps its 8. Lab 2.4 is `INSERT INTO service_health` followed by
+the 2.3 status query verbatim; lab 4.3 keeps only the two agent INSERTs. The two DDL files
+are `sql/sink_service_health.sql` and `sql/sink_remediation_decisions.sql` (renamed from
+`4.3_remediation_decisions.sql`), each the single source of truth for its copy in
+`statements.tf`; the sync test now covers all five tables.
+**Why.** The labs are about the queries. Pre-created tables also let the ops wall open at
+the start of a session.
+**Impact.** `platform-team/modules/developer/statements.tf` (two statements chained after
+`service_incidents`, the model depends on the last), `outputs.tf`, the module tests, and
+the README (it now lists 12 resources per person; its old count of 9 was already stale
+since `service_incidents`). `tests/test_sql_pipeline.py` checks the DDL's column list
+against `SERVICE_HEALTH_COLUMNS`. `evaluate` says "run the INSERT" instead of "create it".
+The readiness check lists five tables. The sync test's helper now finds the statement by a
+line that starts with `CREATE TABLE`, because a header comment that mentioned it had made a
+copied heredoc start in the comment.
+**Pending (live check).** The `service_health` types other than the status columns are
+derived, not observed, and so is `INSERT INTO ... WITH ... SELECT` being accepted. The
+first `terraform apply` is the check: run lab 2.4's INSERT (it must start RUNNING with
+rows appearing), `DESCRIBE EXTENDED service_health`, and if a type must change `DROP TABLE
+service_health`, fix `sql/` and `statements.tf` together, and apply again (`IF NOT EXISTS`
+never changes an existing table). If the CC grammar rejects `INSERT ... WITH`, move the
+shared CTEs into nested subqueries in 2.4.
+**Amended by D-054.** `service_health` has 23 columns: `detected_at TIMESTAMP_LTZ(3) NOT NULL` is the
+last. `remediation_decisions` keeps its 8.
+
+### D-051 · DECISION · `reset` empties the output topics instead of dropping their tables; `--with-labs` is removed
+**What.** `reset` dropped `service_health` and `remediation_decisions`, which Terraform now
+owns: a dropped table would not come back (Terraform's statement stays COMPLETED), and
+deleting their Schema Registry subjects would break them too.
+**Choice.** `reset` keeps its guard against a running `ops-sim`, stops all running
+statements (and now waits until they are gone), drops the two agents (`CREATE AGENT` has no
+`IF NOT EXISTS`), and deletes the generator's state file. It empties five topics with
+delete-records: the three source topics and the two output topics. `--keep-source` keeps
+only the three source topics; the output topics are always emptied, because they would hold
+duplicates once their INSERTs run again. A missing topic is reported as a problem. The
+`--with-labs` option, `create_lab_objects`, `LAB_SQL`, `LAB_TABLES`, the subject deletion
+and every comment that promised a rebuild are removed, at the user's request. Nothing
+rebuilds the labs now: run the INSERTs and create the agents again. Whether a replacement
+is needed is decided at the end of this work, not here.
+**Why.** One tool must leave the platform team's tables in place, and fewer lines of code
+mean less to maintain.
+**Impact.** `scripts/reset.py`, `scripts/common/flink.py` (the wait helper replaces the
+rebuild code), `scripts/common/topics.py` (the emptying code and the topic lists, shared
+with `reset-health`), `tests/test_reset.py` against a fake Flink session and a fake Kafka
+admin (the `install_fakes` fixture in `tests/conftest.py`). Wording that said the SQL files exist so
+`--with-labs` can submit them is reworded.
+**Addition not in the spec.** `reset` now waits (up to 60 s) for the statements it deleted to
+be gone before it empties anything, like `reset-health`: it used to rely on the table drops
+and the agent drops taking long enough, and a still-running INSERT would leave stray rows in
+the topics it has just emptied. A statement that stays up is reported as a problem.
+
+### D-052 · DECISION · `uv run reset-health`: a clean slate for the detection and the agents
+**What.** An attendee who improves their `service_health` query and re-runs the INSERT
+appends a second copy of the replayed history; there was no easy way back to a clean slate.
+**Choice.** A new command, for attendees. It deletes every running statement whose SQL is
+`INSERT INTO service_health ...` or `INSERT INTO remediation_decisions ...` (the second form
+catches both agents however they are named), matched on the SQL text (leading `--` and
+`/* */` comments, backticks, catalog and database prefixes, and letter case are ignored;
+SELECTs and INSERTs into other tables are not targets). Statements are deleted, not paused,
+with the same call as `reset`: attendees work in the Confluent Cloud workspace, where the SQL
+stays and Run starts it again. It prints each statement's name and SQL (before deleting it),
+waits until the targets are gone (a missing entry or a terminal phase counts; 60 s), and
+only then empties the two topics. If a statement stays up it exits nonzero and empties
+nothing; a missing topic exits nonzero too. With nothing running it just empties the topics.
+It leaves the source topics, other statements, the agents' definitions and local files alone,
+asks no confirmation and re-runs nothing. It ends with the restart order: the
+`service_health` INSERT first, the agent INSERTs only once the wall's charts reach the
+right-hand edge again, because a fresh `service_health` INSERT replays up to 24 h of history
+and agents started meanwhile would call the model for every replayed anomaly; and a hint to
+press "Refresh data" on the ops wall (D-053).
+**Why.** One command, safe by construction: no INSERT can write into a topic while it is
+being emptied, and the other statements an attendee has open keep running.
+**Impact.** `scripts/reset_health.py` and its entry in `pyproject.toml`;
+`tests/test_reset_health.py` (the matcher in both directions, the order of deletes and
+empties, a stuck statement, nothing running, the printed guidance).
+**Pending (live check).** Statement delete, delete-records and the matching against real
+statement listings were only tested against fakes. Check in your environment: with the labs'
+INSERTs running, `reset-health` deletes exactly those, empties both topics, leaves other
+statements running, and Run on the INSERTs fills the tables again with no duplicates.
+
+### D-053 · DECISION · "Refresh data" on the ops wall restarts the feed behind it (superseded by D-066)
+**What.** After `reset-health` empties the output topics (D-052), a running ops wall still
+held up to 10 minutes of old charts and pins in memory, and a consumer stayed attached to a
+topic that had been deleted and recreated. The only cure was restarting the wall.
+**Choice.** A "Refresh data" button in the page header, no confirmation. It calls
+`POST /refresh` (a POST: it changes state), which asks the `Feed` — the new owner of the
+feed threads — to restart: stop and join the running threads, `OpsWallState.clear()`
+(six pre-seeded services, no history, pins or connection errors, `generation` + 1), then
+start a new set. Live: every consumer is attached afresh from its usual start
+(`service_deployments` from the beginning, the other three from about 10 minutes back).
+Mock: a new `MockDriver` on a fresh aligned start, so the loop plays again from its first
+scene. One lock serialises restarts, so overlapping clicks cannot start two sets of
+consumers. Every snapshot carries `generation`; the button shows "Refreshing…" from the
+click until a snapshot of the new generation arrives, never for less than 1 s, and ignores
+clicks meanwhile.
+**Options.** (a) Clear the state only: leaves the stale consumers attached to a recreated
+topic. (b) Seek the existing consumers: more code, same result. (c) Restart the whole feed
+(chosen): the same code path as startup, so a refresh is by construction what a fresh wall
+would show.
+**Impact.** `scripts/opswall/` (`feed.py` new; `state.py` `clear()`/`generation`;
+`server.py` `POST /refresh`; `app.py`; `mock.py` `start_threads` replaces the unused
+`run_until_interrupt`; `consumer.py` stops promptly on the stop event; the header button in
+`static/`). Tests: `tests/test_opswall_{state,server,feed}.py`. No JS test setup exists, so
+the button is a manual check. Refreshing loses nothing: all data comes back from Kafka.
+
+**Superseded by D-066.** The button, `POST /refresh`, `Feed.restart()`, `clear()` and
+`generation` are removed; a clean view means restarting the wall.
+
+### D-054 · DECISION · The ops wall draws each anomaly from detection to the agent's answer
+**What.** The lower half of each chart drew the windows `service_health` flagged, in the
+time of the data, until the anomaly faded or a fix landed. It hid the real-time delay (the
+window has to close, the watermark has to pass), looked the same whether or not an agent ever
+answered, said "missed" for every incident until a detection overlapped it, and did all its
+counting in the browser, untested. Decided with the user in a grilling session on 2026-11-13;
+spec in `.scratch/opswall-detected-answered/spec.md`.
+**Choice.**
+- `service_health` gains a 23rd and last column, `detected_at TIMESTAMP_LTZ(3) NOT NULL`:
+  `CURRENT_TIMESTAMP` in the final SELECT, evaluated per row in a streaming query and filled
+  on every row. It is the table's one `TIMESTAMP_LTZ`, an instant, on purpose. The first
+  version cast it to `TIMESTAMP(3)` on the assumption that the session time zone is UTC (the
+  documented default), but the Cloud Console workspace submits every statement with
+  `sql.local-time-zone` set to the browser's zone: the first live run (2026-11-14, statement
+  properties read over REST) had `GMT+01:00`, so the column held local wall-clock time, the
+  wall read it as UTC, and every detection sat an hour in the future (a "+60m 15s" time to
+  detect that kept growing, "answered 0s later", blocks never removed). The workspace shows
+  `detected_at` in the attendee's zone while the window columns are UTC; the 2.3 comment says
+  so, and `sql/checks/service_health_anomalies.sql` runs in UTC with a `SET`. `PROCTIME()` is
+  not supported on Confluent Cloud. It is in the 2.3 status query too, so lab 2.4 stays the
+  2.3 query behind one line. `remediation_decisions` keeps its 8 columns; the agent INSERTs
+  read `service_health` by name and `evaluate` reads by name, so neither changes.
+- The times the wall uses: a flagged window's `detected_at`; an answer's Kafka record
+  timestamp (Confluent Cloud's sink sets it to the write time, measured live on
+  `service_health` even during a replay); an incident's `started_at`/`ended_at`. A
+  `CURRENT_TIMESTAMP` column in the agent INSERTs was rejected: whether it is evaluated before
+  or after `AI_RUN_AGENT` returns is not documented.
+- A **run** is consecutive flagged windows for one service and one trigger (latency high,
+  traffic high, traffic low); one window without that flag ends it. Only windows whose
+  `window_end` is on the chart count, which keeps a restarted INSERT's replay (every replayed
+  row has `detected_at` = now) off the wall.
+- Its **block** opens at the `detected_at` of the run's first window (no `detected_at`, no
+  block), grows toward now, and closes at the write time of the first decision for any window
+  of the run (matched on service, `window_end` and trigger), whatever the action: `OBSERVE`
+  and `INVALID` close it too. The chart draws only the block, no icons: the spec's pin at the
+  closing edge was dropped after the first live run, at the user's request ("we should just
+  show the window"). The block's tooltip names the answer (action and target, the agent's
+  reason) and counts all the run's decisions by action. Unanswered 30 s after the run's last
+  `detected_at`, the block is removed.
+- A block **belongs** to an incident on the same service and metric (bad deploy: latency;
+  surge or drop: traffic) when the run's first window overlaps the incident, counting up to
+  30 s after it ended; an incident can own several blocks; a block owned by none is a false
+  alarm. An incident is **answered** once one of its blocks closed, **missed** when it ended
+  more than 30 s ago and none closed, **pending** (plain purple) until then. Time to detect and
+  time to answer are measured on its first block.
+- The tile: "Anomaly detected: …, waiting for the agent" while a block is open; the fix
+  ("Rolled back to vX", "Scaled out to N replicas", "Traced to upstream") for 120 s after a
+  fix decision; "Healthy" otherwise. "Detector warming up" and the band texts are gone; Rate
+  and Errors still come from the newest row.
+- `OpsWallState.snapshot()` computes all of it (blocks, ownership, verdicts, the summary
+  counts and medians, the tile); the page only draws. The detection spans, the warm-up band
+  and the decision list are gone from the snapshot; `generation` stays.
+**Why.** One chart then tells the whole real-time story: the gap from the purple box to the
+block is the time to detect, the block's width is the agent's time to answer, and with the
+agents not running yet, blocks appear and disappear, which says exactly that.
+**Deferred.** Showing anomalies nobody answered for longer than the 30 s before their block is
+removed. The mock (`ops-wall --mock`, D-047) is out of date: it writes no `detected_at`, so it
+shows incident boxes but no blocks, and its scenes were tuned for the old rules. Its outdated
+tests are skipped ("mock not updated for D-054") until
+`.scratch/opswall-detected-answered/issues/01-mock-draws-blocks.md` is done.
+**Impact.** `sql/2.3_anomaly_status.sql`, `sql/2.4_service_health.sql`,
+`sql/sink_service_health.sql` and its copy in `platform-team/modules/developer/statements.tf`;
+`sql/checks/service_health_anomalies.sql` shows `detected_at` and the delay (in UTC, with a
+`SET`); the checks README. `scripts/opswall/state.py` (rewritten snapshot), `static/opswall.js`
+(draws the snapshot, no counting, no pins; the legend loses the pin shapes),
+`static/index.html` and `static/opswall.css` (warm-up hatch and styles gone). Tests: `tests/test_opswall_state.py` (rewritten around the scenarios above),
+`tests/test_opswall_ingest.py` (a synthetic `detected_at` on the real Phase 4 rows, which
+predate the column, and a `timestamp-millis` round trip through the real Avro pair), `tests/test_opswall_server.py`, `tests/test_opswall_mock.py` (six
+skipped), `tests/test_sql_pipeline.py`, `tests/test_evaluate_detection.py` (a 23-column row
+scores as before). Rolling out needs `DROP TABLE service_health`, a `terraform apply` (the
+statement is `CREATE TABLE IF NOT EXISTS`), then the INSERT restarted. **Pending (live
+check):** the real detection delay and answer time (the 6 s and 8 s in the spec are
+estimates; the first live run read 15 s to detect once the zone offset is taken out), and
+that `CURRENT_TIMESTAMP` is evaluated in the final projection (`EXPLAIN` on the live
+statement shows it). The `TIMESTAMP_LTZ` column needs the table dropped and applied again.
+
+**Amended by D-061.** Above each lane sits a line chart of the raw `service_metrics` value,
+one point per second, with a tick at each injected incident's start.
+
+**Amended by D-062.** The page no longer rebuilds its DOM on every snapshot: rows, bars and
+charts are kept and updated in place, keyed (block bars by the snapshot's new `key`).
+
+**Amended by D-064.** The 15 s to detect was the 10 s window plus 5 s of watermark: the
+deployments watermark only passed a window's end at the next 5-s heartbeat. With the
+shorter watermarks a window closes on the tick at its end, ~10 s after an incident starts.
+
+**Amended by D-066.** A block is no longer a bar: a cyan dot at its start, a line to its end
+and an amber diamond at the answer, under the plot of its metric's chart. The summary is a
+table.
+
+### D-055 · DECISION · The ops-wall mock is removed
+**What.** `uv run ops-wall --mock` drove the wall from a scripted scene loop with no Kafka
+(D-047). It had drifted from the live wall: it writes no `detected_at`, so since D-054 it
+drew incident boxes and no blocks, and six of its tests were skipped. Every wall change
+had to read around it, and D-054 left a follow-up issue to bring it back in step.
+**Options.** (a) Update the mock to the D-054 rules
+(`.scratch/opswall-detected-answered/issues/01-mock-draws-blocks.md`) and keep it in step
+with every later wall change; (b) remove it.
+**Choice.** (b), decided with the user in the simplify-demo grilling session
+(`.scratch/simplify-demo/spec.md`). The wall needs a live feed: `ops-sim` and the
+attendee's environment. `OpsWallState._to_seconds` now reads only `datetime`s. Every time
+the wall reads arrives that way through the Avro decoder, and the epoch-millisecond and
+float paths existed only for the mock and for tests that fed the state in its shape.
+**Why.** The mock showed a story the live wall no longer told, and keeping it in step costs
+work on every wall change. The design drafts in `.scratch/mockups/` stay: they are HTML
+mockups, not a feed.
+**Impact.** `scripts/opswall/mock.py` and `tests/test_opswall_mock.py` are deleted.
+`scripts/opswall/app.py` loses `--mock`, its starter and the `[MOCK FEED]` log suffix; the
+consumer import is no longer lazy. "Refresh data" (D-053) re-attaches the Kafka consumers
+and nothing else. Docstrings in `scripts/opswall/` (`__init__`, `feed`, `state`) and
+`tests/test_opswall_ingest.py` no longer mention the mock. `tests/test_opswall_feed.py`
+loses the mock refresh test. `tests/test_opswall_state.py` and `tests/test_opswall_server.py`
+feed `datetime`s where they passed epoch milliseconds. The D-054 follow-up issue is
+`wontfix`. Replaces D-047.
+
+### D-056 · DECISION · Three services: `web-gateway`, `checkout`, `payments`
+**What.** `ops-sim` ran six services, each with its own quirks: `auth`'s 401s, three
+services that could only get a surge (`web-gateway`, `catalog`, `auth`) and three that could
+only get a drop (`cart`, `checkout`, `payments`).
+**Options.** (a) Keep the six; (b) keep three and remove `cart`, `catalog` and `auth`
+completely (code, wall, tests, docs).
+**Choice.** (b), decided with the user in the simplify-demo grilling session
+(`.scratch/simplify-demo/spec.md`). The kept services keep every value they had: tier,
+owner team, initial version, latency median, replicas, routes and rates (10/6/6 requests/s;
+D-058 and D-059 change the data model and the means). Candidates:
+- `BAD_DEPLOY` → all three;
+- `TRAFFIC_SURGE` → `web-gateway` only;
+- `UPSTREAM_DROP` → `checkout` and `payments`.
+Client errors are all 404: `auth`'s 401s go with it.
+**Why.** The workshop showcases streaming and streaming agents, not a realistic shop. Three
+services are easier to follow on the wall and in the labs, and each removed service only
+added a quirk to explain.
+**What it changes in earlier decisions.**
+- D-030/D-031: the drop services are now two, both still at 6 requests/s; the total is ~22
+  requests/s instead of ~41.
+- D-043: a surge (`SCALE_OUT`) happens on `web-gateway` only.
+- D-042: its "3-service surge/drop lists" are now one and two services. Under its schedule
+  (one incident at a time, 7-min cooldown per service) the rate stays ~10.5 incidents/h, but
+  `web-gateway`'s cooldown often blocks a surge and the engine re-picks the type. Measured
+  with the generator over 96 simulated hours (16 seeds × 6 h): `BAD_DEPLOY` 51 → 54%,
+  `TRAFFIC_SURGE` 26 → 17%, `UPSTREAM_DROP` 24 → 29%. D-060 replaces this schedule with one
+  per service.
+**Impact.** `opsgen/services.py` (three entries, docstring), `opsgen/engine.py`
+(`CANDIDATES`), `opsgen/distributions.py` and `opsgen/simulation.py` (no `is_auth`:
+`status_code(success_code, rng, server_error_rate)`), the `opsgen/state.py` docstring. Fewer
+services draw from the RNGs, so `--seed` runs differ from earlier ones. Agent prompts
+(`sql/4.2_release_agent.sql`, `sql/4.2_capacity_agent.sql`): "three microservices", and the
+examples use kept services (the `SCALE_OUT` example is `web-gateway` on 4 replicas, Target
+12). `scripts/tuning/sweep.py` (rate profiles, drop columns). Comments in
+`sql/source_service_requests.sql` (outside the `CREATE TABLE`, so the Terraform copy is
+unchanged), `sql/checks/remediation_call_rate.sql` (180 `service_health` rows per 10 quiet
+minutes), `scripts/opswall/state.py`, `static/opswall.js` and the README. The wall's rows
+and `/healthz` `serviceCount` follow `SERVICES`; `evaluate` reads service names from the
+data. No change to Terraform, the schemas or the DDL. Tests: `CANDIDATES` is pinned in
+`opsgen/tests/test_engine.py`; the opsgen, tuning, wall, evaluate, agent-SQL and
+`reset-health` tests use the kept services and count three. The remaining `401`s in
+`scripts/preprovisioned/` and its tests are Confluent Cloud API answers, not `auth`.
+
+**Amended by D-067.** `web-gateway` is no longer a candidate of any shared incident type:
+`BAD_DEPLOY` goes to `checkout` and `payments`, `TRAFFIC_SURGE` to `checkout`, and
+`UPSTREAM_DROP` to `payments` only (a traffic series with both surges and drops misses the
+drops). web-gateway deploys on its own clock; its bad deploys are `BAD_DEPLOY_ERRORS`,
+flagged by an error-rate threshold in lab 2.2.
+
+### D-057 · DECISION · No benign deploys
+**What.** `ops-sim` deployed a random healthy service every 3-5 minutes (first at 60 s): a
+patch-version bump that changed no metric, so the temporal join had versions to follow
+outside incidents. With frequent incidents, bad deploys and their rollbacks already change
+versions all the time. The only effect benign deploys had left was wrong rollbacks: the
+release agent answers `ROLLBACK` to `LATENCY_HIGH` when the last change is a `DEPLOY` less
+than 600 s old, so a latency false alarm within ten minutes of a benign deploy rolled back
+a healthy version.
+**Options.** (a) Keep them; (b) remove them.
+**Choice.** (b), decided with the user in the simplify-demo grilling session
+(`.scratch/simplify-demo/spec.md`). The deployments stream keeps the bootstrap record, the
+5-s heartbeat (it advances the temporal join's watermark), and each bad deploy's deploy and
+rollback. A rollback sets the last change to `ROLLBACK`, so after an incident ends the
+release agent answers `OBSERVE` to a latency false alarm, as it should.
+**Why.** They were one more kind of version change to explain, and their only remaining
+effect on the demo was a wrong answer.
+**Impact.** `opsgen/engine.py`: `Config` loses `benign_first`, `benign_min`, `benign_max`
+and `benign_min_gap`; `Engine` loses `next_benign_at`, `last_deploy_at` (only the benign
+picker read it), `_maybe_benign_deploy` and `_choose_benign_service`; the `benign_deploy`
+event kind and its console line (`opsgen/sinks.py`) are gone. `opsgen/cli.py` loses
+`--benign-first`, `--benign-min` and `--benign-max`; `--no-incidents` now means baseline
+traffic with no version change at all. Docstrings in `opsgen/__init__.py` and
+`opsgen/deployments.py`. Benign deploys drew from the scheduler's RNG, so `--seed`
+schedules differ from earlier runs; incident timing and the type mix are otherwise
+unchanged (the incident chooser never looked at deploys). `evaluate` drops the *after
+deploy* tag (D-021). `scripts/opswall/consumer.py` renames `BENIGN_ERROR_CODES` (Kafka
+errors it skips, unrelated) to `IGNORED_ERROR_CODES`. The release agent's prompt, the SQL,
+Terraform and the schemas are unchanged. Tests: an hour of `--no-incidents` sees only the
+heartbeat after the bootstrap (`opsgen/tests/test_engine.py`); version changes come only
+from bad deploys and their rollbacks; `--simulate` shows every deploy as a `BAD DEPLOY`;
+the tests that relied on a benign deploy force a bad one. Amends D-021 and D-042.
+
+**Amended by D-067.** Good deploys come back on web-gateway only, on its own deploy clock:
+an error-rate threshold has no false alarm that could turn one into a wrong rollback.
+checkout and payments still have none. A deploy now bumps past the highest version the
+service has run, so a rolled-back version's number is never reused.
+
+### D-058 · DECISION · `service_metrics`: one record per service per second
+**What.** `ops-sim` wrote one `service_requests` record per HTTP request: instance, route,
+method, status code, latency, bytes and trace id. A traffic anomaly changed the number of
+records, and the detector's input (`COUNT(*)` per window) was an aggregate attendees never
+saw in the topic.
+**Options.** (a) Keep per-request records; (b) one metrics sample per service per second
+that sums up that second.
+**Choice.** (b), decided with the user in the simplify-demo grilling session
+(`.scratch/simplify-demo/spec.md`). The topic is `service_metrics`, and a record is:
+- `event_time`: tick + 999 ms, the end of the second it covers. Deploy records stay at the
+  tick (D-028), so on a deploy's tick the temporal join gives the record the new version;
+- `service_name`;
+- `traffic_count` (INT): Poisson(mean × the incident's traffic multiplier);
+- `latency_ms` (DOUBLE): the mean of `traffic_count` log-normal draws (median × the
+  incident's latency multiplier, sigma 0.3, the D-030 slow outliers); one draw when
+  `traffic_count` is 0, so it is always set;
+- `error_count` (INT): failed requests among `traffic_count` (0.5% normally, 12% in a bad
+  deploy). Display only: nothing detects or decides on it.
+
+Three records per second whatever the traffic: an incident changes the values, never the
+number of records. `instance_id`, `route`, `http_method`, `status_code`, `response_bytes`
+and `trace_id` are gone. The means (10/6/6) and spike sizes (surge ×3 traffic and ×1.5
+latency, drop ×0.2, bad deploy ×4 latency) are unchanged here; D-059 tunes them.
+
+Detection stays on 10-second windows: `SUM(traffic_count) AS traffic_count` and
+`AVG(latency_ms)`, the unweighted mean of the window's ten samples. `service_health`
+loses `error_count`, `error_rate`, `max_latency_ms` and `error_rate_breach`;
+`request_count` and `expected_request_count` become `traffic_count` and
+`expected_traffic_count` (19 columns, was 23). Lab 2.1 keeps its regular-vs-temporal join
+lesson, with counts as `SUM(traffic_count)`. Its proof check
+(`sql/checks/temporal_join_attribution.sql`) goes, because a sample has no `instance_id`
+to carry the version.
+**Why.** The workshop showcases streaming: attendees should see in the topic the values
+the detector works on, one step before the window. Offline, 10-second windows built from
+samples match the old per-request windows: the same means, the same count spread, and a
+latency spread ×1.05–1.11 (`.scratch/simplify-demo/research/ps_compare.out`). Detection
+behaves the same and earlier tuning numbers carry over. No detector or agent rule needed
+the error columns. The capacity prompt used Error Rate Breach only in its rule 3 (never
+`OBSERVE` on a breach), which rules 1 and 2 always pre-empt.
+**What it changes in earlier decisions.**
+- D-022: the per-version queries sum `traffic_count` (`first_sample`, `last_sample`).
+- D-024: no error expressions, no `MAX(latency_ms)`; `traffic_count` is an INT.
+- D-026, D-045: the attribution check is deleted.
+- D-028: records sit at tick + 999 ms, not at a random offset within the tick.
+- D-030, D-031: the rates are means of `traffic_count`; the topic carries three messages
+  per second whatever the rates. `sweep.py` builds windows from samples.
+- D-044: `response_bytes` is gone; the guard test keeps `error_count` out of labs 2.2–2.4.
+**Impact.**
+- `opsgen/`:
+  - `simulation.py`: `_gen_metrics` replaces `_gen_requests`.
+  - `distributions.py`: new `mean_latency_ms`, `binomial` and `ERROR_RATE`. Gone:
+    `status_code`, `response_bytes`, `trace_id` and the status-code mixes.
+  - `services.py` loses `Route`, `routes` and `pick_route`; `instances.py` is deleted.
+  - `engine.py`: `Effect.error_rate`, `BAD_DEPLOY_ERROR_RATE`.
+  - `driver.py`: the `--simulate` line reads `traffic= err= lat= ver=`, with no `inst=` hash.
+  - `sinks.py`, `kafka_io.py`: `emit_metrics` and the `service_metrics` topic; `cli.py`.
+- Schema and Terraform:
+  - `schemas/service_metrics.avsc`; `sql/source_service_metrics.sql` (same connector
+    options); `sql/sink_service_health.sql`.
+  - Both copies in `platform-team/modules/developer/statements.tf`. The resource is
+    renamed `create_service_metrics_table`, and its module output, `platform-team/outputs.tf`
+    and the `.tftest.hcl` files follow.
+  - `scripts/common/topics.py`, `scripts/preprovisioned/provision.py`.
+  - Environments must be recreated: `service_requests` becomes `service_metrics` and
+    `service_health` changes shape.
+- Labs: 2.1–2.4 (the metrics side's alias is `m`); the three `service_health` checks and
+  `sql/checks/README.md`.
+- Agents:
+  - The capacity INSERT sends `Traffic Count` and `Expected Traffic Count`, and computes
+    Suggested Replicas from `traffic_count`. Neither INSERT sends Error Rate Breach.
+  - The capacity prompt's rule 3 keeps `OBSERVE` for weak evidence, without the Error Rate
+    Breach conditions, and its `OBSERVE` example loses "with no error rate breach".
+  - The release prompt's `ROLLBACK` example loses "11 percent of requests failing".
+- `evaluate`: `HealthRow` loses the error fields; the count fields become `traffic_count`
+  and `expected_traffic_count`.
+- `scripts/tuning/`: `sweep.py` windows from samples, a `req/s` column; `calibrate.py`
+  column names.
+- The ops wall: Rate is `traffic_count / 10` from `service_health`. Errors shows "—" until
+  issue 07 reads `error_count` from `service_metrics`. The ingest fixture is the Phase 4
+  live dump with the dropped columns removed and the count columns renamed.
+- README and `platform-team/README.md` no longer call the topic a request log.
+- The traffic RNG draws differently, so `--seed` runs differ from earlier ones.
+- Tests:
+  - One record per service per second through a surge, a drop and a bad deploy, with the
+    values moving by `opsgen.engine`'s multipliers (so the test follows D-059's sizes).
+  - A record at tick + 999 ms, after the deploy record of its tick.
+  - Windows of samples against the old per-request windows (mean and spread).
+  - The new `.avsc`, DDL and `statements.tf` stay in step; the 19-column order;
+    `test_instances.py` is deleted.
+
+Amends D-022, D-024, D-026, D-028, D-030, D-031, D-044 and D-045.
+
+**Amended by D-059.** The means are 50/30/30 and the spike sizes surge ×5 traffic (no
+latency effect), drop ×0.1 and bad deploy ×4 latency.
+
+**Amended by D-061.** The wall's Rate and Errors come from the last 10 s of
+`service_metrics` samples, not from `service_health`.
+
+**Amended by D-067.** `error_count` is read again, by lab 2.2 only: web-gateway's error
+rate over a 10-second window against a fixed 25 % threshold, written to
+`service_error_rate`. `service_health` still has no error columns, and the ARIMA labs
+(renumbered 2.3–2.5) still don't read it.
+
+### D-059 · DECISION · Tuned data and reference detector: 20 s spikes, 50/30/30, confidence 99.95
+**What.** Workshop preparation: the data settings and **our** reference detector settings
+for the simplified demo (`.scratch/simplify-demo/spec.md`, issue 05), chosen offline with the
+replica for the issue-06 schedule (one schedule per service, incidents may overlap across
+services, 20 s between incidents on a service, per-type rests, first three one of each type,
+50/25/25; D-060). Attendees tune their own detectors later; that competition is out of scope.
+**Options.** Varied with `scripts/tuning/research/tune.py` (the per-second data
+model, the issue-06 schedule, an AR(p) replica with any refit interval, scored with
+`evaluate`'s code): spike length 20/30 s (10 and 40 s from the earlier search), traffic means,
+spike sizes, `confidencePercentage`, `minTrainingSize`, `maxTrainingSize`, `p`, the refit
+interval. A setup qualifies at **one grid step of margin** above its minimum rests (rest grid
+0/60/120/180/240/300/420/600/900/1200 s; the minimum is the smallest rest per type with
+≥ 99.5% recall) if that margin still allows **about 60 incidents/h**. Then the rests are raised
+to land on ~60/h, and the qualifying setup with the fewest false alarms wins.
+**Choice.**
+- **Spikes 20 s** (2 windows; was 40 s, D-042).
+- **Traffic means 50/30/30** requests/s (was 10/6/6).
+- **Sizes:** surge ×5 traffic and **no latency effect** (was ×3 and ×1.5 latency); drop ×0.1
+  (was ×0.2); bad deploy ×4 latency (unchanged). Each type now moves exactly one metric.
+- **Detector:** AR(1) (`p` 1, `d` 0, `q` 0), `minTrainingSize` 12, `maxTrainingSize` 360,
+  **`confidencePercentage` 99.95** (was 99.9), `enableStl` false.
+- **Rests for D-060** (per service and type, the same on every service): `BAD_DEPLOY` 390 s,
+  `TRAFFIC_SURGE` 300 s, `UPSTREAM_DROP` 300 s → **59 incidents/h**, mix about 44/19/37%.
+  The quiet period stays tied to `minTrainingSize` 12 (150 s, D-060).
+
+Candidates (replica; 200 seeds × 2 h each; 20 s spikes, 50/30/30, ×5/×0.1/×4, AR(1)
+12/360/99.9 unless stated; recall was 100% at the ~60/h rests in every row; "fresh start" is
+false alarms per service in the first 5 minutes of a run; "quiet data" is noise per
+service-hour with no incidents at all):
+
+| Setup | Min rests (BD/SURGE/DROP) | Margin rests | /h at margin | Rests at ~60/h | Echoes /svc-h | Fresh start /svc | Quiet data /svc-h |
+|---|---|---|---|---|---|---|---|
+| confidence 99.5 | 180/180/180 | 240/240/240 | 83 | 540/240/240 | 0.155 | 1.09 | 3.40 |
+| confidence 99.9 (the start) | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.013 | 0.94 | 0.81 |
+| **confidence 99.95** | 240/240/240 | 300/300/300 | **67** | **390/300/300** | **0.005** | **0.85** | **0.48** |
+| confidence 99.97 | 240/240/300 | 300/300/420 | 61 | (58/h at 330/300/420) | 0.014 | 0.75 | 0.28 |
+| confidence 99.99 | 240/300/300 | 300/420/420 | 58 | — | 0.001 | 0.60 | 0.11 |
+| 30 s spikes | 240/240/240 | 300/300/300 | 65 | 330/300/300 | 1.49 | 1.01 | — |
+| means 25/15/15 | 240/240/240 | 300/300/300 | 67 | 390/300/300 | 0.021 | 0.77 | 0.94 |
+| means 100/60/60 | 180/180/180 | 240/240/240 | 83 | 540/240/240 | 0.006 | 1.05 | 0.79 |
+| sizes ×3/×0.2/×3 | 180/240/240 | 240/300/300 | 75 | 390/300/300 | 0.013 | 0.89 | — |
+| sizes ×8/×0.05/×6 | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.015 | 0.98 | — |
+| `maxTrainingSize` 180 / 720 | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.014 / 0.013 | 0.94 | — |
+| `minTrainingSize` 6 (quiet 80 s) | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.006 | 0.68 | 0.81 |
+| `minTrainingSize` 6, 99.95 | 240/240/240 | 300/300/300 | 69 | 390/300/300 | 0.001 | 0.50 | 0.48 |
+| `minTrainingSize` 24 | 180/180/240 | 240/240/300 | 78 | 420/240/300 | 0.28 | 0.59* | — |
+| AR(2) | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.000 | 2.77 | 0.85 |
+| refit every 5 rows | 180/180/240 | 240/240/300 | 77 | 420/240/300 | 0.008 | 1.30 | 0.84 |
+
+\* not comparable: the later warm-up moves the first incidents' echoes past the 5 minutes.
+Noise outside echoes was 0.000 per service-hour in every demo run: frequent incidents keep
+the bands wide.
+
+**Why.**
+- **The band comes from the spike windows in the model's history**, not from the data's
+  noise. Too few spike windows and the forecast after a spike is still pulled toward it (an
+  echo); too many and the band outgrows the next spike (a miss). Both limits scale with the
+  spike itself, so spike sizes and `maxTrainingSize` change almost nothing (table), and the
+  rests are what sets recall and frequency.
+- **20 s, not 10 or 30 s.** Detection is in the first window of every spike (100% of
+  detections here). Each extra window adds a spike→spike pair to the AR(1) fit, which pulls
+  the forecast after the spike toward the spike: 30 s spikes have ~100× the echoes of 20 s.
+  A 10 s spike has no echoes but is flagged only after it has ended (detection lands ~15 s
+  after the start), so 20 s is the shortest spike that is still on when it is flagged.
+- **Raise the bad-deploy rest, not the traffic rests, to get down to 60/h.** A bad deploy
+  can't echo (latency below the forecast is never flagged), while rarer traffic incidents
+  mean narrower traffic bands and more echoes. Balancing the mix to 50/25/25 instead
+  (300/300/450 at 99.95) gave 13× the echoes (0.066 per service-hour). The weights still decide
+  whenever two types are allowed at once; at these rests the rests set the mix.
+- **99.95 over 99.9:** it still qualifies with slack (67/h at margin against the 60/h target)
+  and has fewer false alarms of every kind (echoes 0.005 vs 0.013, fresh start 0.85 vs 0.94,
+  quiet-data noise 0.48 vs 0.81). The replica under-predicts post-incident false alarms
+  (D-031: Confluent's spread recovers faster after a jump), so live echoes are likely higher
+  than offline and live recall at least as good; a stricter band pays off live. 99.97 and 99.99
+  have no slack left (61 and 58/h at margin).
+- **Means 50/30/30:** calmer data (100/60/60) shortens the rests but raises fresh-start false
+  alarms; rougher data (25/15/15) does the opposite and needs longer rests. 50/30/30 keeps
+  visible noise (web-gateway's per-second traffic 50 ± 7) so the band can't collapse.
+- **`minTrainingSize` stays 12.** At 6, the first-incident echoes halve only if the
+  simulator's quiet period shrinks to 80 s, and the very first output window then flags noise
+  in 12% of service starts (offline, at 99.9), the failure D-029 saw live at 6. With our 150 s quiet
+  period, 6 gives 1.18 fresh-start false alarms per service against 0.84.
+
+**Validation of the choice** (400 seeds × 3 h, fresh seeds): 59.0 incidents/h, **0 misses in
+70,795** (31,200 bad deploys, 13,200 surges, 26,395 drops), all flagged in window 1, echoes
+0.003 per service-hour, no other noise, 0.85 fresh-start false alarms per service.
+**Margin:** the minimum rests are 240/240/240 (2 missed drops in 10,800); one grid step below
+(180/180/180) recall falls to 91.8% / 88.7% / 58.7%. The chosen rests sit one step above the
+minimum for the traffic types and 150 s above it for bad deploys.
+**Generator check:** windows from `opsgen.Simulation` at 50/30/30 match the harness's (means
+within 0.1%, spreads within 3%; `research/t_gen_vs_harness.out`).
+
+**Fresh-start echoes (found here; accepted).** The first surge and the first drop on each
+service echo almost every time: the model has seen a spike→spike pair but no spike→normal pair
+yet, so its AR slope is near 1 and the forecast for the window after the spike stays at the
+spike's level (`TRAFFIC_LOW` after a surge, `TRAFFIC_HIGH` after a drop). That is about 2.5
+false alarms per `ops-sim` start, all in its first 5 minutes; `evaluate` counts them as
+fresh-start noise, outside the false-positive rate. Nothing the replica varies removes them
+except 10 s spikes; stricter confidence and rougher data reduce them. The spec's steady-state
+"echoes near zero" holds (0.003 per service-hour).
+
+**Competition sanity check** (our data and rests, our 150 s quiet period, different detectors;
+200 seeds × 2 h):
+
+| Detector | Recall per type | Echoes /svc-h | Fresh start /svc | Quiet data /svc-h |
+|---|---|---|---|---|
+| ours: AR(1) 12/360/99.95 | 100 / 100 / 100% | 0.004 | 0.84 | 0.47 |
+| confidence 99 | 100% | 1.58 | 1.17 | 6.47 |
+| confidence 99.5 | 100% | 0.40 | 1.13 | 3.34 |
+| confidence 99.9 (D-029) | 100% | 0.014 | 0.94 | 0.85 |
+| confidence 99.99 | 100 / 100 / 99.94% | 0.000 | 0.61 | 0.13 |
+| Confluent's defaults as AR(1) (min 128, max 512, 99, refit 5) | 82 / 82 / 82% | 0.68 | — | 6.11 |
+| `minTrainingSize` 6 | 100% | 0.004 | 1.18 | 0.47 |
+| `maxTrainingSize` 60 | 100% | 0.31 | 0.84 | 0.91 |
+| AR(2) / AR(3) | 100% | 0.000 | 2.61 / 2.83 | 0.48 / 0.50 |
+
+Settings score visibly differently: false alarms span ×400, Confluent's default warm-up
+(128 windows, 21 minutes) misses every incident in it, and higher AR orders are noisy at a
+fresh start. Recall alone separates little, because the spikes are big: if the competition
+should also rank on recall, smaller spikes are the knob (×3/×0.2/×3 cost only one more grid
+step of surge rest). Confluent's real default is auto-ARIMA, which the replica can't model
+(D-029: it chases level changes, so more echoes).
+
+**Live shortlist (issue 08).**
+1. The choice: AR(1), 12/360, **99.95**.
+2. **99.99**, otherwise the same: the fewest false alarms offline (fresh start 0.61, quiet
+   data 0.13), with 5 missed drops in 8,793 at the chosen rests. It shows how much recall
+   margin the live model really has.
+3. **ARMA(1,1)** (`p` 1, `d` 0, `q` 1) at 99.95: the replica can't model `q`. The MA term
+   reacts to a spike's first residual, which might cancel the first-incident echo, the main
+   false alarm left. Untested live (D-029 skipped it for cost). Never `p` = `d` = `q` = 0: it
+   stalls live (D-029).
+Fallback: 99.9 (D-029, live-proven; 77/h at margin, rests 420/240/300 for 60/h). Not
+shortlisted: `d` 1 (follows level changes, D-029), STL (the data has no seasonality),
+`minTrainingSize` 6 and AR(2) (above).
+**What it changes in earlier decisions.**
+- D-029: `confidencePercentage` 99.9 → 99.95; the rest of the config is unchanged.
+- D-031: the traffic means are 50/30/30; `sweep.py`'s current profile and detector follow.
+- D-042: the fixed duration is 20 s (2 windows). Spacing and cooldown stay until D-060.
+- D-058: the spike sizes above; a surge no longer touches latency.
+**Impact.**
+- `opsgen/services.py` (means), `opsgen/engine.py` (`SURGE_LAMBDA_MULT` 5,
+  `DROP_LAMBDA_MULT` 0.1, `SURGE_LATENCY_MULT` removed, `Config.duration` 20).
+- `sql/2.3_anomaly_detection.sql`, `sql/2.3_anomaly_status.sql`,
+  `sql/2.4_service_health.sql`: `confidencePercentage` 99.95. Running statements must be
+  re-created to pick it up.
+- `scripts/tuning/`: the replica's default confidence, `calibrate.py`'s default, `sweep.py`'s
+  `CURRENT` and rate profiles.
+- Tests: the detector config, the incident duration, the CLI defaults, the surge's
+  untouched latency, the sweep's traffic level.
+- Until D-060 lands, the old single-slot schedule (spacing 240–360 s, cooldown 420 s) runs
+  with 20 s incidents; the rests above take effect with D-060.
+- Evidence: `scripts/tuning/research/tune.py`; its `t_*.out` outputs are in
+  `.scratch/simplify-demo/research/`.
+
+Amends D-029, D-031, D-042 and D-058.
+
+**Amended by D-064.** Detection now lands ~10 s after the start, not ~15 s: a 10 s spike is
+still flagged only as it ends, so 20 s stays the shortest spike that is on when flagged.
+
+**Amended by D-065.** Spikes are no longer a fixed 20 s: an incident lasts until an agent
+resolves it, or a 35 s cap (`Config.max_duration`) that ends mid-window on purpose. Offline,
+35 s has no echoes, where 30 s and 40 s (both on a boundary) have 80× and 670× those of 20 s.
+The rests stay 390/300/300 s, counted from the scheduled end; the rate is ~56 an hour.
+
+### D-060 · DECISION · Per-service schedules: overlap, per-type rests, first three one of each type
+**What.** `ops-sim` had one global incident slot: one incident at a time, the next one
+240–360 s after the last ended, and a 420 s cooldown per service. About 10 incidents an
+hour, and the first surge could take up to an hour to appear. Its timings were CLI flags.
+**Options.** (a) Keep the single slot with a shorter spacing: the slot caps the rate, and
+the cooldown blocks the same services over and over; (b) one schedule per service, with
+rests per service and type.
+**Choice.** (b), decided with the user in the simplify-demo grilling session
+(`.scratch/simplify-demo/spec.md`, issue 06):
+- **One schedule per service.** Incidents on different services may overlap; a service has
+  at most one at a time.
+- **Gap and rests.** A service's next incident starts at the next 10-second boundary once
+  **20 s** have passed since its last incident ended and at least one of its types is out of
+  its **rest**. Rests are per service and type, measured from the end of that type's last
+  incident on that service, the same on every service (D-059): `BAD_DEPLOY` **390 s**,
+  `TRAFFIC_SURGE` **300 s**, `UPSTREAM_DROP` **300 s**. At a boundary, every service that can
+  start one does.
+- **First three one of each type.** Until all three types have happened, only types not
+  seen yet are picked (order random). After that the type is drawn by `INCIDENT_WEIGHTS`
+  (50/25/25) among the types allowed now, then a random service allowed for it.
+- **Quiet period tied to the warm-up.** No incident before
+  `(minTrainingSize + 1) × WINDOW_SECONDS + WINDOW_SECONDS` after start (the detector scores
+  nothing for `minTrainingSize + 1` windows, plus one window of margin). That floor is 140 s
+  with lab 2.3's `minTrainingSize` 12; the quiet period is **150 s**, as decided in the
+  session, one more window of margin. A test reads `minTrainingSize` from
+  `sql/2.3_anomaly_status.sql` and fails if the quiet period drops below the floor.
+- **Spikes** are 20 s (D-059), start and end on window boundaries; a bad deploy deploys on
+  its first tick and rolls back at its end (D-042), unchanged.
+- **Timing lives in `Config` only.** `--quiet-period`, `--spacing-min`, `--spacing-max`,
+  `--duration` and `--cooldown` are removed; `--seed`, `--no-incidents`, `--simulate`,
+  `--dry-run` (and `--creds`) stay.
+**Why.** Each service has its own detector model (`PARTITION BY service_name`, D-009), so
+incidents on other services change nothing for it (`research/cross_service.py`); overlap
+costs no accuracy. What limits the rate is same-service, same-metric repeats: the model
+trains on its spike windows, and too many of them on one metric widen the band past the next
+spike. Per-type rests control exactly that, and D-059 tuned them to about 60 incidents an
+hour with every type caught. The first-three rule shows every incident type within the
+first minute of a run, where it used to take up to an hour for a surge. Tying the quiet
+period to the warm-up means every incident lands in windows the detector scores.
+**Measured** (`Engine` alone, seeded): **60 incidents in the first hour for each of 500
+seeds**, **58.5 an hour at steady state** (hours 2–3 of 200 three-hour runs), mix
+44/19/37% (bad deploy, surge, drop), the same as the issue-05 harness
+(`scripts/tuning/research/tune.py`'s `schedule`, D-059's 59/h). The harness loops over the
+free services in random order and draws
+a type for each; the engine draws a type, then a service. The two give the same rate, mix and
+per-service rates, and with the harness's 140 s quiet period the engine reproduces a
+type-first copy of it incident for incident (300 seeds × 3 h). The harness's quiet period
+was 140 s; at 150 s the numbers above are unchanged, so D-059's results carry over.
+**Impact.**
+- `opsgen/engine.py`: `RESTS`; `Config` loses `spacing_min`, `spacing_max` and `cooldown`,
+  gains `gap` (20) and `rests`, and `quiet_period` is 150 (was 180). `Engine.active` is a dict
+  by service; `effect_for` reads the service's own incident; `next_incident_at` and
+  `_uniform` are gone; `last_type_end` (by service and type) and `seen` are new; `_eligible`
+  excludes a service mid-incident and checks the gap and the type's rest; `_choose_incident`
+  applies the first-three rule and is called until no service can start one. All
+  scheduling randomness is still on the one scheduler rng, so `--seed` reproduces the
+  schedule, but schedules differ from earlier runs.
+- `opsgen/cli.py`: no timing flags. `opsgen/driver.py`: the `--simulate` banner prints
+  `quiet`, `duration`, `gap` and the rests (or "no incidents").
+- Ground truth and sinks are unchanged: records are per incident, and nothing assumed one
+  open incident. `evaluate` and the wall already work per service.
+- On a restart, incidents in flight lose their end record, now up to one per service.
+  Accepted (spec): the wall keeps them open for 11 minutes; `evaluate` skips them.
+- Tests (`opsgen/tests/`): overlap across services; at most one incident per service; ≥ 20 s
+  between incidents on a service; no same-type repeat within its rest; the first three one
+  of each type; starts on window boundaries; the warm-up floor; about 60 an hour; the chooser
+  (rests, gap, weights, first three); the banner; `ops-sim --help` has no timing flags.
+
+Amends D-042.
+
+**Amended by D-065.** Incidents last up to 35 s (an agent's correct answer ends one early)
+and so end mid-window. The gap and the rests count from each incident's scheduled end
+(start + 35 s), not its actual end, so the schedule doesn't depend on what the agents do and
+still follows `--seed`. About 56 incidents an hour; a service's shortest gap between
+incidents is 25 s (T+35 to the boundary at T+60). The banner prints `max` for `duration`.
+
+**Amended by D-067.** The shared scheduler serves `checkout` (bad deploys and surges) and
+`payments` (bad deploys and drops) only: about 37 incidents an hour, 19 per service as
+before. web-gateway has its own deploy clock with its own RNG (`seed + 2`): a deploy every 60–90 s,
+bad with probability ½, outside the quiet period, the gap, the rests and the "one of each"
+rule.
+
+### D-061 · DECISION · The wall charts raw `service_metrics` latency and traffic
+**What.** The wall drew each metric as a lane: the injected incidents up, the detections
+down. A viewer saw *that* an anomaly happened, never the data that made it one. The rail's
+Rate was the newest `service_health` window's `traffic_count / 10`, and Errors had no source
+since D-058 dropped the error columns.
+**Options.** What to chart: (a) the `service_health` windows (the detector's 10-s input,
+with its band and forecast), which need the attendee's labs and change with their detector
+settings; (b) the raw `service_metrics` records, one point per second. The y scale:
+(i) linear from 0, as issue 07 was written; (ii) logarithmic.
+**Choice.** (b) with (ii). The scale was the user's call when reviewing the mockup
+(`.scratch/mockups/wall-charts.html`, which keeps a Linear / Log toggle for comparison;
+`.scratch/simplify-demo/issues/07-wall-charts.md`).
+- **Consumer.** `service_metrics` is a fifth topic, read from 660 s back (the 10-minute axis
+  plus the state's 60 s margin) with the existing seek by timestamp. `start_threads`
+  attaches it with the others, so "Refresh data" (D-053) re-attaches it.
+- **State.** `apply_metric` keeps each service's samples (`event_time`, `traffic_count`,
+  `latency_ms`, `error_count`) in `event_time` order: a late one goes in its place, the same
+  second twice keeps the newer. `trim()` drops them with the rest.
+- **Trimming.** `OpsWallState.trim()` existed but nothing called it, so the state only grew,
+  and an incident whose end record never came (a simulator restart, D-060) stayed on the
+  wall for as long as it ran: a pending bar across the whole lane. The `Feed` now runs one
+  more thread next to the consumers that calls `trim(time.time())` every 10 s; it stops and
+  restarts with them ("Refresh data", D-053). The state keeps 11 minutes (the axis plus
+  60 s) whatever the length of the workshop, and such an incident leaves the wall after
+  11 minutes, as D-060 assumed.
+- **Snapshot.** The `metrics` per service: the samples with `event_time` on the axis
+  and not after `now`, as `{t, traffic, latency, errors}`, with `t` axis-relative and latency
+  rounded to 0.1 ms. A sample stamped in the second still running (tick + 999 ms, D-058)
+  waits for the next snapshot.
+- **Rail.** Rate is the mean `traffic_count` of the samples of the last 10 s (one sample is
+  one second, so requests per second); Errors is their `error_count` over their
+  `traffic_count`, in %. No sample in the last 10 s → "—" for both; no requests → "—" for
+  Errors. `HealthRow` loses `traffic_count`.
+- **Page.** Above each Latency and Traffic lane, a 56 px hand-drawn SVG chart on the lane's
+  `X()` axis: one point per sample, a plain line, no smoothing, broken over a gap of more
+  than 1.5 s instead of bridging it. The y scale is log, from a round number just below the
+  smallest visible value above 0 to one just above the largest (multiples of a fifth of the
+  power of ten), at least ×10 apart; a second with 0 requests sits on the bottom edge. A band
+  above the plot names the range (`28–280 rps · log`), so the label never covers data. A
+  thin purple tick marks each injected incident's start, only on its metric's chart
+  (`INCIDENT_METRIC`). No band, no forecast. Hover snaps a crosshair to the nearest second;
+  the tooltip gives the value, how long ago, and the incident the second falls in. The
+  hover is kept across the 4 Hz rebuilds of the DOM. The line is a new neutral token,
+  `--metric` `#7F8CA8`: OKLab ΔE 15.5 from `--truth` (`#A3AEC6` was 11.1, under the 15
+  floor). The legend gains "Value per second" and "Incident starts"; the subtitle and the
+  footer mention the raw lines. Only latency and traffic get charts.
+**Why.** Raw records show before any lab is done and the same whatever the attendee's
+detector settings, which matters once attendees tune their own detectors. The incidents are
+ratios (surge ×5, drop ×0.1, bad deploy ×4); on a log scale a ratio has the same height
+wherever the service's normal level sits, so a drop on a 30 rps service reads as clearly as
+a surge on a 50 rps one, and Poisson noise shrinks to a thin band. The ×10 minimum keeps a
+chart with no incident on it from blowing plain noise up. Rate and Errors read the stream
+the charts draw: only `service_metrics` has `error_count` (D-058), and the figures now move
+with the line next to them.
+**Measured.** Offline: the real `Simulation` (seed 7) fed into `OpsWallState` with
+Avro-shaped timestamps, served by the real app, rendered in headless Chrome. At every
+incident marker the first sample after it is changed and the last before it is not;
+medians in the 20 s before against during: surges ×5.27–5.30, drops ×0.06–0.13, bad
+deploys ×3.92–4.14. The snapshot carries about 1,800 samples (~95 KB, four times a second,
+local). Through Kafka and a running `ops-sim`: issue 08.
+**Impact.** `scripts/opswall/consumer.py` (`METRICS_TOPIC`, `METRICS_BACKREAD_SECONDS`, five
+topics), `scripts/opswall/feed.py` (the trim thread, `TRIM_INTERVAL_SECONDS`),
+`scripts/opswall/state.py` (`MetricSample`, `apply_metric`, `RATE_WINDOW_SECONDS`,
+`HEALTH_RETAIN_MARGIN` renamed `RETAIN_MARGIN_SECONDS`, the snapshot's `metrics`, Rate and
+Errors), `scripts/opswall/app.py` (docstring), `static/opswall.js` (line chart, log scale,
+hover, legend), `static/opswall.css` (`--metric`, the chart's styles, the metric gap; the
+dimmed label of a quiet metric is gone, since its line always has data),
+`static/index.html` (subtitle, footer). `platform-team/README.md`: the wall reads five
+topics. Each service row grows from about 200 px to about 310 px. Tests:
+`tests/test_opswall_state.py` (samples on the axis, oldest first, late and repeated ones;
+a future sample waits; `trim()` drops old samples and an incident that never ended; Rate
+and Errors over 10 s, through a
+bad deploy and a drop, and empty without samples or requests; health rows alone give no
+rate; `clear()` drops samples), `tests/test_opswall_ingest.py` (real `ops-sim` records
+through the Avro pair reach the charts and the rail; the consumer tails `service_metrics`
+from 660 s back; the Phase 4 health rows give no rate), `tests/test_opswall_feed.py` (the
+feed trims on the wall clock until stopped, and again after a restart).
+
+Amends D-053, D-054 and D-058.
+
+**Amended by D-062.** The page no longer rebuilds its DOM on every snapshot: rows, bars and
+charts are kept and updated in place, keyed (block bars by the snapshot's new `key`).
+
+**Amended by D-066.** The line and its lane are one chart; the incidents are boxes behind the
+line instead of onset ticks. The rail's Rate and Errors are gone, and with them `rateRps`,
+`errorRatePct` and the per-sample `errors`.
+
+### D-062 · FIX · The ops wall updates its DOM in place instead of rebuilding it
+**What.** On every snapshot (4 Hz, `PUSH_INTERVAL_SEC`) the page emptied `#rows` and built
+every row again with empty chart hosts, which a ResizeObserver drew after the next layout.
+For that one layout every host was 0 px tall, the page about 800 px shorter, and the browser
+clamped the scroll position to it: the wall couldn't be scrolled, it flickered and jumped
+back to the top. The rebuild also threw away the bar holding the keyboard focus or under the
+pointer four times a second, so tabbing through bars and their tooltips didn't work.
+**Options.** (a) Keep the rebuild and give each host its height up front (fixes the scroll
+only); (b) update the DOM in place, keyed; (c) move the page to React or Preact, whose keyed
+reconciliation does (b), at the price of a build step or a vendored runtime (D-040: no CDN).
+**Choice.** (b), with (a)'s heights kept for a row's first draw. React was weighed and
+declined: the page is ~550 lines, and stable keys for the bars are needed either way.
+- **Keyed update.** `sync()` reuses a node by key, creates one for a new key and removes one
+  whose key is gone. Rows are keyed by service name, incident bars by `incidentId`, block
+  bars by a new snapshot field `key`, `"<trigger>@<first window_end in ms>"`: every other
+  block time is axis-relative and clamped, so the page couldn't tell a block apart from one
+  snapshot to the next.
+- **Charts.** Each chart's `<svg>` and its layers are made once. A redraw empties the layers
+  that only show things (grid, line, labels, time-to-detect marks) and updates the bars and
+  the line chart's hit area in place.
+- **Rail and summary.** Made once; a write is skipped when the text is unchanged.
+- **Tooltip.** It follows the bar node: each snapshot refreshes its text (an answer arrived)
+  or hides it when the bar has left the axis.
+**Measured.** Headless Chrome, a 1400×700 window, real `OpsWallState` snapshots at 4 Hz:
+before, scrolling stopped at 250 px (the shrunken page's maximum); after, it stayed at 400 px.
+A focused open block stays the same node and keeps the focus as it is answered; its tooltip
+turns from "Waiting for the agent" to "Answered…"; it hides when the block is gone; a line
+hover follows the data. The same snapshot renders pixel-identical to before.
+**Impact.** `static/opswall.js` (`sync`, `setText`/`setClass`/`setHTML`, `chartSvg`,
+`createRow`/`updateRow` replace `serviceRow`, one module-level ResizeObserver, `refreshTip`),
+`scripts/opswall/state.py` (the block's `key`). Tests: `tests/test_opswall_state.py` (a block
+keeps its key as the wall moves; two blocks never share one).
+
+Amends D-054 and D-061.
+
+### D-063 · FIX · The ops wall reads uncommitted records
+**What.** Health rows and agent decisions showed up on the wall up to about a minute after
+the Confluent Cloud UI showed them in the topic. The wall's consumers read
+`read_committed`. Flink's sinks are transactional and commit "approximately every minute"
+([delivery guarantees](https://docs.confluent.io/cloud/current/flink/concepts/delivery-guarantees.html)),
+so a committed reader waits up to one commit interval for each statement's rows. The UI
+shows uncommitted records. `remediation_decisions` also has two writers on its one
+partition: a committed reader can't get past the first record of either agent's open
+transaction, so one agent's committed decision can wait behind the other agent's
+transaction too.
+**Options.** (a) Keep `read_committed` and live with the lag; (b) `read_uncommitted` on the
+wall's consumers.
+**Choice.** (b). The cost is that the wall can read records from a transaction Flink later
+aborts and replays. Every applier already keeps one record per natural key (a health row
+per window, a decision per window and agent, a sample per second, an incident per id), and
+keeps the first detection and first write time, so a replayed row counts once. A replayed
+agent call may answer differently; the newer answer wins, as for a re-run INSERT.
+`uv run evaluate` (`scripts/common/topic_reader.py`) stays `read_committed`: it scores
+after the fact and its 100 s tail covers the lag (D-021).
+**Impact.** `scripts/opswall/consumer.py` (`_build_consumer`). Tests:
+`tests/test_opswall_ingest.py` (the consumer reads uncommitted records).
+
+### D-064 · DECISION · Shorter source watermarks: a window closes on the tick at its end
+**What.** Every incident was detected 15 s after it started. Incidents start on a window
+boundary and are flagged in their first window (D-059), so 10 s of that is the window. The
+other 5 s were the watermarks: both sources trailed `event_time` by 5 s, and the temporal
+join's watermark is the lower of the two. `service_metrics` (stamped tick + 999 ms, every
+second) reached the window's last millisecond on the tick at 14 s; `service_deployments`
+(stamped on the tick, written only on the 5-s heartbeat) not until the heartbeat at 15 s.
+**Options.** (a) Keep 5 s; (b) 5-s windows and a 1-s watermark; (c) shorter watermarks,
+10-s windows kept.
+**Choice.** (c): `service_metrics` trails by 1 s, `service_deployments` by 1 ms. Both reach
+a window's last millisecond on the tick at its end, so the window closes then: ~10 s from
+an incident's start to its detection, plus processing.
+**Why.**
+- **(b) was measured offline and set aside.** Its detection would land at 10 s, not 6 s: a
+  1-s deployments watermark still misses the window's end at the heartbeat on it (T+4 at
+  T+5) and waits for the next one. And the detector gets worse. `sweep.py`'s generator and
+  AR(1) replica (`scripts/tuning/research/window_*.py`; 6 seeds x 3 h, 1,062 incidents)
+  caught every incident in its first window at both sizes, but a 20 s spike becomes 4
+  windows, the fitted AR(1) coefficient rises from
+  ~0.47 to ~0.73, and the first normal window after every traffic spike is flagged the
+  other way: 0 -> 7.9 false alarms per service-hour, all echoes. `maxTrainingSize` 720 left
+  7.5; 10 s spikes left 2.2. 5-s windows would need D-059's tuning again.
+- **1 s and 1 ms are safe here.** Each topic has one partition and one producer writing in
+  `event_time` order, so no row arrives late. 1 ms, not 0: the heartbeat stamps every service
+  with the same tick, and Flink's strictly ascending strategy (`AS event_time`) would make
+  all but the first of them late. A deploy is always read before the samples it applies
+  to: the join emits a sample only once the deployments watermark has passed it, which
+  takes a later record on the same partition.
+- **The detector is untouched.** A watermark changes when a window is scored, not what is
+  in it, so D-059's results stand.
+**Impact.** `sql/source_service_metrics.sql`, `sql/source_service_deployments.sql` and their
+copies in `platform-team/modules/developer/statements.tf`. `service_incidents` keeps 5 s: no
+statement windows or joins it. Tests: `tests/test_sql_pipeline.py`
+(`test_a_window_closes_on_the_tick_at_its_end` works out the closing tick from the two DDLs
+and ops-sim's stamps and heartbeat), `tests/test_opswall_ingest.py` (the synthetic detection
+delay is 1 s, was 6 s). Rolling out: the tables are `CREATE TABLE IF NOT EXISTS`, so drop
+`service_metrics` and `service_deployments` and apply again, then `uv run reset-health` and
+run the 2.4 INSERT and the agents again. **Pending (live check):** the wall's time to detect
+drops from 15 s to ~10 s.
+
+Amends D-054 and D-059.
+
+### D-065 · DECISION · Close the loop: a correct agent answer resolves its incident
+**What.** The demo's story is: an incident starts, the pipeline detects it, an agent decides
+what to do. The ops wall showed all three, but the agent's decision changed nothing: the
+generator kept degrading the service until the incident's fixed 20 s (D-059) ran out,
+whatever the agent said. A `ROLLBACK` that rolled nothing back, or a `SCALE_OUT` after which
+the surge carried on, made the last step of the story fake.
+**Options.**
+- Whether a decision acts at all: (a) keep agent decisions display-only; (b) ops-sim reads
+  `remediation_decisions` and a correct answer ends its incident early.
+- The length of an incident nobody fixes: a cap of 20 s (today), 30 s, 35 s or 40 s.
+- Where an early end leaves the schedule: gap and rests dated from (i) the actual end;
+  (ii) the scheduled end (start + cap).
+- When a fix takes effect: on the next tick, mid-window; or snapped to a window boundary.
+- How ops-sim reads the decisions: `read_committed` or `read_uncommitted`.
+**Choice.** (b), decided with the user in a grilling session on 2026-11-15/16
+(`.scratch/close-the-loop/spec.md`). An incident an agent ends is **resolved**; one that
+reaches the cap **expires**. ("Anomaly" stays what the detector flags; the generator ends
+*incidents*.)
+- **Which decision resolves which incident.** A decision resolves the active incident on its
+  `service_name` when its `action` is the incident's `expected_action` (`ROLLBACK`,
+  `SCALE_OUT` or `INVESTIGATE_UPSTREAM`), its `trigger` is the incident's
+  `expected_trigger`, its `window_end` is after the incident's `started_at` (so a stale
+  decision for an earlier incident can't end a new one), and the incident is still active
+  when the decision is read. The first match resolves it; later decisions for the same
+  incident, decisions arriving after it ended, and decisions matching no active incident are
+  ignored. `OBSERVE`, `INVALID` and a wrong action resolve nothing: the incident runs on, and
+  a correct answer for a later window of it can still resolve it.
+- **What resolving does.** The rule lives in the engine, `Engine.resolve(decision, now)`,
+  pure, no Kafka; `Simulation.tick(now, decisions=())` applies the decisions before ticking
+  the engine. A decision read before the tick at `now` makes that tick's metrics sample
+  normal, and the incident ends on that tick (`ended_at` = `now`), mid-window, not snapped to
+  a boundary. The end is an expiry, only sooner: a bad deploy fires its `ROLLBACK`
+  deployment record on that tick, and the end record goes to `service_incidents` with the
+  real `ended_at`. `ROLLBACK` always restores `previous_version`; the decision's `target` is
+  ignored (`evaluate` scores targets, D-045). `SCALE_OUT` only ends the surge:
+  `ready_replicas` and `desired_replicas` stay as they are (no ceiling exists, D-043, and
+  `SCALE` is reserved for a later project). The console line for an end says how it ended:
+  `resolved by release_agent ROLLBACK after 17 s` or `expired after 35 s`.
+- **The cap: 35 s** (`Config.max_duration`, was `Config.duration` 20 s). It ends mid-window
+  on purpose; a test pins it to a value that is not a multiple of 10.
+- **The schedule is dated from the scheduled end** (`Incident.scheduled_end`, start + 35 s):
+  the gap and the per-type rests count from there, not from the actual end. The rests stay
+  390/300/300 s (D-059). Incidents still start on a 10 s window boundary.
+- **Reading the decisions.** Live mode only. A consumer thread in `opsgen/decisions.py`
+  reads `remediation_decisions` with the card's Kafka key, Avro through Schema Registry (the
+  registered schema, as the wall does), a fresh group per launch, no offset commits,
+  `read_uncommitted`, from the topic's latest offset when it is assigned, so old decisions
+  are never replayed. It decodes each record onto a queue; the driver drains the queue
+  before every tick. If the topic is missing or can't be read, ops-sim warns once, keeps
+  retrying in the background, and keeps producing; meanwhile every incident expires at
+  35 s. `--dry-run` and `--simulate` never connect to Kafka, so every incident runs its 35 s.
+  There is no flag to turn the loop off: before lab 4.3 runs, there are no decisions to read.
+**Why.**
+- **35 s, not 30 or 40.** An incident that ends on a window boundary goes from a fully
+  spiked window to a fully normal one in one step, and that first normal window gets the
+  opposite traffic flag (an echo: the forecast is still pulled toward the spike, D-059). At
+  35 s the return to baseline splits over two windows, in two steps small enough to stay
+  inside the band. Measured
+  offline (table below): 35 s has no echoes, where 30 s and 40 s, which end on a boundary,
+  have 80× and 670× today's. It also removes almost all of D-059's fresh-start echoes (0.06
+  false alarms per service against 0.91). 40 s also starts to miss drops (57 in 122,000).
+- **Scheduled end, not actual end.** The schedule (which service, which type, when) is then
+  the same whatever the agents do, and the live schedule still follows `--seed`. Dated from
+  start + 35 s, the rate falls from ~59 to **~56 incidents an hour**; the mix stays
+  44/19/37%. `Engine` alone, seeded: 54 in the first hour for each of 20 seeds, 57 an hour
+  at steady state.
+- **Starts stay on a boundary** so the first window is all spike and detection stays in the
+  first window (100% in every scenario below).
+- **The fix lands on the next tick, mid-window.** Snapped to a boundary, every fix would
+  end on one and lose the mid-window benefit (row H below: a fix exactly at T+20).
+- **`read_uncommitted`** because Flink commits about once a minute (D-063): a committed
+  reader would see every decision after its incident had already expired. Accepted cost: a
+  decision from a transaction Flink later aborts can already have resolved an incident; its
+  replay finds the incident ended and is ignored.
+- **The loop never stops the generator.** A missing or unreadable topic only means
+  incidents expire, as they did before.
+**Evidence.** `scripts/tuning/research/close_loop.py`, output in
+`.scratch/close-the-loop/research/close_loop.out`: the real generator through the AR(1)
+replica at the labs' settings (12/360/99.95), scored with `evaluate`'s code, 2000 seeds × 3 h
+per scenario, the same seeds everywhere. A fix is modelled by ending the incident at the fix
+tick while the gap and rests are dated from start + cap.
+
+| Scenario | Incidents/h | Recall | Echoes /svc-h | Fresh-start false alarms /svc | Agent calls /incident |
+|---|---|---|---|---|---|
+| 20 s (today) | 59.0 | 100 % | 0.003 | 0.91 | 1.02 |
+| 30 s | 57.9 | 100 % | 0.239 | 1.00 | 1.02 |
+| **35 s, no fix** | **55.9** | **100 %** | **0.000** | **0.06** | **1.02** |
+| 40 s | 55.9 | 99.98 % | 1.997 | 0.99 | 1.02 |
+| 35 s cap, fixed at T+15 | 56.0 | 100 % | 0.000 | 0.07 | 1.02 |
+| 35 s cap, fixed at T+18 | 56.0 | 100 % | 0.000 | 0.11 | 1.02 |
+| 35 s cap, 80 % fixed at T+18 | 56.0 | 100 % | 0.002 | 0.10 | 1.02 |
+| H: 35 s cap, fixed at T+20 | 56.0 | 100 % | 0.006 | 0.94 | 1.02 |
+
+The harness reproduces D-059 (20 s at 99.9: 0.012 vs 0.013 echoes; 30 s: 1.71 vs 1.49).
+**Caveats:** after a big jump the replica's band is up to 1.5× wider than Confluent's, so
+live echo suppression may be weaker; a fix exactly on a boundary loses the benefit (row H,
+still no worse than today); fixes at T+21 to T+29 were not tested.
+**What does not change.**
+- No schema, DDL or Terraform change; no Flink statement changes. `service_incidents` gets
+  no new column.
+- The ops wall: the incident box already ends at `ended_at`, and the raw per-second chart
+  (D-061) shows the spike ending right after the block closes. D-054's 30 s ownership and
+  missed limits work unchanged with 35 s incidents.
+- `uv run evaluate`: only the comment on `UNLOGGED_TAIL_SECONDS` changes; 35 s fits its
+  100 s tail. No "resolved vs expired" count: without a column it could only be guessed
+  from durations. **Accepted scoring gap:** in the part-spike last window of a traffic
+  incident, an opposite flag counts as neither a false alarm nor a wrong direction
+  (`Incident.at_end`), though it is still an agent call that
+  `scripts/evaluation/decisions.py` attributes to the incident. Measured on 0.2–0.4% of
+  incidents (the fixed scenarios above).
+- A restart still drops the incidents in flight (D-060).
+**Impact.**
+- `opsgen/engine.py`: `Config.duration` (20) becomes `Config.max_duration` (35);
+  `Incident.scheduled_end` (start + `max_duration`, whole seconds); `degradation_end` starts
+  equal to it; `_end_incidents` dates `last_incident_end` and `last_type_end` from
+  `scheduled_end`; the module docstring and the `RESTS` comment (about 56 an hour).
+- `opsgen/driver.py`: the `--simulate` banner prints `max=35s` (was `duration=20s`).
+- `scripts/evaluation/detection.py`: the `UNLOGGED_TAIL_SECONDS` comment.
+- `scripts/tuning/research/close_loop.py` and `window_echoes.py` set `max_duration`;
+  `close_loop.py`'s self-check compares the stock engine with scenario C (35 s, no fix),
+  since the stock engine is no longer 20 s. Research scripts that run the stock `Config`
+  (`sweep.py`, `window_compare.py`, `window_phi.py`) now run 35 s incidents, so their
+  earlier outputs no longer reproduce exactly.
+- Tests (`opsgen/tests/test_engine.py`): every incident starts on a boundary and lasts
+  35 s; the cap is not a multiple of 10; about 56 an hour (54 in the first hour, 57 at
+  steady state); the shortest gap between incidents on a service is 25 s (T+35 to the
+  boundary at T+60); the gap and the rest count from `scheduled_end`.
+  `opsgen/tests/test_output.py`: the banner. Test helpers that build an `Incident` pass
+  `scheduled_end`.
+- `opsgen/engine.py`: `Decision` (`service_name`, `window_end` in epoch seconds,
+  `agent_name`, `trigger`, `action`; no Kafka types, no `target`); `Incident.resolved_by`
+  (`"<agent_name> <action>"`); `Engine.resolve(decision, now) -> bool` sets
+  `degradation_end` to `now`, so `_end_incidents` ends the incident (and rolls a bad deploy
+  back) on that tick. `tick` is unchanged. The module docstring states the resolve rule.
+- `opsgen/simulation.py`: `Simulation.tick(now, decisions=())` applies the decisions, in
+  order, before the engine ticks.
+- `opsgen/sinks.py`: `format_event`'s `INCIDENT END` line appends how it ended, after the
+  rollback for a bad deploy: `rollback 4.2.2 -> 4.2.1, resolved by release_agent ROLLBACK
+  after 17 s`, or `expired after 35 s`.
+- `opsgen/groundtruth.py`: unchanged; `end_record` already writes `ended_at` from
+  `degradation_end`, and a test pins it.
+- Tests: `opsgen/tests/test_engine.py` (a correct decision ends each type on the tick that
+  reads it, a bad deploy rolled back to its previous version; `OBSERVE`, `INVALID` and the
+  wrong capacity action leave it running to 35 s; a correct answer after an `OBSERVE`
+  still resolves; a wrong trigger, a `window_end` at or before the start, another service:
+  ignored; only the first correct decision counts, and none after the incident expired; the
+  schedule is identical whether every incident is resolved at T+15 or none is),
+  `opsgen/tests/test_simulation.py` (the end record's `ended_at` and a bad deploy's
+  `ROLLBACK` deployment record land on the resolving tick; that tick samples normal metrics
+  and the one before is still degraded), `opsgen/tests/test_output.py` (the resolved line;
+  without decisions, every `--simulate` incident expires after 35 s).
+- `opsgen/decisions.py` (new): `DecisionFeed(card)` tails `remediation_decisions` on one
+  daemon thread. Its consumer (`_build_consumer`) uses the card's Kafka key over SASL_SSL, a
+  fresh `ops-sim-decisions-<hex>` group per launch, `enable.auto.commit` off and
+  `read_uncommitted`; once the topic is found, every partition is assigned at `OFFSET_END`.
+  Values are decoded against the registered schema (`make_deserializer`, as the wall does)
+  by `decode_decision`, with `window_end` through `epoch_seconds` (a naive datetime is UTC,
+  D-048). `drain()` returns what was queued since the last call, in order, without
+  blocking. A missing topic, a failed lookup, assign or poll, a broker error on a message,
+  a Schema Registry failure and a record that doesn't decode (or lacks a field) are each
+  warned once on stderr; the feed retries every 3 s and skips bad records. `stop()` waits
+  about one poll (1.5 s) and no longer: a thread stuck in a metadata lookup to an
+  unreachable broker is a daemon and ends with the process, so Ctrl-C stays quick.
+- `opsgen/driver.py`: `tick_once(sim, sink, now, decisions, st_path)` is one second of live
+  output (drain the feed, tick, emit records, events and ground truth, save the state);
+  `run_realtime(..., decisions=None)` calls it every second and stops the feed on the way
+  out.
+- `opsgen/cli.py`: live mode builds `DecisionFeed(card)` after the `KafkaSink`, prints
+  "Reading remediation_decisions: a correct agent answer resolves its incident.", and
+  passes the feed to `run_realtime`. `--dry-run` and `--simulate` build none; no flag.
+  Module docstring updated.
+- Tests: `opsgen/tests/test_decisions.py` (a real Phase 4 decision round-trips through the
+  Avro pair against the table's registered schema shape, whose columns are checked against
+  `sql/sink_remediation_decisions.sql`; with a fake consumer, the feed queues every decision
+  and `drain` hands them over once, in order; a missing topic and an unreachable broker are
+  each warned once and retried; a record that doesn't decode is skipped with one warning; a
+  poll error is warned once per kind, and the end of a partition is no error; the consumer
+  built from the card reads uncommitted, never commits, gets a fresh group and is assigned
+  at `OFFSET_END`; the driver's tick step hands the drained decisions to `sim.tick`, so a
+  resolving tick emits the normal sample, the `ROLLBACK` deployment record and the end
+  record; `--dry-run` and `--simulate` build no feed, and live mode builds one and says so).
+  `opsgen/tests/test_incident_records.py`: its `sim.tick` wrapper passes the decisions on.
+**Pending (live check).**
+- The real time from an incident's start to its resolution. Detection lands when the first
+  window closes (~T+10, D-064); the answer time was estimated at ~8 s and never measured.
+- The live echo rate and fresh-start false alarms with 35 s incidents.
+
+Amends D-059 and D-060.
+
+### D-066 · DECISION · The ops wall redesign: one chart per metric, floating cards, Confluent dark
+**What.** The user asked for a calmer wall that says what to expect: the summary sentence
+changed shape with the numbers, the legend was a run of inline items, and each service row
+carried text nobody read (subtitle, footer, the tier pill, Rate, Errors, the "Detected 10s
+after onset" note). Each metric had a line chart above a separate lane of bars. Agreed in a
+grilling round (Q1–Q25); the spec is `.scratch/opswall-redesign/spec.md`. Design source: the
+dark stage of `dimi-vo/demo-confluent-intelligence-f1/docs/site/pre-provisioned.html`.
+**Options.** For the chart: (a) keep the line above the lane; (b) merge them: the incident
+as a box behind the line, the detection and the answer as marks under the plot. For the
+answer marker: (a) one shape for every action, the action in the tooltip; (b) a hollow shape
+for observe / invalid. For Refresh: (a) hide the button only; (b) remove it end to end.
+**Choice.** Chart (b), marker (a), Refresh (b).
+- **Page.** Dark only (D-035), midnight `#040531` with a 20-px dot grid, text `#E8EEF5` and
+  its mixes into midnight, Confluent cyan `#38CCED` for detection, purple `#B69CFF` for
+  incidents, amber `#F2B33D` for answers, red for anomalies, green only for status and the
+  LIVE lamp. IBM Plex Sans stays (D-040; Plex is IBM's face, and the logo reads "an IBM
+  Company"). The header has the Confluent lockup (`static/confluent-logo.svg`) and "Ops
+  wall"; the favicon is the mark (`static/confluent-mark.svg`), both vendored from the
+  design source. The LIVE pill has a real lamp: green with a steady glow, red while
+  reconnecting, grey before the first connection.
+- **Tables.** A summary table, one row per field, Metric | Value (Injected · Answered ·
+  Open · Missed · False alarms · median time to detect and to answer in seconds; whole
+  numbers; an empty field reads 0; caption "Last 10 minutes"), beside a seven-row legend
+  table, each symbol drawn like its mark.
+- **Layout.** Inside side margins of 8% of the window (20–160 px), three columns: the
+  summary (25%), the cards (50%) and the legend (25%), the cards starting right under the
+  header and the two side panels staying in view while the cards scroll. The content is
+  capped at 1680 px so an ultra-wide screen doesn't stretch it. Below 1200 px the two
+  tables sit side by side above the cards; below 760 px everything stacks.
+- **Cards.** One floating card per service: name and status in its header; the
+  Latency and Traffic charts at full width; one time axis per card instead of the page's
+  sticky axis. An open anomaly gives the card a red glow.
+- **Chart.** Back to front: a purple box per incident on that metric at 30% opacity, the
+  full plot height (dashed when missed); the raw line, unchanged (D-061); under the plot, per
+  detection block (D-054), a cyan dot at detection (hollow for a false alarm), a cyan line to
+  the agent's first decision (to now while it waits) and an amber diamond there. The diamond
+  sits one row below the dot: an answer lands about a second after detection, 2 px away,
+  and on one row the diamond hid the dot. No grid lines, "now" line, onset tick or
+  time-to-detect bracket. Hovering the plot inside a box adds the incident to the value's
+  tooltip; a box and a mark group (dot, line, diamond) are each a tab stop with their own.
+- **Refresh removed.** The button and its JS, `POST /refresh`, `Feed.restart()`,
+  `OpsWallState.clear()` and `generation`. `Feed` keeps starting the consumers and the
+  trimmer. `uv run reset-health` now says to restart the wall for a clean view. The user
+  will design a new way later.
+- **Snapshot pruned.** `rateRps`, `errorRatePct` (`_rate_and_errors`,
+  `RATE_WINDOW_SECONDS`), the per-sample `errors` (`MetricSample.error_count`), `tier`,
+  `replicas` and `version` (also off `ServiceState`) had no reader left. The pipeline's
+  columns stay. `previousVersion`, `lastChange` and `secondsSinceDeploy` were unread before
+  this change and stay; they are now all the wall takes from `service_deployments`. The
+  user keeps that consumer for now; whether the wall shows deployments again or stops
+  reading the topic is to be reviewed by 2026-11-23, ahead of the 2026-12-08 hackathon
+  (`.scratch/opswall-redesign/issues/01-review-service-deployments-feed.md`).
+**Why.** One chart per metric puts the injected incident, the detection and the answer on
+the same time line as the raw value, which is the question the wall exists to answer
+(D-036). Tables with fixed columns show what the wall can say before it has said it.
+**Measured.** `uv run ops-wall` against the live cluster, headless Chrome at 1440 and 820 px
+wide: the cards, the tables and the stacked narrow layout render; a box hover, a mark hover
+(action, target, reason) and a keyboard-focused box each show their tooltip.
+**Impact.** `scripts/opswall/static/{index.html,opswall.css,opswall.js,confluent-logo.svg,
+confluent-mark.svg}`, `scripts/opswall/{state,server,feed,app,consumer}.py`,
+`scripts/reset_health.py`. Tests: `tests/test_opswall_{state,server,feed,ingest}.py` (the
+refresh, clear, rate, errors and tier tests removed; the feed's start and stop and a
+failed start tested on their own), `tests/test_reset_health.py`. No JS test setup exists;
+the page is a manual check.
+
+Supersedes D-053. Amends D-036, D-054 and D-061.
+
+**Amended by D-067.** web-gateway's card shows one chart, errors per second in % (linear,
+0–100 %, a line at 25 %), with a mark at every deploy and rollback; checkout and payments
+keep latency and traffic. The per-sample `errors` comes back for that chart, and the wall
+reads `service_error_rate`. The deploy marks settle part of the `service_deployments`
+review: the consumer stays.
+
+### D-067 · DECISION · web-gateway is detected by an error-rate threshold
+**What.** Every service was detected the same way: `ML_DETECT_ANOMALIES` (ARIMA) on
+10-second windows of latency and traffic. That is the hardest detector in the workshop, and
+it is the first one attendees meet. The labs should build up: begin with something simpler
+of the same shape (the simulator produces metrics, a Flink statement inspects them and flags
+the agent, the agent's answer closes the loop, D-065), then move to ARIMA.
+**Options.**
+- The signal: (a) `error_count`, display only until now (D-058); (b) latency or traffic
+  against a fixed bound.
+- The window: (a) 10 s tumbling; (b) 10 s sliding, moving 1 s at a time.
+- Where the flag goes: (a) its own narrow table; (b) error columns on `service_health`,
+  written by a second INSERT.
+- web-gateway's bad deploy: (a) a new incident type; (b) `BAD_DEPLOY` with a per-service
+  effect and trigger.
+- web-gateway's schedule: (a) its own deploy clock; (b) the shared scheduler with a shorter
+  rest.
+- Surges, whose only candidate was web-gateway: (a) surges on checkout, drops on payments;
+  (b) both on both services, the first proposal; (c) drop them.
+**Choice.** (a) each time, decided with the user in a grilling session on 2026-11-16
+(`.scratch/web-gateway-threshold/spec.md`). The story for web-gateway: a deploy happens, a
+lot of requests start failing, so it must have been a bad deploy; the release agent answers
+ROLLBACK and the errors stop.
+- **web-gateway** leaves the shared scheduler and gets its own deploy clock, with its own
+  RNG (`Random(seed + 2)`). The first deploy is on the first window boundary at or after
+  start + 60 s and is good; the second is bad. After that, each deploy is on a boundary 60,
+  70, 80 or 90 s (uniform) after the previous one started, bad with probability ½, never
+  three good in a row. The clock is dated from the starts, so it is the same however
+  incidents end. The quiet period doesn't apply. A good deploy is a deployment record
+  (`last_change = DEPLOY`) and nothing else. A bad deploy is the same record plus a
+  `BAD_DEPLOY_ERRORS` incident: 40 % of requests fail, traffic and latency stay normal,
+  expected trigger `ERROR_RATE_HIGH`, expected action `ROLLBACK`, capped at 35 s and
+  resolved like any incident (D-065). `--no-incidents`: web-gateway doesn't deploy.
+- **checkout and payments** keep the shared scheduler and its three types: bad deploys on
+  both, surges on checkout, drops on payments (`BAD_DEPLOY` loses web-gateway,
+  `TRAFFIC_SURGE` moves from web-gateway to checkout). Their bad deploys keep latency ×4 and
+  12 % errors. The quiet period, the "first three are one of each" rule, the gap and the
+  rests stay. Each service still gets about 19 incidents an hour, 37 in all (was 56 on three).
+  The grilling first agreed on all three types on both services; the offline re-check below
+  found it lost the drops, and the user chose the split on 2026-11-17.
+- **Versions never repeat.** A deploy bumps the patch past the highest version the service
+  has run, on every service. Before, it bumped the current version, so the first deploy
+  after a rollback reused the bad version's number. The generator state file (D-046) keeps
+  the highest version; a file without it uses the higher of the saved `version` and
+  `previous_version`.
+- **Lab 2.2** (new): the 2.1 temporal join plus `error_count`, web-gateway only, a 10 s
+  `TUMBLE`, `error_rate = SUM(error_count) / SUM(traffic_count)`, and `error_status` `HIGH`
+  when `SUM(error_count) >= 0.25 * SUM(traffic_count)` (never with no requests), else
+  `NORMAL`. Every window goes to a new table, `service_error_rate` (12 columns: service,
+  window, `traffic_count`, `error_count`, `error_rate`, `error_status`, the deployment
+  context, `detected_at`), created by the platform team's Terraform like the others (D-050).
+- **ARIMA** moves to labs 2.3–2.5 (the files are renamed) and reads
+  `WHERE m.service_name IN ('checkout', 'payments')`.
+- **The agent.** The release agent takes `ERROR_RATE_HIGH` too: a second INSERT,
+  `4.3_insert_release_agent_errors.sql`, reads `service_error_rate` where
+  `error_status = 'HIGH'` and runs before the latency INSERT. The prompt names both
+  triggers; its decision rules don't change. The capacity agent's `SCALE_OUT` example moves
+  off web-gateway.
+- **The wall.** web-gateway's card shows one chart, errors per second in % (linear, 0–100 %,
+  a line at 25 %), with a mark at every deploy and rollback. The wall reads
+  `service_error_rate`.
+- `uv run evaluate` scores `ERROR_RATE_HIGH`; `uv run reset-health` covers
+  `service_error_rate`.
+**Why.**
+- A fixed threshold on one metric is the simplest detector with ARIMA's shape, and errors
+  are what a bad deploy is known by.
+- Tumbling: incidents start on a window boundary, so the first window after a bad deploy is
+  bad for all 10 s: one detection, one answer. A sliding window fires about 5 s sooner, but
+  then every second until the rollback and for a few seconds after it, calling the agent
+  each time; and it would be a new kind of window in the simplest lab.
+- A narrow table keeps the first INSERT small. On `service_health` it would fill most of 22
+  columns with typed NULLs.
+- The engine and the wall key everything by incident type (candidates, effect, trigger,
+  action, rest, `INCIDENT_METRIC`). A new type fits that; one `BAD_DEPLOY` with per-service
+  effects would add per-service exceptions in the engine, the wall and `evaluate`.
+- In the shared scheduler, web-gateway would share the RNG (its draws would shift checkout's
+  and payments' schedule for a seed), the "one of each" rule (a type only one side can take
+  can hold the other side back) and the quiet period (ARIMA's warm-up, which a threshold
+  doesn't need). On its own clock its bad deploys can come often, about 24 an hour against
+  about 8 per service before, without touching the other two.
+- Good deploys, back on web-gateway only, show that the rule reacts to the errors, not to
+  the deploy. D-057 removed them because an ARIMA latency false alarm soon after one rolled
+  back a healthy version; a 0.5 % baseline against a 25 % threshold has no such false alarm.
+  The reason still holds for checkout and payments.
+- With good deploys, "3.4.4 is bad, rolled back, then 3.4.4 deployed again and fine" would
+  contradict itself.
+- Surges move rather than go, so the capacity agent keeps both of its answers and ARIMA's
+  traffic detector keeps seeing changes in both directions. They go to one service and drops
+  to the other because a traffic series with both loses the drops: ×5 surges widen its band,
+  which is symmetric, until the lower bound is below zero (about −500 requests per window on
+  checkout), and a ×0.1 drop to about 30 never falls under it. Before, the split by service
+  came from the story (the edge gets surges, the backends get drops) and kept each series
+  spiking one way without anyone writing down why.
+**Measured.** Offline, the share of web-gateway windows (50 rps, about 500 requests) at or
+above 25 % when *k* of their 10 seconds fail at the bad-deploy rate and the rest at 0.5 %;
+`opsgen.distributions`, 20,000 windows per cell, seed 1
+(`.scratch/web-gateway-threshold/research/threshold_check.py`):
+
+| bad rate | k = 10 | k = 5 | k = 3 | k ≤ 2 |
+|---|---|---|---|---|
+| 0.30 | 99.38 % | 0 % | 0 % | 0 % |
+| 0.35 | 100 % | 0.01 % | 0 % | 0 % |
+| **0.40** | **100 %** | **0.54 %** | 0 % | 0 % |
+| 0.45 | 100 % | 11.6 % | 0 % | 0 % |
+| 0.50 | 100 % | 55.3 % | 0 % | 0 % |
+
+k = 10 is the first window after a bad deploy. k = 1–3 is the window the rollback lands in
+when an agent answers (about 1 s after detection, D-066). k = 5 is the window an expired
+incident ends in: at 0.40, 0.5 % of those are flagged again, with `last_change = ROLLBACK`,
+so the release agent answers OBSERVE.
+
+ARIMA on checkout and payments, offline (`scripts/tuning/research/shared_scheduler.py`, output
+in `.scratch/web-gateway-threshold/research/shared_scheduler.out`): the real generator through
+the AR(1) replica at the labs' settings (12/360/99.95), scored with `evaluate`'s code, 300 seeds
+× 3 h per run, same seeds, no fix:
+
+| Candidates | Inc/h | Mix BD/SURGE/DROP % | Bad deploys | Surges | Drops | Echoes, other FPs | Fresh /svc |
+|---|---|---|---|---|---|---|---|
+| Before, all three services scored (D-065 row C) | 55.9 | 44/19/37 | 100 % | 100 % | 100 % | 0, 0 | 0.05 |
+| Before, checkout and payments scored | 37.3 | 44/0/56 | 100 % | – | 100 % | 0, 0 | 0.04 |
+| All three types on both (rejected) | 57.9 | 28/36/36 | 100 % | 100 % | **1.6 %** | 0, 0 | 0.04 |
+| **Surges on checkout, drops on payments** | 37.3 | 44/28/28 | 100 % | 100 % | 100 % | 0, 0 | 0.04 |
+
+Every incident fixed at T+11 (an answer about 1 s after detection) gives the same recall and
+no echoes. The harness reproduces D-065's row C (55.9 an hour, 100 %, no echoes; fresh-start
+0.05 against 0.06).
+**Pending (live).** The time from a web-gateway bad deploy to its rollback; the release
+agent's answers to `ERROR_RATE_HIGH` (ROLLBACK, right target); ARIMA's recall, false alarms
+and echoes on checkout and payments with surges.
+**Open.** Lab 2.2 now teaches `TUMBLE` first, so the windowing-only step of the old 2.2
+(`2.3_window_metrics.sql` after the rename) may be redundant. Kept for now.
+**Impact.** Issue 01 (versions): `opsgen/deployments.py` (`DeploymentState.highest_version`,
+`highest()`), `opsgen/simulation.py` (restores it, `state_snapshot` saves it),
+`opsgen/state.py` (docstring). Tests: `opsgen/tests/test_deployments.py` (no version
+reused after a rollback, numeric order), `opsgen/tests/test_engine.py` (a restart keeps the
+highest version; a state file from before D-067).
+Issue 02 (the shared scheduler): `opsgen/engine.py` (`SHARED_SERVICES`, `CANDIDATES`, the
+docstring's rules and rate). `scripts/tuning/sweep.py` and `scripts/tuning/research/tune.py`
+score checkout and payments only (`ARIMA_SERVICES`; `tune.py`'s `TYPES_OF` follows the new
+candidates); `scripts/tuning/research/close_loop.py`'s scoring is split out as `score_run`
+(same output, checked on three scenarios) for the new `shared_scheduler.py`; the research
+README. Tests: `opsgen/tests/test_engine.py` (the candidates; web-gateway gets no shared
+incident; about 37 an hour; the gap/rest, chooser and resolve tests on checkout and payments),
+`opsgen/tests/test_simulation.py` and `opsgen/tests/test_output.py` (surges on checkout,
+drops on payments, two services open at once), `tests/test_tuning.py` (a quarter-hour's
+traffic bound). The spec's other issues add theirs.
+
+Amends D-056, D-057, D-058, D-060 and D-066.

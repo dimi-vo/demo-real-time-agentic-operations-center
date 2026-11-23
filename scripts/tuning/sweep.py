@@ -3,9 +3,10 @@
 Usage: uv run python -m scripts.tuning.sweep [--hours 3] [--seeds 4]
 
 For every variant it runs the real generator (`opsgen.Simulation`, with rates and
-multipliers overridden) for `hours` of simulated time per seed, aggregates the requests
-into the same 10-second windows Flink uses (count, average latency, version as of the
-window's last tick), runs the calibrated AR(1) replica, and scores the result with
+multipliers overridden) for `hours` of simulated time per seed, aggregates its per-second
+metrics samples into the same 10-second windows Flink uses (SUM of traffic_count, AVG of
+latency_ms, version as of the window's last tick; D-058), runs the calibrated AR(1)
+replica, and scores the result with
 `scripts.evaluation.detection.score`, the same code `uv run evaluate` uses. Each seed is
 a fresh start, so fresh-start noise is measured too.
 
@@ -44,9 +45,20 @@ _DEFAULTS = _defaults()
 START_BASE = 1_800_000_000.0  # a 10-second boundary
 
 
+def _arima_services() -> tuple[str, ...]:
+    import opsgen.engine as eng
+
+    return eng.SHARED_SERVICES
+
+
+# The services ARIMA scores: the shared scheduler's (labs 2.3-2.5 filter to them). web-gateway
+# is detected by an error-rate threshold instead (D-067), so its rows are left out of scoring.
+ARIMA_SERVICES = _arima_services()
+
+
 @dataclass(frozen=True)
 class DataConfig:
-    rates: tuple[tuple[str, float], ...] = ()  # service -> req/s overrides
+    rates: tuple[tuple[str, float], ...] = ()  # service -> traffic mean (per second) overrides
     drop_mult: float | None = None
     surge_mult: float | None = None
     outlier_prob: float | None = None
@@ -67,7 +79,7 @@ class DataConfig:
 @dataclass
 class Result:
     label: str
-    msg_per_s: float = 0.0
+    traffic_per_s: float = 0.0
     by_type: dict[str, list[int]] = field(default_factory=lambda: defaultdict(lambda: [0, 0]))
     drops_by_service: dict[str, list[int]] = field(default_factory=lambda: defaultdict(lambda: [0, 0]))
     fp: int = 0
@@ -82,7 +94,7 @@ class Result:
 
 def simulate(data: DataConfig, seed: int, hours: float) -> tuple[list[HealthRow], list[Incident], float, float, float]:
     """Run the generator and return window rows (without detector output), incidents,
-    the run's start/end, and the average message rate."""
+    the run's start/end, and the average traffic (traffic_count per second, all services)."""
     import opsgen.distributions as dist
     import opsgen.engine as eng
     import opsgen.simulation as sim_mod
@@ -99,21 +111,22 @@ def simulate(data: DataConfig, seed: int, hours: float) -> tuple[list[HealthRow]
 
     start = START_BASE + (0.0 if data.aligned else 0.5 + (seed * 3.7) % 9.0)
     sim = sim_mod.Simulation(seed, start=start, config=Config())
-    agg: dict[tuple[str, int], list[float]] = defaultdict(lambda: [0, 0.0, 0])  # count, latency sum, errors
+    # Per window: SUM(traffic_count), the sum of latency_ms and the number of samples, so
+    # the window latency is the unweighted AVG(latency_ms) of its samples, as in Flink.
+    agg: dict[tuple[str, int], list[float]] = defaultdict(lambda: [0, 0.0, 0])  # traffic, latency sum, samples
     ctx: dict[tuple[str, int], tuple[str, float]] = {}
     incidents: list[Incident] = []
     total = 0
     ticks = int(hours * 3600)
     for k in range(ticks):
         now = start + k
-        reqs, _deps, events = sim.tick(now)
-        total += len(reqs)
-        for r in reqs:
-            key = (r["service_name"], r["event_time"] // WINDOW_MS)
-            a = agg[key]
-            a[0] += 1
-            a[1] += r["latency_ms"]
-            a[2] += r["status_code"] >= 500
+        metrics, _deps, events = sim.tick(now)
+        for m in metrics:
+            total += m["traffic_count"]
+            a = agg[(m["service_name"], m["event_time"] // WINDOW_MS)]
+            a[0] += m["traffic_count"]
+            a[1] += m["latency_ms"]
+            a[2] += 1
         w = sim.tick_ms(now) // WINDOW_MS
         for name, d in sim.deployments.items():
             ctx[(name, w)] = (d.version, d.deployed_at)
@@ -122,18 +135,17 @@ def simulate(data: DataConfig, seed: int, hours: float) -> tuple[list[HealthRow]
                 inc = ev.incident
                 incidents.append(
                     Incident(inc.incident_id, inc.type, inc.service_name, inc.degradation_start, inc.degradation_end,
-                             inc.expected_trigger, inc.expected_action, inc.bad_version, inc.good_version)
+                             inc.expected_trigger, inc.expected_action)
                 )  # fmt: skip
     rows = []
-    for (name, w), (count, lat_sum, errs) in sorted(agg.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+    for (name, w), (traffic, lat_sum, samples) in sorted(agg.items(), key=lambda kv: (kv[0][0], kv[0][1])):
         version, deployed_at = ctx.get((name, w), (None, None))
         end = (w + 1) * WINDOW_MS / 1000
         rows.append(
             HealthRow(
                 service_name=name, window_start=w * WINDOW_MS / 1000, window_end=end, latency_status=None,
-                traffic_status=None, avg_latency_ms=lat_sum / count, request_count=int(count),
-                error_rate=errs / count, version=version,
-                seconds_since_deploy=None if deployed_at is None else int(end - deployed_at),
+                traffic_status=None, avg_latency_ms=lat_sum / samples, traffic_count=int(traffic),
+                version=version, seconds_since_deploy=None if deployed_at is None else int(end - deployed_at),
             )
         )  # fmt: skip
     return rows, incidents, start, start + ticks, total / ticks
@@ -147,7 +159,7 @@ def apply_detector(rows: list[HealthRow], cfg: DetectorConfig) -> list[HealthRow
     for srows in by.values():
         srows.sort(key=lambda r: r.window_end)
         lat = detect([r.avg_latency_ms for r in srows], cfg)
-        trf = detect([float(r.request_count) for r in srows], cfg)
+        trf = detect([float(r.traffic_count) for r in srows], cfg)
         for r, lp, tp in zip(srows, lat, trf, strict=True):
             if lp.warming_up or tp.warming_up:
                 out.append(dataclasses.replace(r, latency_status="WARMING_UP", traffic_status="WARMING_UP"))
@@ -157,7 +169,7 @@ def apply_detector(rows: list[HealthRow], cfg: DetectorConfig) -> list[HealthRow
             out.append(
                 dataclasses.replace(
                     r, latency_status=ls, traffic_status=ts, expected_latency_ms=lp.forecast,
-                    latency_upper_bound=lp.upper, expected_request_count=tp.forecast,
+                    latency_upper_bound=lp.upper, expected_traffic_count=tp.forecast,
                     traffic_lower_bound=tp.lower, traffic_upper_bound=tp.upper,
                 )
             )  # fmt: skip
@@ -167,6 +179,8 @@ def apply_detector(rows: list[HealthRow], cfg: DetectorConfig) -> list[HealthRow
 def run_one(args: tuple[DataConfig, DetectorConfig, int, float]) -> dict:
     data, cfg, seed, hours = args
     rows, incidents, start, end, rate = simulate(data, seed, hours)
+    rows = [r for r in rows if r.service_name in ARIMA_SERVICES]
+    incidents = [i for i in incidents if i.service_name in ARIMA_SERVICES]
     rep = score(apply_detector(rows, cfg), incidents, start, end - 100)
     out = {"rate": rate, "types": [], "drops": [], "fp": [], "hours": {}, "fresh": {}}
     for r in rep.incidents:
@@ -186,7 +200,7 @@ def evaluate_variant(data: DataConfig, cfg: DetectorConfig, seeds: int, hours: f
     res = Result(label)
     outs = list(pool.map(run_one, [(data, cfg, seed, hours) for seed in range(seeds)]))
     for o in outs:
-        res.msg_per_s += o["rate"] / len(outs)
+        res.traffic_per_s += o["rate"] / len(outs)
         for t, ok in o["types"]:
             res.by_type[t][1] += 1
             res.by_type[t][0] += int(ok)
@@ -212,35 +226,35 @@ def print_results(results: list[Result]) -> None:
         return f"{ok}/{n}" if n else "-"
 
     print(
-        f"{'variant':58} {'msg/s':>5} | {'BAD_DEPLOY':>10} {'SURGE':>7} {'DROP':>7} "
-        f"{'cart':>6} {'chkout':>6} {'paymt':>6} | {'FP/svc-h avg':>12} {'worst':>6} {'echo':>4} | "
+        f"{'variant':58} {'req/s':>5} | {'BAD_DEPLOY':>10} {'SURGE':>7} {'DROP':>7} "
+        f"{'chkout':>6} {'paymt':>6} | {'FP/svc-h avg':>12} {'worst':>6} {'echo':>4} | "
         f"fresh-start noise: worst"
     )
     for r in results:
         hours = sum(r.hours_by_service.values())
         worst = max((r.fp_by_service[s] / h for s, h in r.hours_by_service.items() if h), default=0.0)
         print(
-            f"{r.label[:58]:58} {r.msg_per_s:5.1f} | {frac(r.by_type['BAD_DEPLOY']):>10} "
+            f"{r.label[:58]:58} {r.traffic_per_s:5.1f} | {frac(r.by_type['BAD_DEPLOY']):>10} "
             f"{frac(r.by_type['TRAFFIC_SURGE']):>7} {frac(r.by_type['UPSTREAM_DROP']):>7} "
-            f"{frac(r.drops_by_service['cart']):>6} {frac(r.drops_by_service['checkout']):>6} "
+            f"{frac(r.drops_by_service['checkout']):>6} "
             f"{frac(r.drops_by_service['payments']):>6} | {r.fp / hours if hours else 0:12.2f} {worst:6.2f} "
             f"{r.fp_echo:4d} | {r.fresh_worst} (avg {r.fresh_total / max(1, r.fresh_starts):.2f}, "
             f">1: {r.fresh_over_one}/{r.fresh_starts})"
         )
 
 
-CURRENT = DetectorConfig(min_training=12, max_training=360, confidence=99.9, p=1, update_interval=1)
+CURRENT = DetectorConfig(min_training=12, max_training=360, confidence=99.95, p=1, update_interval=1)  # D-059
 
-_BRIEF = (("web-gateway", 25), ("auth", 15), ("catalog", 20), ("cart", 12), ("checkout", 8), ("payments", 6))
-_D030 = (("web-gateway", 8), ("auth", 5), ("catalog", 7), ("cart", 4), ("checkout", 3), ("payments", 2))
-_D5 = (("web-gateway", 9), ("catalog", 7), ("auth", 5), ("cart", 5), ("checkout", 5), ("payments", 5))
+# Earlier rate profiles, cut to the three services D-056 kept.
+_D031 = (("web-gateway", 10), ("checkout", 6), ("payments", 6))
+_D030 = (("web-gateway", 8), ("checkout", 3), ("payments", 2))
+_ROUGH = (("web-gateway", 25), ("checkout", 15), ("payments", 15))
 DATA_VARIANTS = {
-    "brief rates (~86), live-like start": DataConfig(rates=_BRIEF),
-    "D-030 rates (~29), live-like start": DataConfig(rates=_D030),
-    "D-030 rates (~29), aligned start": DataConfig(rates=_D030, aligned=True),
-    "drop services 5/s (~36), aligned start": DataConfig(rates=_D5, aligned=True),
-    "current generator (D-031, ~41), live-like start": DataConfig(),
-    "current generator (D-031, ~41), aligned start": DataConfig(aligned=True),
+    "D-030 rates (~13), aligned start": DataConfig(rates=_D030, aligned=True),
+    "D-031 rates (~22), aligned start": DataConfig(rates=_D031, aligned=True),
+    "half the D-059 rates (~55), aligned start": DataConfig(rates=_ROUGH, aligned=True),
+    "current generator (D-059, ~110), live-like start": DataConfig(),
+    "current generator (D-059, ~110), aligned start": DataConfig(aligned=True),
 }
 
 
@@ -259,6 +273,7 @@ def main(argv=None) -> None:
             for label, cfg in {
                 "current data, confidence 99": dataclasses.replace(CURRENT, confidence=99.0),
                 "current data, confidence 99.5": dataclasses.replace(CURRENT, confidence=99.5),
+                "current data, confidence 99.9 (D-029)": dataclasses.replace(CURRENT, confidence=99.9),
                 "current data, maxTraining 180": dataclasses.replace(CURRENT, max_training=180),
                 "current data, AR(2)": dataclasses.replace(CURRENT, p=2, update_interval=1),
             }.items():

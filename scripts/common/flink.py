@@ -1,32 +1,17 @@
-"""A thin Flink SQL statement API over the Confluent Cloud REST endpoint, plus the
-canonical lab-build list used by `reset --with-labs`.
+"""A thin Flink SQL statement API over the Confluent Cloud REST endpoint.
 
-Used to: check the model exists at deploy time (`SHOW MODELS`), rebuild the lab
-statements from `sql/`, and drop them in `reset`.
+Used to: check the tables and the model exist at deploy time (`SHOW TABLES`,
+`SHOW MODELS`), and stop statements and drop the agents in `reset` and `reset-health`.
 """
 
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import requests
 
 TERMINAL_PHASES = {"COMPLETED", "FAILED", "STOPPED"}
 RUNNING = "RUNNING"
-
-# The lab statements, in dependency order, each a file under sql/. These solution
-# files are authored in Phases 3-4; `reset --with-labs` submits whatever exists and
-# reports any that are missing. (service_health feeds the agents, which feed the
-# inserts into remediation_decisions.)
-LAB_SQL = (
-    ("2.4_service_health.sql", "service_health"),
-    ("4.2_release_agent.sql", "release_agent"),
-    ("4.2_capacity_agent.sql", "capacity_agent"),
-    ("4.3_remediation_decisions.sql", "remediation_decisions"),
-    ("4.3_insert_release_agent.sql", "insert release_agent"),
-    ("4.3_insert_capacity_agent.sql", "insert capacity_agent"),
-)
 
 
 class FlinkSession:
@@ -150,29 +135,24 @@ def list_tables(session: FlinkSession) -> set[str]:
     return tables
 
 
-def create_lab_objects(card: dict[str, str], root: Path) -> bool:
-    """Submit the canonical lab SQL from sql/, in order, waiting for each to come up.
+def still_running(session: FlinkSession, names: list[str]) -> list[str]:
+    """The statements in `names` that are still listed and not in a terminal phase.
 
-    Returns True on success. Missing solution files (not yet authored) are reported
-    and treated as a failure so the caller doesn't claim a half-built pipeline.
-    """
-    session = FlinkSession(card)
-    sql_dir = Path(root) / "sql"
-    missing = [fn for fn, _ in LAB_SQL if not (sql_dir / fn).is_file()]
-    if missing:
-        print(f"  Cannot rebuild labs: these solution files don't exist yet: {', '.join(missing)}")
-        return False
-    for filename, creates in LAB_SQL:
-        sql = (sql_dir / filename).read_text().strip().rstrip(";").strip()
-        try:
-            name = session.submit(sql, label="aiops-lab")
-        except RuntimeError as e:
-            print(f"  {creates}: submit failed — {e}")
-            return False
-        phase = session.wait(name, timeout=180).get("status", {}).get("phase")
-        if phase in (RUNNING, "COMPLETED"):
-            print(f"  {creates}: {phase}  ({filename})")
-            continue
-        print(f"  {creates}: {phase}  ({filename})")
-        return False
-    return True
+    A statement that is no longer listed (deleted) or has reached a terminal phase counts as gone."""
+    wanted = set(names)
+    running = []
+    for st in session.list_statements():
+        name = st.get("name", "")
+        if name in wanted and st.get("status", {}).get("phase", "") not in TERMINAL_PHASES:
+            running.append(name)
+    return running
+
+
+def wait_until_gone(session: FlinkSession, names: list[str], timeout: float = 60, interval: float = 2) -> list[str]:
+    """Poll until none of `names` is running any more; returns those still running at the timeout."""
+    deadline = time.time() + timeout
+    remaining = still_running(session, names)
+    while remaining and time.time() < deadline:
+        time.sleep(interval)
+        remaining = still_running(session, remaining)
+    return remaining

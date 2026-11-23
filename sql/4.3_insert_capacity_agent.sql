@@ -5,8 +5,9 @@
 --
 -- Suggested Replicas is computed here, in SQL, and handed to the agent: the arithmetic
 -- stays deterministic and the model only decides whether to use it. It keeps the load
--- per replica at roughly what it was before the surge, never adds less than one replica,
--- and never exceeds the autoscaling ceiling. COALESCE covers an expected count of zero.
+-- per replica at roughly what it was before the surge and never adds less than one
+-- replica. There is no autoscaling ceiling (D-043). COALESCE covers an expected count of
+-- zero.
 INSERT INTO `remediation_decisions`
 SELECT
   h.`window_end`,
@@ -16,7 +17,7 @@ SELECT
   CASE
     WHEN a.`agent_status` = 'SUCCESS'
       AND UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
-          IN ('SCALE_OUT', 'INVESTIGATE_UPSTREAM', 'ESCALATE', 'OBSERVE')
+          IN ('SCALE_OUT', 'INVESTIGATE_UPSTREAM', 'OBSERVE')
       THEN UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
     ELSE 'INVALID'
   END,
@@ -33,23 +34,18 @@ LATERAL TABLE(AI_RUN_AGENT(
   CONCAT(
     'SERVICE ', h.`service_name`, ' (', h.`tier`, ')\n',
     'Trigger: ', CASE WHEN h.`traffic_status` = 'HIGH' THEN 'TRAFFIC_HIGH' ELSE 'TRAFFIC_LOW' END, '\n',
-    'Requests This Window: ', CAST(h.`request_count` AS STRING),
-    '  Expected: ', CAST(ROUND(h.`expected_request_count`, 0) AS STRING),
+    'Traffic Count: ', CAST(h.`traffic_count` AS STRING),
+    '  Expected Traffic Count: ', CAST(ROUND(h.`expected_traffic_count`, 0) AS STRING),
     '  Expected Band: ', CAST(ROUND(h.`traffic_lower_bound`, 0) AS STRING),
     ' to ', CAST(ROUND(h.`traffic_upper_bound`, 0) AS STRING), '\n',
     'Ready Replicas: ', CAST(h.`ready_replicas` AS STRING),
-    '  Max Replicas: ', CAST(h.`max_replicas` AS STRING),
-    '  Suggested Replicas: ', CAST(LEAST(
-      h.`max_replicas`,
-      GREATEST(
-        h.`ready_replicas` + 1,
-        COALESCE(
-          CAST(CEIL(h.`ready_replicas` * CAST(h.`request_count` AS DOUBLE)
-                    / NULLIF(h.`expected_request_count`, 0)) AS INT),
-          h.`ready_replicas` + 1
-        )
+    '  Suggested Replicas: ', CAST(GREATEST(
+      h.`ready_replicas` + 1,
+      COALESCE(
+        CAST(CEIL(h.`ready_replicas` * CAST(h.`traffic_count` AS DOUBLE)
+                  / NULLIF(h.`expected_traffic_count`, 0)) AS INT),
+        h.`ready_replicas` + 1
       )
-    ) AS STRING), '\n',
-    'Error Rate Breach: ', CAST(h.`error_rate_breach` AS STRING), ' (true above 5 percent)'
+    ) AS STRING)
   )
 )) AS a(`agent_status`, `agent_response`);

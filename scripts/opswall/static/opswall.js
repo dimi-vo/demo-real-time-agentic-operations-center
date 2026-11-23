@@ -1,30 +1,37 @@
 "use strict";
 
-/*  Ops wall — variant-E render code, wired to the live /ws snapshot.
+/*  Ops wall — render code, driven by the live /ws snapshot (D-054).
  *
- *  Adapted from the mockup the user picked in .scratch/mockups/variant-e-ops-wall-dark.html:
- *  - the FAKE block is gone; every render is driven by a JSON snapshot from the server
- *  - rate / errorRate are formatted from the numeric fields the state produces
- *  - incident type labels match the simulator's enum (TRAFFIC_SURGE, UPSTREAM_DROP)
- *  - each service's warm-up band is computed from its WARMING_UP health rows, which the
- *    state now carries implicitly in the `warmup` tuple it emits (first / last axis-relative
- *    second a WARMING_UP row sat in); absent ⇒ no band
- *  - DOM is rebuilt on every snapshot (cheap; six rows), ResizeObserver still redraws charts
+ *  The wall's state does all the counting; this page only draws what the snapshot says.
+ *  One card per service; in it, one chart per metric (Latency, Traffic), and one time axis.
+ *  A chart, back to front (D-066):
+ *  - a translucent purple box per injected incident on that metric, the full plot height,
+ *    from its start to its end (to the right edge while open); a missed one is dashed
+ *  - the raw service_metrics line (D-061): one point per second on a log y scale fitted to
+ *    what's visible
+ *  - under the plot, a marker strip with one set of marks per detection block: a cyan dot
+ *    where the detector flagged it (hollow when no incident owns it: a false alarm), a cyan
+ *    line from it to the agent's first decision (to "now" while it waits), and an amber
+ *    diamond at that decision, one row below the dot so the two never cover each other
+ *  The summary table and the cards' status come ready-made as well.
+ *  All positions are axis-relative seconds (0 = left edge, axisSeconds = now). The DOM is
+ *  made once and updated in place by every snapshot (D-062): a card per service, a box per
+ *  incident and a mark group per block, kept by key; a ResizeObserver redraws a chart whose
+ *  width changes.
  */
 
 // ---------- WebSocket ----------
-let latest = null;
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
-  const conn = document.getElementById("conn");
-  ws.onopen = () => { conn.textContent = "● LIVE"; conn.className = "conn"; };
+  const conn = document.getElementById("conn"), label = conn.querySelector(".conn-label");
+  ws.onopen = () => { label.textContent = "LIVE"; conn.className = "conn live"; };
   ws.onclose = () => {
-    conn.textContent = "● reconnecting…"; conn.className = "conn offline";
+    label.textContent = "reconnecting…"; conn.className = "conn offline";
     setTimeout(connect, 1500);
   };
   ws.onmessage = (e) => {
-    try { latest = JSON.parse(e.data); render(latest); }
+    try { render(JSON.parse(e.data)); }
     catch (err) { console.error("bad snapshot", err); }
   };
 }
@@ -32,11 +39,39 @@ connect();
 
 // ---------- Helpers ----------
 const NS = "http://www.w3.org/2000/svg";
-function s(tag, attrs = {}, parent) {
-  const n = document.createElementNS(NS, tag);
-  for (const k in attrs) n.setAttribute(k, attrs[k]);
+function attrs(n, a) {
+  for (const k in a) n.setAttribute(k, a[k]);
+  return n;
+}
+function s(tag, a = {}, parent) {
+  const n = attrs(document.createElementNS(NS, tag), a);
   if (parent) parent.appendChild(n);
   return n;
+}
+// Writes that skip an unchanged value, so a still part of the page stays untouched (a text
+// selection in it survives, nothing is laid out again).
+const setText = (el, text) => { if (el.textContent !== text) el.textContent = text; };
+const setClass = (el, cls) => { if (el.getAttribute("class") !== cls) el.setAttribute("class", cls); };
+const setHTML = (el, html) => { if (el._html !== html) { el._html = html; el.innerHTML = html; } };
+
+// The page is updated in place, never rebuilt (D-062): the node under the pointer or holding
+// the focus stays the same node from one snapshot to the next. sync() makes parent's children
+// one node per item, in the items' order: reused by key, created for a new key, removed with
+// its key. Keys must be unique among the items; parent holds nothing else.
+function sync(parent, items, keyOf, create, update) {
+  const prev = parent._keyed || new Map(), next = new Map();
+  for (const item of items) {
+    const k = keyOf(item);
+    next.set(k, prev.get(k) || create(item));
+  }
+  for (const [k, n] of prev) if (!next.has(k)) n.remove();
+  let at = parent.firstChild;
+  for (const item of items) {
+    const n = next.get(keyOf(item));
+    if (n === at) at = at.nextSibling; else parent.insertBefore(n, at);
+    update(n, item);
+  }
+  parent._keyed = next;
 }
 const dur = sec => {
   sec = Math.max(0, Math.round(sec));
@@ -51,262 +86,292 @@ const human = t => ({
   TRAFFIC_SURGE: "Traffic surge",
   UPSTREAM_DROP: "Upstream drop",
 }[t] || t.toLowerCase().replace(/_/g, " ").replace(/^./, c => c.toUpperCase()));
-const median = xs => {
-  if (!xs.length) return null;
-  const a = [...xs].sort((x, y) => x - y), m = a.length >> 1;
-  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// Agent output (target, reason) ends up in a tooltip's innerHTML.
+const esc = v => String(v).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const clip = (text, n) => text.length > n ? `${text.slice(0, n - 1).trimEnd()}…` : text;
+
+const ACTION = {
+  ROLLBACK: "Rollback",
+  SCALE_OUT: "Scale out",
+  INVESTIGATE_UPSTREAM: "Investigate upstream",
+  OBSERVE: "Observe",
+  INVALID: "Invalid decision",
 };
-
-function formatRate(rps) {
-  if (rps == null) return "—";
-  return rps >= 1000 ? `${(rps / 1000).toFixed(1)}k rps` : `${Math.round(rps)} rps`;
-}
-function formatPct(pct) {
-  if (pct == null) return "—";
-  return `${pct.toFixed(1)}%`;
-}
-
-const CLOSERS = new Set(["ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM", "ESCALATE"]);
-const PIN = {
-  ROLLBACK:  { label: "Rollback", d: "M -6 -6 L -6 6 M -6 -6 L 6 -6 L 2.5 -2.5 L 6 1 L -6 1 Z", fill: "var(--crit)" },
-  SCALE_OUT: { label: "Scale out", d: "M 0 -7 L 7 5 L -7 5 Z", fill: "var(--warn)" },
-  INVESTIGATE_UPSTREAM: { label: "Investigate upstream", d: "M 2 -6 L -6 0 L 2 6 L 2 3 L 7 3 L 7 -3 L 2 -3 Z", fill: "var(--serious)" },
-  ESCALATE:  { label: "Escalate", d: "M 0 -7.5 L 7.5 5.5 L -7.5 5.5 Z M -1 -2.5 L 1 -2.5 L 1 1.5 L -1 1.5 Z M -1 2.5 L 1 2.5 L 1 4 L -1 4 Z", fill: "var(--crit)", evenodd: true },
-  OBSERVE:   { label: "Observe", note: "Keeps watching. Doesn't close the detection." },
-  INVALID:   { label: "Invalid decision", note: "The agent's answer was rejected." },
-};
-function pinShape(action, parent) {
-  const p = PIN[action] || PIN.OBSERVE;
-  if (action === "OBSERVE" || !PIN[action]) {
-    return s("circle", { r: 4.5, fill: "var(--ink-0)", stroke: "var(--observe)", "stroke-width": 1.75 }, parent);
-  }
-  if (action === "INVALID") {
-    const g = s("g", {}, parent);
-    s("circle", { r: 6, fill: "var(--ink-0)" }, g);
-    s("path", { d: "M -3.5 -3.5 L 3.5 3.5 M -3.5 3.5 L 3.5 -3.5", stroke: "var(--text-3)", "stroke-width": 2, "stroke-linecap": "round" }, g);
-    return g;
-  }
-  if (action === "ROLLBACK") {
-    const g = s("g", {}, parent);
-    s("path", { d: "M -5 -7 L 6 -7 L 2.5 -3.5 L 6 0 L -5 0 Z", fill: p.fill, stroke: "var(--ink-0)", "stroke-width": 1.25, "stroke-linejoin": "round" }, g);
-    s("line", { x1: -5, y1: -7, x2: -5, y2: 7, stroke: p.fill, "stroke-width": 2, "stroke-linecap": "round" }, g);
-    return g;
-  }
-  return s("path", {
-    d: p.d, fill: p.fill, stroke: "var(--ink-0)", "stroke-width": 1.25, "stroke-linejoin": "round",
-    ...(p.evenodd ? { "fill-rule": "evenodd" } : {}),
-  }, parent);
-}
-
-function bar(x, y, w, h, r, openRight) {
-  w = Math.max(w, 2); r = Math.min(r, w / 2, h / 2);
-  const rr = openRight ? 0 : r;
-  return `M ${x + r} ${y} H ${x + w - rr} ${rr ? `A ${rr} ${rr} 0 0 1 ${x + w} ${y + rr}` : ""} V ${y + h - rr} ${rr ? `A ${rr} ${rr} 0 0 1 ${x + w - rr} ${y + h}` : ""} H ${x + r} A ${r} ${r} 0 0 1 ${x} ${y + h - r} V ${y + r} A ${r} ${r} 0 0 1 ${x + r} ${y} Z`;
-}
 
 // ---------- Model ----------
-function analyse(truth, detect, decisions) {
-  const used = new Set(), pairs = [];
-  for (const t of truth) {
-    const d = detect.find(d => !used.has(d) && d.start < t.end && d.end > t.start);
-    if (d) { used.add(d); pairs.push({ t, d, lag: d.start - t.start }); }
-  }
-  for (const p of pairs) {
-    const c = decisions.find(x => CLOSERS.has(x.action) && x.at >= p.d.start && x.at <= p.d.end + 1);
-    if (c) { p.closer = c; p.act = c.at - p.d.start; }
-  }
+// A chart's model is a filter of the snapshot: one service's incidents and blocks for one
+// metric ("latency" or "traffic"). Nothing is matched or counted here; the state did that.
+function metricModel(svc, kind) {
+  const byId = new Map((svc.groundTruth || []).map(g => [g.incidentId, g]));
   return {
-    pairs,
-    missed: truth.filter(t => !pairs.some(p => p.t === t)),
-    falseAlarms: detect.filter(d => !used.has(d)),
+    kind,
+    truth: (svc.groundTruth || []).filter(g => g.metric === kind),
+    blocks: (svc.blocks || []).filter(b => b.metric === kind).sort((a, b) => a.start - b.start),
+    incidentOf: b => (b.incidentId == null ? null : byId.get(b.incidentId) || null),
+    key: `${svc.name}/${kind}`,
+    records: svc.metrics || [],  // service_metrics samples on the axis, oldest first
   };
 }
 
-function metricModel(svc, kind, defaultWarmup) {
-  const lat = kind === "latency";
-  const truth = (svc.groundTruth || []).filter(g => (g.type === "BAD_DEPLOY") === lat);
-  const detect = (lat ? svc.detectedLatency : svc.detectedTraffic) || [];
-  const decisions = (svc.decisions || []).filter(d => (d.trigger === "LATENCY_HIGH") === lat);
-  const warmup = svc.warmup || defaultWarmup;
-  return { kind, truth, detect, decisions, warmup, ...analyse(truth, detect, decisions) };
+// ---------- Words ----------
+const METRIC = { latency: "Latency", traffic: "Traffic" };
+const TRIGGER = { LATENCY_HIGH: "Latency high", TRAFFIC_HIGH: "Traffic high", TRAFFIC_LOW: "Traffic low" };
+const triggerLabel = b => TRIGGER[b.trigger]
+  || (b.metric === "latency" ? "Latency high" : b.direction === "down" ? "Traffic low" : "Traffic high");
+const actionLabel = a => ACTION[a] || esc(human(a || "unknown"));
+const actionWord = a => (a === "INVALID" ? "invalid" : actionLabel(a).toLowerCase());
+
+function targetText(action, target) {
+  if (target == null || target === "") return "";
+  if (action === "ROLLBACK") return `to v${esc(String(target).replace(/^v/i, ""))}`;
+  if (action === "SCALE_OUT") return `to ${esc(target)} replicas`;
+  return `target ${esc(target)}`;
 }
 
-function detectLabel(m, d) {
-  if (m.kind === "latency") return "Latency high";
-  return d.direction === "up" ? "Traffic high" : "Traffic low";
+// "5 decisions: 5 rollback" / "3 decisions: 2 rollback, 1 observe". A lone decision is the
+// answer, already named above it.
+function countsText(b) {
+  const n = b.decisionCount || 0;
+  if (!n) return "";
+  if (n === 1) return "1 decision.";
+  const parts = Object.entries(b.decisions || {})
+    .sort((x, y) => y[1] - x[1])
+    .map(([a, k]) => `${k} ${actionWord(a)}`);
+  return `${plural(n, "decision", "decisions")}${parts.length ? `: ${parts.join(", ")}` : ""}.`;
+}
+
+// An incident's story from its first block: "Detected 16s after onset. Answered 8s later."
+function storyOf(t) {
+  const detected = t.timeToDetect > 0 ? `Detected ${dur(t.timeToDetect)} after onset.` : "Detected at onset.";
+  if (t.timeToAnswer != null) return `${detected} Answered ${dur(t.timeToAnswer)} later.`;
+  if (t.verdict === "answered") return `${detected} Answered.`;
+  if (t.verdict === "missed") return `${detected} Nobody answered.`;
+  return `${detected} Waiting for the agent.`;
+}
+
+function incidentTip(t) {
+  const head = `<strong>Injected: ${human(t.type)}</strong>${range(t.start, t.end)}`;
+  if (t.detectedAt != null) return `${head}<em>${storyOf(t)}</em>`;
+  return `${head}<em>${t.verdict === "missed" ? "Nobody answered." : "Not detected yet."}</em>`;
+}
+
+function blockTip(m, b) {
+  const t = m.incidentOf(b);
+  let lag = "";
+  if (b.incidentId == null) lag = "No injected incident at this time.";
+  else if (t) {
+    const what = human(t.type).toLowerCase();
+    lag = b.timeToDetect > 0 ? `${dur(b.timeToDetect)} after the ${what} started.` : `At the start of the ${what}.`;
+  }
+  const target = targetText(b.action, b.target);
+  const answer = b.open ? "Waiting for the agent."
+    : `Answered ${dur(b.timeToAnswer)} after detection: ${actionWord(b.action)}${target ? ` ${target}` : ""}.`;
+  const counts = b.decisionCount > 1 ? countsText(b) : "";
+  return `<strong>Detected: ${triggerLabel(b)}</strong>${range(b.start, b.end)}` +
+    `<em>${[lag, answer].filter(Boolean).join(" ")}</em>` +
+    (counts ? `<em>${counts}</em>` : "") +
+    (b.reason && !b.open ? `<span class="reason">${esc(clip(String(b.reason), 180))}</span>` : "");
+}
+
+// ---------- Scale ----------
+// The y scale is logarithmic: the incidents are ratios (x5, x0.1, x4), and on a log scale a
+// ratio has the same height wherever the service's normal level sits. It runs from a round
+// number just below the smallest visible value above 0 to one just above the largest, at
+// least x10 apart so a quiet chart doesn't blow plain noise up. A second with 0 requests
+// sits on the bottom edge (D-061).
+const UNIT = { latency: "ms", traffic: "rps" };
+const num = v => `${+v.toPrecision(3)}`;
+const valueText = (kind, v) => kind === "latency" ? `${v >= 100 ? Math.round(v) : v.toFixed(1)} ms` : `${v} rps`;
+
+// The nearest multiple of a fifth of the value's power of ten at or above / at or below it:
+// 152 → 160, 37 → 38, 248 → 260; 33 → 32, 170 → 160.
+function ceilNice(v) {
+  if (!(v > 0)) return 1;
+  const step = Math.pow(10, Math.floor(Math.log10(v))) / 5;
+  return Math.ceil(v / step - 1e-9) * step;
+}
+function floorNice(v) {
+  const step = Math.pow(10, Math.floor(Math.log10(v))) / 5;
+  return Math.floor(v / step + 1e-9) * step;
+}
+
+// y as a fraction of the plot height (0 = bottom, 1 = top), and the range's label.
+function logScale(kind, values) {
+  const positive = values.filter(v => v > 0);
+  const hi = ceilNice(positive.length ? Math.max(...positive) : 1);
+  let lo = floorNice(positive.length ? Math.min(...positive) : hi / 10);
+  if (hi / lo < 10) lo = floorNice(hi / 10);
+  const span = Math.log(hi / lo);
+  return {
+    frac: v => Math.max(0, Math.log(Math.max(v, lo) / lo) / span),
+    label: `${num(lo)}–${num(hi)} ${UNIT[kind]} · log`,
+  };
 }
 
 // ---------- Chart ----------
-function drawChart(host, m) {
-  const w = Math.max(160, Math.floor(host.clientWidth));
-  const quiet = !m.truth.length && !m.detect.length && !m.decisions.length;
-  const H = quiet ? 34 : 78, zero = H / 2, lane = quiet ? H / 2 : 32;
+// A label band, the plot, then the marker strip: detection dots on one row, answer diamonds
+// on the next (an answer lands about a second after its detection, two pixels apart).
+const PLOT_TOP = 18, PLOT_BOTTOM = 68;
+const DET_Y = PLOT_BOTTOM + 9, ANS_Y = PLOT_BOTTOM + 20, CHART_H = PLOT_BOTTOM + 26;
+const DOT_R = 3.5, DIAMOND_R = 4.5;
+const diamond = (x, y, r) => `M ${x} ${y - r} L ${x + r} ${y} L ${x} ${y + r} L ${x - r} ${y} Z`;
+
+// The pointer over a plot. The data moves under a still pointer every second, so each
+// redraw puts the crosshair and the tooltip on the second now under it.
+let lineHover = null;  // { key, x, y }
+function hideLineTip() {
+  if (tip.dataset.owner === "line") tip.classList.remove("on");
+  document.querySelectorAll(".chart .crosshair").forEach(g => g.setAttribute("visibility", "hidden"));
+}
+document.addEventListener("pointermove", e => {
+  const hit = e.target.closest?.(".chart .hit");
+  if (hit && hit._show) { lineHover = { key: hit._key, x: e.clientX, y: e.clientY }; hit._show(e.clientX, e.clientY); }
+  else if (lineHover) { lineHover = null; hideLineTip(); }
+});
+document.documentElement.addEventListener("pointerleave", () => { lineHover = null; hideLineTip(); });
+
+// Measured on the first draw, then kept current by the ResizeObserver.
+function hostWidth(host) {
+  if (host._w == null) host._w = Math.floor(host.clientWidth);
+  return Math.max(160, host._w);
+}
+
+// A chart's <svg> and its layers (<g>s) are made on its first draw and kept. A redraw empties
+// the layer that only shows things and updates in place the nodes the pointer or the focus
+// can be on: the hit area, the boxes, the mark groups.
+function chartLayers(host) {
+  if (!host._svg) {
+    host._svg = s("svg", { class: "chart" }, host);
+    host._layers = Object.fromEntries(["boxes", "plot", "hover", "marks"].map(n => [n, s("g", {}, host._svg)]));
+  }
+  return host._layers;
+}
+
+function drawChart(host) {
+  const m = host._m;
+  if (!m) return;
+  const w = hostWidth(host);
   const X = t => (Math.max(0, Math.min(t, AXIS)) / AXIS) * w;
+  const recs = m.records.filter(r => r.t >= 0 && r.t <= AXIS);
+  const scale = logScale(m.kind, recs.map(r => r[m.kind]));
+  const plotH = PLOT_BOTTOM - PLOT_TOP;
+  const Y = v => PLOT_TOP + plotH * (1 - scale.frac(v));
 
-  host.innerHTML = "";
-  const svg = s("svg", { class: "chart", width: w, height: H, viewBox: `0 0 ${w} ${H}` }, host);
+  const { boxes, plot, hover, marks } = chartLayers(host);
+  attrs(host._svg, { width: w, height: CHART_H, viewBox: `0 0 ${w} ${CHART_H}` });
 
-  for (let i = 1; i < 10; i++) {
-    const x = Math.round(X(i * AXIS / 10)) + 0.5;
-    s("line", { class: "grid", x1: x, x2: x, y1: 0, y2: H }, svg);
-  }
-
-  const [ws, we] = m.warmup;
-  if (we > ws) {
-    const r = s("rect", { class: "warmup", x: X(ws), y: zero, width: X(we) - X(ws), height: lane }, svg);
-    r.setAttribute("data-tip", `<strong>Detector warming up</strong>${range(ws, we)}. Nothing can be flagged here.`);
-    if (X(we) - X(ws) > 84) {
-      const t = s("text", { class: "warm-label", x: X(ws) + 6, y: zero + lane - 5 }, svg);
-      t.textContent = "Warming up";
-    }
-  }
-
-  s("line", { class: "zero", x1: 0, x2: w, y1: zero + 0.5, y2: zero + 0.5 }, svg);
-  s("line", { class: "now", x1: w - 0.5, x2: w - 0.5, y1: 0, y2: H }, svg);
-
-  if (quiet) {
-    const t = s("text", { class: "quiet-label", x: 8, y: zero - 6 }, svg);
-    t.textContent = "No incidents or detections";
-    return;
-  }
-
-  for (const t of m.truth) {
-    const missed = m.missed.includes(t);
+  // The injected incidents on this metric (INCIDENT_METRIC in the state), by incident id.
+  sync(boxes, m.truth, t => t.incidentId, () => s("rect", { tabindex: 0, rx: 2 }), (node, t) => {
     const x0 = X(t.start), x1 = X(t.end);
-    const p = s("path", {
-      class: missed ? "missed" : "truth",
-      d: bar(x0, zero - lane, x1 - x0, lane - 1, 3, t.end >= AXIS || t.open),
-    }, svg);
-    p.setAttribute("tabindex", "0");
-    p.setAttribute("data-tip", `<strong>Injected: ${human(t.type)}</strong>${range(t.start, t.end)}` +
-      (missed ? `<em>Not detected${t.start < we && t.start >= ws ? ". It started during warm-up." : "."}</em>` : ""));
-    if (missed && x1 - x0 > 52) {
-      const l = s("text", { class: "bar-label t", x: x0 + 7, y: zero - lane / 2 + 4 }, svg);
-      l.textContent = "Missed";
+    attrs(node, {
+      class: t.verdict === "missed" ? "box missed" : "box",
+      x: x0, y: PLOT_TOP, width: Math.max(2, x1 - x0), height: plotH,
+      "data-tip": incidentTip(t),
+    });
+  });
+
+  // The label band, the baseline and the line. A missing second (the simulator stopped)
+  // breaks the line instead of bridging it.
+  plot.replaceChildren();
+  const label = s("text", { class: "scale", x: 0, y: PLOT_TOP - 6 }, plot);
+  s("tspan", { class: "metric-name" }, label).textContent = METRIC[m.kind];
+  s("tspan", {}, label).textContent = ` · ${recs.length ? scale.label : "No records yet"}`;
+  s("line", { class: "baseline", x1: 0, x2: w, y1: PLOT_BOTTOM + 0.5, y2: PLOT_BOTTOM + 0.5 }, plot);
+  let d = "", prev = null;
+  for (const r of recs) {
+    d += `${prev == null || r.t - prev > 1.5 ? "M" : "L"} ${X(r.t).toFixed(1)} ${Y(r[m.kind]).toFixed(1)} `;
+    prev = r.t;
+  }
+  if (d) s("path", { class: "series", d }, plot);
+
+  // Hover: a hit area over the label band and the plot; the crosshair snaps to the nearest
+  // second, and inside an incident's box the tooltip tells that incident as well.
+  if (!hover.firstChild) {
+    const cross = s("g", { class: "crosshair", visibility: "hidden" }, hover);
+    s("line", { class: "cross", y1: PLOT_TOP, y2: PLOT_BOTTOM }, cross);
+    s("circle", { class: "cross-dot", r: 3.5 }, cross);
+    s("rect", { class: "hit", x: 0, y: 0, height: PLOT_BOTTOM }, hover);
+  }
+  const [cross, hit] = hover.children, [cl, cd] = cross.children;
+  hit.setAttribute("width", w);
+  hit._key = m.key;
+  hit._show = (clientX, clientY) => {
+    if (!recs.length) return;
+    const t = ((clientX - host._svg.getBoundingClientRect().left) / w) * AXIS;
+    let i = 0, j = recs.length - 1;
+    while (i < j) { const mid = (i + j) >> 1; if (recs[mid].t < t) i = mid + 1; else j = mid; }
+    const r = i > 0 && t - recs[i - 1].t < recs[i].t - t ? recs[i - 1] : recs[i];
+    const x = X(r.t);
+    attrs(cl, { x1: x, x2: x });
+    attrs(cd, { cx: x, cy: Y(r[m.kind]) });
+    cross.setAttribute("visibility", "visible");
+    const during = m.truth.find(g => r.t >= g.start && r.t <= g.end);
+    tipNode = null;
+    setHTML(tip, `<strong>${valueText(m.kind, r[m.kind])}</strong>${ago(r.t)}` +
+      (during ? `<span class="rule"></span>${incidentTip(during)}` : ""));
+    tip.dataset.owner = "line";
+    tip.classList.add("on");
+    placeTip(clientX, clientY);
+  };
+  if (lineHover && lineHover.key === m.key) hit._show(lineHover.x, lineHover.y);
+
+  // The marker strip: one group per block (by its key), from detection to the agent's answer.
+  sync(marks, m.blocks, b => b.key, () => {
+    const g = s("g", { tabindex: 0 });
+    s("rect", { class: "mark-hit" }, g);
+    s("path", { class: "link" }, g);
+    s("circle", { class: "det", r: DOT_R }, g);
+    s("path", { class: "ans" }, g);
+    return g;
+  }, (g, b) => {
+    const [hitArea, link, det, ans] = g.children;
+    const x0 = X(b.start), x1 = b.open ? w : Math.max(x0, X(b.end));
+    setClass(g, b.incidentId == null ? "mark false-alarm" : "mark");
+    g.setAttribute("data-tip", blockTip(m, b));
+    attrs(hitArea, { x: x0 - 7, y: PLOT_BOTTOM + 1, width: x1 - x0 + 14, height: CHART_H - PLOT_BOTTOM - 1 });
+    attrs(det, { cx: x0, cy: DET_Y });
+    if (b.open) {
+      attrs(link, { d: `M ${x0} ${DET_Y} H ${x1}` });
+      ans.setAttribute("visibility", "hidden");
+    } else {
+      attrs(link, { d: `M ${x0} ${DET_Y} H ${x1} V ${ANS_Y}` });
+      attrs(ans, { d: diamond(x1, ANS_Y, DIAMOND_R), visibility: "visible" });
     }
-  }
-
-  for (const d of m.detect) {
-    const fa = m.falseAlarms.includes(d);
-    const pair = m.pairs.find(p => p.d === d);
-    const x0 = X(d.start), x1 = X(d.end);
-    const p = s("path", {
-      class: fa ? "false-alarm" : "detect",
-      d: bar(x0, zero + 1, x1 - x0, lane - 1, 3, d.end >= AXIS || d.open),
-    }, svg);
-    p.setAttribute("tabindex", "0");
-    p.setAttribute("data-tip", `<strong>Detected: ${detectLabel(m, d)}</strong>${range(d.start, d.end)}` +
-      (fa ? "<em>No injected incident at this time.</em>"
-          : `<em>${pair.lag > 0 ? `${dur(pair.lag)} after the incident started` : "At incident start"}${pair.closer ? `. Closed by ${PIN[pair.closer.action].label.toLowerCase()} ${dur(pair.act)} later.` : ". Still open."}</em>`));
-    if (!fa) {
-      for (let t = d.start + 10; t < Math.min(d.end, AXIS); t += 10) {
-        const x = Math.round(X(t)) + 0.5;
-        s("line", { class: "notch", x1: x, x2: x, y1: zero + lane - 7, y2: zero + lane - 2 }, svg);
-      }
-    } else if (x1 - x0 > 76) {
-      const l = s("text", { class: "bar-label d", x: x0 + 7, y: zero + lane / 2 + 5 }, svg);
-      l.textContent = "No incident";
-    }
-  }
-
-  for (const p of m.pairs) {
-    if (p.lag <= 0) continue;
-    const x0 = X(p.t.start), x1 = X(p.d.start), y = zero + 10;
-    s("path", { class: "lag", d: `M ${x0} ${y - 4} V ${y + 4} M ${x0} ${y} H ${x1 - 3} M ${x1 - 3} ${y - 4} V ${y + 4}` }, svg);
-    const label = s("text", { class: "lag-label", y: y + 15 }, svg);
-    label.textContent = `+${dur(p.lag)}`;
-    if (x1 - x0 >= 40) { label.setAttribute("x", (x0 + x1) / 2); label.setAttribute("text-anchor", "middle"); }
-    else { label.setAttribute("x", x0 - 5); label.setAttribute("text-anchor", "end"); }
-  }
-
-  for (const dec of m.decisions) {
-    const g = s("g", { transform: `translate(${X(dec.at)} ${zero})`, tabindex: 0 }, svg);
-    pinShape(dec.action, g);
-    const pair = m.pairs.find(p => p.closer === dec);
-    const info = PIN[dec.action] || PIN.OBSERVE;
-    g.setAttribute("data-tip", `<strong>${info.label}</strong>At ${ago(dec.at)}` +
-      (pair ? `, ${dur(pair.act)} after detection` : "") + "." +
-      (info.note ? `<em>${info.note}</em>` : ""));
-  }
+  });
 }
 
-// ---------- Rows ----------
-function railNote(svc, models) {
-  const pairs = models.flatMap(m => m.pairs).sort((a, b) => a.t.start - b.t.start);
-  const missed = models.flatMap(m => m.missed.map(t => ({ t, m })));
-  const fas = models.flatMap(m => m.falseAlarms);
-  const parts = [];
-  if (pairs.length) {
-    const p = pairs[0];
-    parts.push(`Detected ${dur(p.lag)} after onset.` + (p.closer ? ` Acted ${dur(p.act)} later.` : " No action yet."));
+// ---------- Cards ----------
+// A service's card: made once, then updated by every snapshot. Each chart host gets its
+// height before anything in the card is drawn or measured: a host at 0 px would shrink the
+// page for one layout, and the browser would clamp the scroll position to that.
+function createCard() {
+  const card = document.createElement("article");
+  card.innerHTML = `
+    <header class="card-head">
+      <div class="who">
+        <h2></h2>
+        <span class="status"><span class="dot"></span><span class="status-text"></span></span>
+      </div>
+    </header>
+    <div class="charts"></div>
+    <div class="axis" aria-hidden="true"></div>`;
+  const status = card.querySelector(".status");
+  card._ui = {
+    name: card.querySelector("h2"), status, statusText: status.lastElementChild,
+    charts: [],
+  };
+  const charts = card.querySelector(".charts");
+  for (const kind of ["latency", "traffic"]) {
+    const host = document.createElement("div");
+    host.className = "chart-host";
+    host.style.height = `${CHART_H}px`;
+    host._draw = () => drawChart(host);
+    ro.observe(host);
+    charts.appendChild(host);
+    card._ui.charts.push({ kind, host });
   }
-  for (const { t, m } of missed) {
-    const inWarm = t.start >= m.warmup[0] && t.start < m.warmup[1];
-    parts.push(`${human(t.type)} at ${ago(t.start)} went undetected${inWarm ? " during warm-up" : ""}.`);
-  }
-  if (fas.length) parts.push(`${fas.length} detection${fas.length > 1 ? "s" : ""} with no matching incident.`);
-  return parts.join(" ");
-}
-
-function serviceRow(svc, defaultWarmup, hosts) {
-  const models = [metricModel(svc, "latency", defaultWarmup), metricModel(svc, "traffic", defaultWarmup)];
-  const row = document.createElement("article");
-  row.className = `row ${svc.status || "healthy"}`;
-  const rateStr = formatRate(svc.rateRps);
-  const errStr = formatPct(svc.errorRatePct);
-  const errHot = svc.errorRatePct != null && svc.errorRatePct >= 1 ? "hot" : "";
-  const note = railNote(svc, models);
-  row.innerHTML = `
-    <div class="rail">
-      <div class="name-line"><h2>${svc.name}</h2><span class="tier">${svc.tier || ""}</span></div>
-      <div class="status ${svc.status || "healthy"}"><span class="dot"></span>${svc.statusText || ""}</div>
-      ${note ? `<p class="note">${note}</p>` : ""}
-      <dl class="stats">
-        <div><dt>Version</dt><dd>v${svc.version || "—"}</dd></div>
-        <div><dt>Replicas</dt><dd>${svc.replicas != null ? svc.replicas + (svc.maxReplicas ? "/" + svc.maxReplicas : "") : "—"}</dd></div>
-        <div><dt>Rate</dt><dd>${rateStr}</dd></div>
-        <div><dt>Errors</dt><dd class="${errHot}">${errStr}</dd></div>
-      </dl>
-    </div>
-    <div class="metrics"></div>`;
-  const metrics = row.querySelector(".metrics");
-  for (const m of models) {
-    const quiet = !m.truth.length && !m.detect.length && !m.decisions.length;
-    const wrap = document.createElement("div");
-    wrap.className = "metric" + (quiet ? " quiet" : "");
-    wrap.innerHTML = `<div class="m-label">${m.kind === "latency" ? "Latency" : "Traffic"}</div><div class="chart-host"></div>`;
-    const host = wrap.querySelector(".chart-host");
-    host._model = m;
-    hosts.push(host);
-    metrics.appendChild(wrap);
-  }
-  return row;
-}
-
-// ---------- Summary / axis / legend ----------
-function renderSummary(allModels) {
-  const pairs = allModels.flatMap(m => m.pairs);
-  const injected = allModels.reduce((n, m) => n + m.truth.length, 0);
-  const missed = allModels.reduce((n, m) => n + m.missed.length, 0);
-  const fas = allModels.reduce((n, m) => n + m.falseAlarms.length, 0);
-  const lag = median(pairs.map(p => Math.max(0, p.lag)));
-  const act = median(pairs.filter(p => p.closer).map(p => p.act));
-  const plural = (n, a, b) => `${n} ${n === 1 ? a : b}`;
-  let html = `<b>${plural(injected, "incident", "incidents")}</b> injected. `;
-  html += `<b>${pairs.length}</b> detected`;
-  if (lag != null) html += `, a median of <b>${dur(lag)}</b> after they started`;
-  html += ". ";
-  if (act != null) html += `The agent acted a median of <b>${dur(act)}</b> after detection. `;
-  const tail = [];
-  if (missed) tail.push(`<b class="miss">${missed}</b> missed`);
-  if (fas) tail.push(`<b>${plural(fas, "false alarm", "false alarms")}</b>`);
-  if (tail.length) html += tail.join(" and ") + ".";
-  document.getElementById("summary").innerHTML = html;
-}
-
-function renderAxis() {
-  const axis = document.getElementById("axis");
-  if (axis.dataset.rendered === "1") return;
+  const axis = card.querySelector(".axis");
   for (let i = 0; i <= 5; i++) {
     const sec = i * AXIS / 5;
     const span = document.createElement("span");
@@ -314,33 +379,36 @@ function renderAxis() {
     span.textContent = i === 5 ? "now" : `−${Math.round((AXIS - sec) / 60)}m`;
     axis.appendChild(span);
   }
-  axis.dataset.rendered = "1";
+  return card;
 }
 
-function renderLegend() {
-  const lg = document.getElementById("legend");
-  if (lg.dataset.rendered === "1") return;
-  const swatch = (style) => `<svg width="18" height="10"><rect width="18" height="10" rx="2" style="${style}"/></svg>`;
-  lg.innerHTML = `
-    <span class="item">${swatch("fill:var(--truth)")}Injected (up)</span>
-    <span class="item">${swatch("fill:var(--detect)")}Detected (down)</span>
-    <span class="item">${swatch("fill:url(#hatch);stroke:var(--line)")}Detector warm-up</span>
-    <span class="item"><svg width="22" height="12"><path d="M 1 2 V 10 M 1 6 H 21 M 21 2 V 10" stroke="var(--text)" stroke-width="1.25" fill="none"/></svg>Time to detect</span>
-    <span class="sep"></span>`;
-  for (const a of ["OBSERVE", "ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM", "ESCALATE", "INVALID"]) {
-    const item = document.createElement("span");
-    item.className = "item";
-    const svg = s("svg", { width: 16, height: 16, viewBox: "-8 -8 16 16" });
-    pinShape(a, svg);
-    item.appendChild(svg);
-    item.append(PIN[a].label);
-    lg.appendChild(item);
+function updateCard(card, svc) {
+  const ui = card._ui, status = svc.status || "healthy";
+  setClass(card, `card ${status}`);
+  setText(ui.name, svc.name);
+  setClass(ui.status, `status ${status}`);
+  setText(ui.statusText, svc.statusText || "");
+  for (const c of ui.charts) { c.host._m = metricModel(svc, c.kind); c.host._draw(); }
+}
+
+// ---------- Summary ----------
+// One cell per summary field, whole numbers; a field the snapshot leaves empty (no median
+// before the first answer) reads 0.
+const summaryCells = [...document.querySelectorAll("#summary td[data-k]")];
+function renderSummary(S = {}) {
+  for (const td of summaryCells) {
+    const v = Math.round(S[td.dataset.k] ?? 0);
+    setText(td, String(v));
+    if (td.dataset.k === "missed") setClass(td, v > 0 ? "miss" : "");
   }
-  lg.dataset.rendered = "1";
 }
 
 // ---------- Tooltip ----------
+// A box's or a mark's tooltip follows its node, which outlives the snapshots: each one
+// refreshes the words (an answer arrived, the times moved) or hides the tooltip once the
+// node has left.
 const tip = document.getElementById("tip");
+let tipNode = null;  // the node the tooltip is on; null when hidden or on a plot
 function placeTip(x, y) {
   const r = tip.getBoundingClientRect();
   let left = x + 14, top = y + 16;
@@ -350,42 +418,48 @@ function placeTip(x, y) {
   tip.style.top = `${Math.max(8, top)}px`;
 }
 function showTip(node, x, y) {
-  tip.innerHTML = node.getAttribute("data-tip");
+  delete tip.dataset.owner;
+  tipNode = node;
+  setHTML(tip, node.getAttribute("data-tip"));
   tip.classList.add("on");
   placeTip(x, y);
 }
+function hideTip() {
+  tipNode = null;
+  tip.classList.remove("on");
+}
+function refreshTip() {
+  if (!tipNode) return;
+  if (tipNode.isConnected) setHTML(tip, tipNode.getAttribute("data-tip"));
+  else hideTip();
+}
 const tipTarget = e => e.target.closest?.("[data-tip]");
 document.addEventListener("pointerover", e => { const n = tipTarget(e); if (n) showTip(n, e.clientX, e.clientY); });
-document.addEventListener("pointermove", e => { if (tip.classList.contains("on") && tipTarget(e)) placeTip(e.clientX, e.clientY); });
-document.addEventListener("pointerout", e => { if (tipTarget(e)) tip.classList.remove("on"); });
+document.addEventListener("pointermove", e => { if (tipNode && tipTarget(e)) placeTip(e.clientX, e.clientY); });
+document.addEventListener("pointerout", e => { if (tipTarget(e)) hideTip(); });
 document.addEventListener("focusin", e => {
   const n = tipTarget(e); if (!n) return;
   const r = n.getBoundingClientRect();
   showTip(n, r.left + r.width / 2, r.bottom);
 });
-document.addEventListener("focusout", () => tip.classList.remove("on"));
+document.addEventListener("focusout", hideTip);
 
 // ---------- Render ----------
-let ro = null;
+// One ResizeObserver for every chart host: a new width redraws that chart.
+const ro = new ResizeObserver(entries => {
+  for (const e of entries) {
+    const h = e.target, w = Math.floor(e.contentRect.width);
+    if (!h.isConnected) { ro.unobserve(h); continue; }
+    if (h._w !== w) { h._w = w; h._draw(); }
+  }
+});
+
 function render(D) {
   AXIS = D.axisSeconds || 600;
-  const defaultWarmup = [0, D.warmupSeconds || 0];
-  renderAxis();
-  renderLegend();
-  const rowsEl = document.getElementById("rows");
-  rowsEl.innerHTML = "";
-  const hosts = [];
-  for (const svc of D.services || []) rowsEl.appendChild(serviceRow(svc, defaultWarmup, hosts));
-  renderSummary(hosts.map(h => h._model));
-  document.getElementById("updated").textContent =
+  sync(document.getElementById("cards"), D.services || [], svc => svc.name, createCard, updateCard);
+  renderSummary(D.summary || {});
+  setText(document.getElementById("updated"),
     new Date((D.updatedAt || Date.now() / 1000) * 1000)
-      .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  if (ro) ro.disconnect();
-  ro = new ResizeObserver(entries => {
-    for (const e of entries) {
-      const h = e.target, w = Math.floor(e.contentRect.width);
-      if (h._w !== w) { h._w = w; drawChart(h, h._model); }
-    }
-  });
-  hosts.forEach(h => ro.observe(h));
+      .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  refreshTip();
 }

@@ -61,9 +61,46 @@ def test_sweep_simulation_windows_are_complete_and_scored():
     per_service = {}
     for r in rows:
         per_service.setdefault(r.service_name, []).append(r)
-    assert len(per_service) == 6
+    assert len(per_service) == 3
     for srows in per_service.values():
         assert len(srows) == 90  # 15 minutes of 10-second windows, none missing
-    assert 35 < rate < 48  # ~41 msg/s (D-031)
+    # ~110 requests/s of traffic_count at baseline (D-059 means 50/30/30); a quarter-hour run
+    # holds several surges on checkout and payments (D-067), which lift it.
+    assert 100 < rate < 140
     rep = score(apply_detector(rows, CURRENT), incidents, start, end - 100)
-    assert sum(s.warmup_rows for s in rep.services.values()) == 6 * 13
+    assert sum(s.warmup_rows for s in rep.services.values()) == 3 * 13
+
+
+def test_sweep_windows_sum_traffic_and_average_the_samples(monkeypatch):
+    """D-058: a window is SUM(traffic_count) and the unweighted AVG(latency_ms) of its
+    per-second samples, as Flink computes it, not a request-weighted mean."""
+    import opsgen.simulation as sim_mod
+    from scripts.tuning.sweep import DataConfig, simulate
+
+    class FakeDeployment:
+        version, deployed_at = "1.0.0", 0.0
+
+    class FakeSimulation:
+        def __init__(self, seed, start, config):
+            self.start = start
+            self.deployments = {"checkout": FakeDeployment()}
+
+        def tick_ms(self, t):
+            return round(t * 1000)
+
+        def tick(self, now):
+            # Even seconds: 9 requests at 100 ms; odd seconds: 1 request at 300 ms.
+            k = round(now - self.start)
+            count, latency = (9, 100.0) if k % 2 == 0 else (1, 300.0)
+            sample = {"event_time": self.tick_ms(now) + 999, "service_name": "checkout",
+                      "traffic_count": count, "latency_ms": latency, "error_count": 0}  # fmt: skip
+            return [sample], [], []
+
+    monkeypatch.setattr(sim_mod, "Simulation", FakeSimulation)
+    rows, _incidents, start, _end, rate = simulate(DataConfig(aligned=True), seed=0, hours=60 / 3600)
+    assert start % 10 == 0
+    assert len(rows) == 6
+    for r in rows:
+        assert r.traffic_count == 50
+        assert r.avg_latency_ms == 200.0  # the request-weighted mean would be 120
+    assert rate == 5.0

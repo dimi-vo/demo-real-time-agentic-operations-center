@@ -33,16 +33,16 @@ output "handout" {
 }
 
 # README step's check: a heading, then one numbered Console link per developer to
-# their service_requests topic's schema. The topics are empty until the developer
+# their service_metrics topic's schema. The topics are empty until the developer
 # runs `uv run ops-sim`, but the registered schema proves the CREATE TABLE ran.
 # Print it with `terraform output -raw validation`.
 output "validation" {
-  description = "A numbered Console link per developer to their service_requests topic schema"
+  description = "A numbered Console link per developer to their service_metrics topic schema"
   value = join("", concat(
     ["Check in the Console that each environment has the two source tables and the model (the registered schema proves the CREATE TABLE ran; the topics stay empty until the developer runs ops-sim):\n"],
     [
       for i, email in sort(keys(module.developer)) : format(
-        "\n%d. %s: %s (%s)\n   https://confluent.cloud/environments/%s/clusters/%s/topics/service_requests/message-viewer?tab=schema\n",
+        "\n%d. %s: %s (%s)\n   https://confluent.cloud/environments/%s/clusters/%s/topics/service_metrics/message-viewer?tab=schema\n",
         i + 1,
         email,
         module.developer[email].environment_name,

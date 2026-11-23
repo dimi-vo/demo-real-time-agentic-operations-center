@@ -4,24 +4,24 @@
 
 from __future__ import annotations
 
-import math
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from opsgen.groundtruth import append_incident, end_record, incidents_path, start_record
-from opsgen.instances import version_hash
+from opsgen.engine import INCIDENT_TYPES, WINDOW_SECONDS, Config, next_window_boundary
+from opsgen.groundtruth import end_record, start_record
 from opsgen.services import service_names
 from opsgen.simulation import Simulation
 from opsgen.sinks import format_event
 from opsgen.state import save_state, state_path
 
+if TYPE_CHECKING:  # the feed needs Kafka; --dry-run and --simulate never import it
+    from opsgen.decisions import DecisionFeed
+
 
 def _mmss(seconds: int) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
-
-
-WINDOW_SECONDS = 10
 
 
 def aligned_start(now: float) -> float:
@@ -29,7 +29,7 @@ def aligned_start(now: float) -> float:
     first 10-second window Flink aggregates is a full one: a half-empty first window would
     look like a traffic drop and widen the detectors' bounds while it stays in training.
     The F1 race did the same with its 20-second laps."""
-    return float(math.ceil(now / WINDOW_SECONDS) * WINDOW_SECONDS)
+    return next_window_boundary(now)
 
 
 def wait_until(start: float) -> None:
@@ -40,44 +40,52 @@ def wait_until(start: float) -> None:
         time.sleep(delay)
 
 
-def run_realtime(sim: Simulation, sink, root: Path | None = None, write_groundtruth: bool = False) -> None:
+def tick_once(
+    sim: Simulation, sink, now: float, decisions: DecisionFeed | None = None, st_path: Path | None = None
+) -> None:
+    """One second of live output: tick with the decisions read since the last tick (so a
+    resolving one ends its incident on this tick, D-065), emit the records and events,
+    and save the state (every 5 s, and on any event) when `st_path` is given."""
+    metrics, deps, events = sim.tick(now, decisions.drain() if decisions is not None else ())
+    if deps:
+        sink.emit_deployments(deps)
+    sink.emit_metrics(metrics)
+    for ev in events:
+        sink.emit_event(ev)
+        if ev.incident is not None:
+            # Two records per incident: one at start (ended_at null) and one
+            # at end (both timestamps), tied by incident_id.
+            if ev.kind == "incident_start":
+                sink.emit_incident(start_record(ev.incident, ev.now))
+            elif ev.kind == "incident_end":
+                sink.emit_incident(end_record(ev.incident, ev.now))
+    if st_path is not None and (events or round(now - sim.start) % 5 == 0):
+        save_state(st_path, sim.state_snapshot())
+    sink.flush()
+
+
+def run_realtime(sim: Simulation, sink, root: Path | None = None, decisions: DecisionFeed | None = None) -> None:
     """Tick once per wall-clock second, emitting through `sink`, until Ctrl-C.
 
-    When `root` is given, the generator's deployment state is saved and (if
-    `write_groundtruth`) each finished incident is appended to incidents.jsonl.
+    When `root` is given, the generator's state (versions, incident counter) is saved.
     `--dry-run` passes root=None, so a dry run writes nothing and stays reproducible.
     The first tick is at `sim.start`; callers pass an `aligned_start` and this waits for it.
+    Live mode passes the `decisions` feed: each tick gets what it read since the last one,
+    and it is stopped on the way out.
+
+    The schedule itself is not saved: on a restart, the incidents in flight when it stopped
+    (up to one per service) never get their end record. Accepted (D-060): the wall keeps them
+    open for 11 minutes, and `evaluate` scores only incidents that ended.
     """
     wait_until(sim.start)
     sink.emit_deployments(sim.bootstrap())
     sink.flush()
-    gt_path = incidents_path(root) if root is not None and write_groundtruth else None
     st_path = state_path(root) if root is not None else None
     start_wall = sim.start
     k = 0
     try:
         while True:
-            now = start_wall + k
-            requests, deps, events = sim.tick(now)
-            if deps:
-                sink.emit_deployments(deps)
-            if requests:
-                sink.emit_requests(requests)
-            for ev in events:
-                sink.emit_event(ev)
-                if ev.incident is not None:
-                    # Two records per incident on the Kafka side: one at start
-                    # (ended_at null) and one at end (both timestamps). The
-                    # incidents.jsonl file still gets one record, only on end.
-                    if ev.kind == "incident_start":
-                        sink.emit_incident(start_record(ev.incident, ev.now))
-                    elif ev.kind == "incident_end":
-                        sink.emit_incident(end_record(ev.incident, ev.now))
-                        if gt_path is not None:
-                            append_incident(gt_path, ev.incident)
-            if st_path is not None and (events or k % 5 == 0):
-                save_state(st_path, sim.state_snapshot())
-            sink.flush()
+            tick_once(sim, sink, start_wall + k, decisions, st_path)
             k += 1
             delay = (start_wall + k) - time.time()
             if delay > 0:
@@ -86,48 +94,53 @@ def run_realtime(sim: Simulation, sink, root: Path | None = None, write_groundtr
         if st_path is not None:
             save_state(st_path, sim.state_snapshot())
         sys.stderr.write("\nStopped.\n")
+    finally:
+        if decisions is not None:
+            decisions.stop()
+
+
+def schedule_settings(config: Config) -> str:
+    """The schedule's settings on one line, for the start banner (D-060)."""
+    if config.no_incidents:
+        return "no incidents"
+    rests = " ".join(f"{t}={config.rests[t]:g}s" for t in INCIDENT_TYPES)
+    return f"quiet={config.quiet_period:g}s max={config.max_duration:g}s gap={config.gap:g}s rests: {rests}"
 
 
 def run_simulate(sim: Simulation, minutes: float, out=None) -> None:
     """Run a synthetic clock for `minutes` without sleeping, printing one summary line
-    per service per 10-second window plus the deploy/incident log (brief section 4.5)."""
+    per service per 10-second window plus the deploy/incident log (brief section 4.5).
+    A line sums up the window's metrics records the way lab 2.2 does: total traffic,
+    average latency, and the share of failed requests (D-058)."""
     out = out if out is not None else sys.stdout
     names = service_names()
     total = round(minutes * 60)
 
     def fresh() -> dict[str, dict]:
-        return {n: {"count": 0, "errors": 0, "lat": 0.0} for n in names}
+        return {n: {"traffic": 0, "errors": 0, "lat": 0.0, "records": 0} for n in names}
 
     agg = fresh()
-    out.write(
-        f"# ops-sim --simulate {minutes:g}min  "
-        f"(quiet={sim.config.quiet_period:g}s spacing={sim.config.spacing_min:g}-{sim.config.spacing_max:g}s "
-        f"duration={sim.config.duration_min:g}-{sim.config.duration_max:g}s cooldown={sim.config.cooldown:g}s)\n"
-    )
+    out.write(f"# ops-sim --simulate {minutes:g}min  ({schedule_settings(sim.config)})\n")
     for k in range(total):
         now = sim.start + k
-        requests, _deps, events = sim.tick(now)
+        metrics, _deps, events = sim.tick(now)
         for ev in events:
             out.write(format_event(ev, clock=_mmss(round(ev.now - sim.start))) + "\n")
-        for r in requests:
+        for r in metrics:
             a = agg[r["service_name"]]
-            a["count"] += 1
+            a["traffic"] += r["traffic_count"]
+            a["errors"] += r["error_count"]
             a["lat"] += r["latency_ms"]
-            if r["status_code"] >= 500:
-                a["errors"] += 1
-        if k % 10 == 9:
+            a["records"] += 1
+        if k % WINDOW_SECONDS == WINDOW_SECONDS - 1:
             label = _mmss(k + 1)
             for name in names:
                 a = agg[name]
-                if a["count"] == 0:
-                    out.write(f"[t={label}] {name:<12} reqs=   0  (NO TRAFFIC)\n")
-                    continue
-                err = 100 * a["errors"] / a["count"]
-                lat = a["lat"] / a["count"]
+                err = 100 * a["errors"] / a["traffic"] if a["traffic"] else 0.0
+                lat = a["lat"] / a["records"]
                 ver = sim.deployments[name].version
                 out.write(
-                    f"[t={label}] {name:<12} reqs={a['count']:>4} err={err:4.1f}% "
-                    f"lat={lat:6.1f}ms ver={ver:<7} inst={version_hash(name, ver)}\n"
+                    f"[t={label}] {name:<12} traffic={a['traffic']:>4} err={err:4.1f}% lat={lat:6.1f}ms ver={ver}\n"
                 )
             agg = fresh()
     out.flush()

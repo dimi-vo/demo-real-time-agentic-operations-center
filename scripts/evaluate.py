@@ -2,7 +2,8 @@
 pipeline's output against the generator's incident ground truth.
 
 Detection half (Phase 3): reads `service_health` over Kafka (no Flink statement, no
-cost), compares it with `runs/pre-provisioned/incidents.jsonl`, and prints:
+cost), compares it with the generator's ground truth in `service_incidents` (D-046),
+and prints:
 
 - pipeline checks per service: rows, duplicate or missing windows, warm-up rows;
 - per incident: whether and when it was detected (window number after onset), with
@@ -10,7 +11,9 @@ cost), compares it with `runs/pre-provisioned/incidents.jsonl`, and prints:
 - per service: false positives per hour outside incidents, and the fresh-start noise
   in the first 5 minutes.
 
-Decision half (Phase 4): if `remediation_decisions` exists, it also reads that and prints:
+Decision half (Phase 4): if `remediation_decisions` has rows (the platform team creates the
+table, so it exists from the start and stays empty until the agent INSERTs run), it also
+reads that and prints:
 
 - per agent: how many decisions, how many carry a valid action, routing errors;
 - per incident: the recommended action against the expected one, with the target;
@@ -18,7 +21,9 @@ Decision half (Phase 4): if `remediation_decisions` exists, it also reads that a
 
 Offline: `--dump FILE` saves the rows it read as JSONL; `--rows FILE` evaluates such a
 file without connecting (so a run can be shared and re-scored without credentials).
-`--dump-decisions` / `--decision-rows` do the same for `remediation_decisions`.
+`--dump-decisions` / `--decision-rows` do the same for `remediation_decisions`, and
+`--dump-incidents` / `--incidents` for `service_incidents`. `--rows` needs
+`--incidents`: offline, there is no other ground truth.
 Definitions are in `scripts/evaluation/detection.py` (D-021) and
 `scripts/evaluation/decisions.py` (D-032).
 """
@@ -52,14 +57,16 @@ from scripts.evaluation.detection import (
     UNLOGGED_TAIL_SECONDS,
     DetectionReport,
     HealthRow,
+    Incident,
     default_range,
-    load_incidents,
+    incidents_from_records,
     rescale_confidence,
     score,
 )
 
 SERVICE_HEALTH = "service_health"
 REMEDIATION_DECISIONS = "remediation_decisions"
+SERVICE_INCIDENTS = "service_incidents"
 FP_TARGET_PER_HOUR = 1.0
 FRESH_START_TARGET = 1
 
@@ -83,7 +90,8 @@ def _parse_args(argv):
     p.add_argument("--to", dest="range_to", help="range end, ISO-8601 UTC (default: 100 s before the newest row)")
     p.add_argument("--topic", default=SERVICE_HEALTH, help="table to score (default: service_health)")
     p.add_argument("--creds", help="credential card (default: the active card)")
-    p.add_argument("--incidents", help="ground-truth file (default: runs/pre-provisioned/incidents.jsonl)")
+    p.add_argument("--incidents", help="score against this JSONL dump of service_incidents instead of reading Kafka")
+    p.add_argument("--dump-incidents", help="also write the incident records read to this JSONL file")
     p.add_argument("--dump", help="also write the rows read to this JSONL file")
     p.add_argument("--rows", help="evaluate this JSONL dump instead of reading Kafka")
     p.add_argument(
@@ -134,24 +142,48 @@ def _load_rows(args, root: Path) -> list[dict]:
         return _read_jsonl(args.rows)
     records = _read_table(args.topic, args.creds, root)
     if records is None:
-        raise SystemExit(f"`{args.topic}` doesn't exist yet. Create it with sql/2.4_service_health.sql.")
+        raise SystemExit(
+            f"`{args.topic}` doesn't exist yet. Ask your platform team to re-apply, "
+            f"then run the INSERT in sql/2.4_service_health.sql."
+        )
     if args.dump:
         _dump(records, args.dump)
     return records
 
 
+def _load_incidents(args, root: Path) -> tuple[list[Incident], str]:
+    """The ended incidents to score against, and where they came from (D-046)."""
+    if args.incidents:
+        return incidents_from_records(_read_jsonl(args.incidents)), args.incidents
+    if args.rows:  # offline health dump, no credentials in play
+        raise SystemExit(
+            "--rows scores offline, so it needs --incidents FILE as well: a dump of "
+            f"`{SERVICE_INCIDENTS}` made with --dump-incidents."
+        )
+    records = _read_table(SERVICE_INCIDENTS, args.creds, root)
+    if records is None:
+        console.print(f"[yellow]`{SERVICE_INCIDENTS}` doesn't exist yet, so there is no ground truth.[/yellow]")
+        return [], SERVICE_INCIDENTS
+    if args.dump_incidents:
+        _dump(records, args.dump_incidents)
+    return incidents_from_records(records), SERVICE_INCIDENTS
+
+
 def _load_decisions(args, root: Path) -> list[dict] | None:
-    """The decision rows, or None when the decision half doesn't apply."""
+    """The decision rows, or None when the decision half doesn't apply.
+
+    The table always exists (the platform team creates it, D-050), so an empty topic means
+    "the agents haven't answered yet" and is treated like a missing one."""
     if args.no_decisions:
         return None
     if args.decision_rows:
-        return _read_jsonl(args.decision_rows)
+        return _read_jsonl(args.decision_rows) or None
     if args.rows:  # offline health dump, no credentials in play
         return None
     records = _read_table(args.decisions_topic, args.creds, root)
-    if records is not None and args.dump_decisions:
+    if records and args.dump_decisions:
         _dump(records, args.dump_decisions)
-    return records
+    return records or None
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -173,16 +205,15 @@ def main(argv: list[str] | None = None) -> None:
     if args.range_from:
         range_from = epoch_seconds(args.range_from)
 
-    gt_path = Path(args.incidents) if args.incidents else root / "runs" / "pre-provisioned" / "incidents.jsonl"
-    incidents = load_incidents(gt_path)
+    incidents, gt_source = _load_incidents(args, root)
     report = score(rows, incidents, range_from, range_to)
-    _render(report, args.rows or args.topic, gt_path, len(incidents), args.details)
+    _render(report, args.rows or args.topic, gt_source, len(incidents), args.details)
 
     records = _load_decisions(args, root)
     if records is None:
         console.print(
-            f"\n[dim]No `{args.decisions_topic}` yet — the decision half is skipped. "
-            f"Create it with sql/4.3_remediation_decisions.sql and the two INSERT statements.[/dim]"
+            f"\n[dim]No decisions in `{args.decisions_topic}` yet — the decision half is skipped. "
+            f"Run the two agent INSERTs (sql/4.3_insert_*.sql) to fill it.[/dim]"
         )
         return
     decisions = [DecisionRow.from_record(r) for r in records]
@@ -194,14 +225,14 @@ def main(argv: list[str] | None = None) -> None:
     )
 
 
-def _render(rep: DetectionReport, source: str, gt_path: Path, n_incidents: int, details: bool) -> None:
+def _render(rep: DetectionReport, source: str, gt_source: str, n_incidents: int, details: bool) -> None:
     console.print(
         f"\n[bold]{source}[/bold]: {rep.total_rows} rows, {len(rep.services)} services. "
         f"Scored range: {_dt(rep.range_from)} → {_t(rep.range_to)} "
         f"([dim]ends {UNLOGGED_TAIL_SECONDS:.0f} s before the newest row, "
         f"so no incident still in progress is scored[/dim])"
     )
-    console.print(f"Ground truth: {gt_path} ({n_incidents} incidents in the file)\n")
+    console.print(f"Ground truth: {gt_source} ({n_incidents} ended incidents)\n")
 
     t = Table(title="Pipeline checks", title_justify="left")
     cols = ("service", "rows", "first window", "last window", "warm-up rows", "warm-up later", "duplicates", "gaps")
@@ -232,8 +263,6 @@ def _render(rep: DetectionReport, source: str, gt_path: Path, n_incidents: int, 
         }[r.status]
         if r.wrong_direction:
             result += " [red](wrong direction)[/red]"
-        if r.version_mismatches:
-            result += f" [red]({r.version_mismatches} version mismatches)[/red]"
         evidence = r.detected_row.describe(inc.expected_trigger) if r.detected_row else ""
         also = ", ".join(f"{sig}@{k}{' end' if end else ''}" for k, sig, end in r.other_signals)
         t.add_row(
@@ -252,7 +281,7 @@ def _render(rep: DetectionReport, source: str, gt_path: Path, n_incidents: int, 
     console.print()
 
     t = Table(title="False positives (outside incidents) and fresh-start noise", title_justify="left")
-    cols = ("service", "scored h", "false pos.", "per hour", "of which echo", "after deploy", "fresh start", "restart")
+    cols = ("service", "scored h", "false pos.", "per hour", "of which echo", "fresh start", "restart")
     for col in cols:
         t.add_column(col, justify="right" if col != "service" else "left")
     worst_fp, worst_fresh = 0.0, 0
@@ -264,14 +293,12 @@ def _render(rep: DetectionReport, source: str, gt_path: Path, n_incidents: int, 
             s.service_name, f"{s.scored_hours:.2f}", str(len(s.false_positives)),
             "-" if per_h is None else _target(per_h, FP_TARGET_PER_HOUR, "{:.1f}"),
             str(sum(fp.tag == "echo" for fp in s.false_positives)),
-            str(sum(fp.tag == "after deploy" for fp in s.false_positives)),
             _target(len(s.fresh_start_noise), FRESH_START_TARGET, "{}"),
             str(len(s.restart_artifacts)),
         )  # fmt: skip
     console.print(t)
     console.print(
-        f"[dim]echo = within a minute after an incident on that service ended; after deploy = the "
-        f"service deployed less than a minute earlier. Fresh start = the first "
+        f"[dim]echo = within a minute after an incident on that service ended. Fresh start = the first "
         f"{FRESH_START_SECONDS / 60:.0f} minutes after the service's first window in the topic (only "
         f"meaningful if the topic starts at a fresh `reset` + `ops-sim`). restart = signals next to a gap in "
         f"the data (ops-sim stopped and restarted); not counted as false positives.[/dim]"

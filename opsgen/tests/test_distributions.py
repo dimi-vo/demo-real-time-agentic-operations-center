@@ -35,55 +35,26 @@ def test_latency_has_slow_outliers():
     assert sum(1 for s in samples if s > 300) > 20
 
 
-def test_status_code_normal_mix():
+def test_mean_latency_is_the_mean_of_the_seconds_requests():
+    # Same draws in the same order: the mean of `count` latency_ms draws.
     rng = random.Random(5)
-    n = 100000
-    codes = [d.status_code(200, False, rng) for _ in range(n)]
-    server = sum(1 for c in codes if c >= 500) / n
-    client = sum(1 for c in codes if 400 <= c < 500) / n
-    success = sum(1 for c in codes if c == 200) / n
-    assert abs(server - 0.005) < 0.003
-    assert abs(client - 0.02) < 0.006
-    assert abs(success - 0.975) < 0.01
+    expected = sum(d.latency_ms(100.0, rng) for _ in range(7)) / 7
+    assert d.mean_latency_ms(7, 100.0, random.Random(5)) == expected
+    # A second without requests still gets one draw, so latency_ms is always set.
+    assert d.mean_latency_ms(0, 100.0, random.Random(5)) == d.latency_ms(100.0, random.Random(5))
 
 
-def test_status_code_success_depends_on_method():
+def test_mean_latency_spread_shrinks_with_traffic():
     rng = random.Random(6)
-    # POST -> 201, DELETE -> 204 when successful.
-    assert any(d.status_code(201, False, rng) == 201 for _ in range(100))
-    assert any(d.status_code(204, False, rng) == 204 for _ in range(100))
+    one = [d.mean_latency_ms(1, 100.0, rng) for _ in range(5000)]
+    many = [d.mean_latency_ms(25, 100.0, rng) for _ in range(5000)]
+    assert statistics.pstdev(many) < statistics.pstdev(one) / 3
 
 
-def test_status_code_bad_deploy_override():
+def test_binomial_counts_failures_at_the_rate():
     rng = random.Random(7)
-    n = 50000
-    codes = [d.status_code(200, False, rng, server_error_rate=0.12) for _ in range(n)]
-    server = sum(1 for c in codes if c >= 500) / n
-    assert abs(server - 0.12) < 0.01
-    # "mostly 500 and 503"
-    five00 = sum(1 for c in codes if c == 500)
-    five03 = sum(1 for c in codes if c == 503)
-    five02 = sum(1 for c in codes if c == 502)
-    assert five00 + five03 > 4 * five02
-
-
-def test_auth_client_errors_include_401():
-    rng = random.Random(8)
-    codes = [d.status_code(200, True, rng) for _ in range(100000)]
-    assert any(c == 401 for c in codes)
-    assert any(c == 404 for c in codes)
-
-
-def test_response_bytes():
-    rng = random.Random(9)
-    errs = [d.response_bytes(5000, True, rng) for _ in range(1000)]
-    assert all(170 <= b <= 230 for b in errs)
-    oks = [d.response_bytes(1000, False, rng) for _ in range(1000)]
-    assert all(800 <= b <= 1200 for b in oks)
-
-
-def test_trace_id():
-    rng = random.Random(10)
-    tid = d.trace_id(rng)
-    assert len(tid) == 32
-    assert all(c in "0123456789abcdef" for c in tid)
+    n = 2000
+    assert abs(statistics.mean(d.binomial(100, d.ERROR_RATE, rng) for _ in range(n)) - 0.5) < 0.1
+    assert abs(statistics.mean(d.binomial(100, 0.12, rng) for _ in range(n)) - 12) < 0.5
+    assert d.binomial(0, 0.12, rng) == 0
+    assert all(0 <= d.binomial(5, 0.5, rng) <= 5 for _ in range(200))

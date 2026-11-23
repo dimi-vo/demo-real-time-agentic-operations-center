@@ -11,9 +11,14 @@
 -- compare "what happened" against "what we caught". Two records per incident:
 -- one at degradation_start (ended_at NULL) and one at degradation_end (both
 -- timestamps set), tied together by incident_id. Append-only so the ground-truth
--- history can be replayed; keyed by service_name for ordering per service.
+-- history can be replayed. No key columns, exactly like service_metrics: the
+-- generator sends the raw service_name string as the message key, and service_name
+-- stays in the value, where ops-wall and evaluate read it. (DISTRIBUTED BY HASH would
+-- make service_name a key column, which Confluent Cloud requires first in the schema
+-- and registers as an Avro key the generator doesn't write; one bucket keeps the
+-- order anyway.)
 --
--- delete retention (not compaction) with 24h matches service_requests: an
+-- delete retention (not compaction) with 24h matches service_metrics: an
 -- append-only log is never compacted, and 24h caps storage per attendee.
 
 CREATE TABLE IF NOT EXISTS `service_incidents` (
@@ -21,14 +26,13 @@ CREATE TABLE IF NOT EXISTS `service_incidents` (
   `incident_id` STRING COMMENT 'Stable id for this incident across its start and end records',
   `service_name` STRING COMMENT 'Service the incident affects (foreign key to service_deployments)',
   `incident_type` STRING COMMENT 'BAD_DEPLOY, TRAFFIC_SURGE or UPSTREAM_DROP',
-  `started_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation actually began (not the deploy or trigger moment)',
+  `started_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation began (for BAD_DEPLOY, the same tick as the deploy)',
   `ended_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation ended; NULL on the start record, set on the end record',
   `expected_trigger` STRING COMMENT 'What service_health should flag: LATENCY_HIGH, TRAFFIC_HIGH or TRAFFIC_LOW',
   `expected_action` STRING COMMENT 'What the agent should pick: ROLLBACK, SCALE_OUT or INVESTIGATE_UPSTREAM',
-  `good_version` STRING COMMENT 'For BAD_DEPLOY, the version a ROLLBACK should target; NULL otherwise',
   WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
 )
-DISTRIBUTED BY HASH(`service_name`) INTO 1 BUCKETS
+DISTRIBUTED INTO 1 BUCKETS
 WITH (
   'changelog.mode' = 'append',
   'connector' = 'confluent',

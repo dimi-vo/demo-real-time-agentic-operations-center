@@ -26,7 +26,7 @@ def test_healthz_reports_service_count_and_no_errors(client):
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "ok"
-    assert data["serviceCount"] == 6
+    assert data["serviceCount"] == 3
     assert data["connectionErrors"] == {}
 
 
@@ -59,6 +59,7 @@ def test_websocket_sends_a_snapshot_on_connect(client):
         payload = ws.receive_text()
         snap = json.loads(payload)
         assert snap["axisSeconds"] == 600
-        assert isinstance(snap["services"], list) and len(snap["services"]) == 6
+        assert isinstance(snap["services"], list) and len(snap["services"]) == 3
+        assert snap["summary"]["injected"] == 0
         for s in snap["services"]:
-            assert "detectedLatency" in s and "detectedTraffic" in s and "groundTruth" in s
+            assert "blocks" in s and "groundTruth" in s

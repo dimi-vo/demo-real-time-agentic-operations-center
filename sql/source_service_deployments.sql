@@ -9,8 +9,12 @@
 -- would report it: one upsert row per service, keyed by service_name. The
 -- generator re-emits every service's current state every 5 seconds (a controller
 -- reconciliation loop) so the versioned side's watermark keeps advancing between
--- changes; without it the event-time temporal join against service_requests would
--- stall. The Kafka message key is Avro-encoded against the registered
+-- changes; without it the event-time temporal join against service_metrics would
+-- stall. The watermark trails event_time by 1 ms (Flink's ascending-timestamps strategy:
+-- the heartbeat stamps every service with the same tick, and a row stamped at the
+-- watermark itself would be late), so the heartbeat on a window's end tick lets that
+-- window close at once. A longer delay makes every window wait for the next heartbeat:
+-- with 5 s, detection waited 5 s more (D-064). The Kafka message key is Avro-encoded against the registered
 -- service_deployments-key subject, mirroring the reference race_standings.
 --
 -- DELETE RETENTION, NOT COMPACTION (DECISIONS.md D-006): the temporal join and the
@@ -27,11 +31,10 @@ CREATE TABLE IF NOT EXISTS `service_deployments` (
   `last_change` STRING COMMENT 'INITIAL, DEPLOY or ROLLBACK (SCALE is reserved for a later project)',
   `desired_replicas` INT COMMENT 'Desired replica count (equal to ready_replicas in this phase)',
   `ready_replicas` INT COMMENT 'Ready replica count (fixed per service in this phase)',
-  `max_replicas` INT COMMENT 'Autoscaling ceiling; tells the capacity agent whether scaling out is possible',
   `tier` STRING COMMENT 'CRITICAL or STANDARD',
   `owner_team` STRING COMMENT 'Team that owns the service',
   `event_time` TIMESTAMP(3) COMMENT 'Emit time of this state record (changes on every re-emit)',
-  WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND,
+  WATERMARK FOR `event_time` AS `event_time` - INTERVAL '0.001' SECOND,
   PRIMARY KEY (`service_name`) NOT ENFORCED
 ) DISTRIBUTED BY (`service_name`) INTO 1 BUCKETS
 WITH (

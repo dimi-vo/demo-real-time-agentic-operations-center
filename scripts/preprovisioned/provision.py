@@ -1,11 +1,11 @@
 """`uv run deploy --track pre-provisioned` — mint the developer's keys, write the card,
 and check the environment is ready.
 
-The platform team already built the environment (cluster, Flink pool, the two source
-tables, the model). This deploy runs no Terraform: it mints a Global key with the
-Confluent CLI (as the logged-in developer), uses it to mint a Kafka and a Schema
-Registry key over REST, writes the credential card, and verifies that both source
-tables and `llm_textgen_model` exist. Key IDs are recorded in deployment.env the moment
+The platform team already built the environment (cluster, Flink pool, the three source
+tables, the two output tables, the model). This deploy runs no Terraform: it mints a
+Global key with the Confluent CLI (as the logged-in developer), uses it to mint a Kafka
+and a Schema Registry key over REST, writes the credential card, and verifies that all
+five tables and `llm_textgen_model` exist. Key IDs are recorded in deployment.env the moment
 each exists; a run that stops before the card is written deletes the keys it minted, so
 a premature run never burns a Global-key slot.
 """
@@ -30,7 +30,10 @@ from scripts.preprovisioned import keys, lookup
 PREFIX = "DEMO"
 KEY_LOCATION = "Console → API keys → My account"
 MODEL_NAME = "llm_textgen_model"
-SOURCE_TABLES = ("service_requests", "service_deployments", "service_incidents")
+SOURCE_TABLES = ("service_metrics", "service_deployments", "service_incidents")
+# The labs fill these with INSERT statements; the platform team's Terraform creates them (D-050).
+OUTPUT_TABLES = ("service_health", "remediation_decisions")
+PLATFORM_TABLES = SOURCE_TABLES + OUTPUT_TABLES
 
 CARD_FIELDS = {
     meta.KEY_GLOBAL_KEY_ID: ("AIOPS_FLINK_API_KEY", "AIOPS_FLINK_API_SECRET"),
@@ -240,11 +243,11 @@ def _check_tables(session: FlinkSession) -> bool:
     try:
         tables = list_tables(session)
     except (requests.RequestException, RuntimeError) as e:
-        for table in SOURCE_TABLES:
+        for table in PLATFORM_TABLES:
             print(f"  ? could not check table {table}: {e}")
         return False
     ok = True
-    for table in SOURCE_TABLES:
+    for table in PLATFORM_TABLES:
         if table in tables:
             print(f"  ✓ table {table}")
         else:

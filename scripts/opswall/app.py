@@ -1,21 +1,12 @@
 """`uv run ops-wall` — local live dashboard for the Self-Healing IT workshop.
 
-Reads the attendee's four topics with the Kafka + Schema Registry keys on their
-credential card, serves a FastAPI + static-JS single-page app at
-http://localhost:8000, and pushes updates over a websocket at ~4 Hz. Only
-consumes — never touches Flink, never produces, costs nothing beyond the Kafka
-egress. Stop with Ctrl-C.
-
-Two feed modes:
-
-- default: Kafka → OpsWallState (``scripts/opswall/consumer.py``). Requires a
-  credential card (``credentials.env`` or ``--creds <prefix>.env``). Missing
-  topics are not fatal — the wall renders with empty lanes, and ``/healthz``
-  carries the reason.
-- ``--mock``: no Kafka. Drives the state from a scripted 12-minute incident
-  sequence (``scripts/opswall/mock.py``) so every rendering path is on screen
-  on demand. Useful for dashboard development and for previewing without an
-  environment.
+Reads the attendee's five topics with the Kafka + Schema Registry keys on their
+credential card (``credentials.env`` or ``--creds <prefix>.env``) into an
+OpsWallState (``scripts/opswall/consumer.py``), serves a FastAPI + static-JS
+single-page app at http://localhost:8000, and pushes updates over a websocket at
+~4 Hz. Only consumes — never touches Flink, never produces, costs nothing beyond
+the Kafka egress. Missing topics are not fatal — the wall renders with empty
+charts, and ``/healthz`` carries the reason. Stop with Ctrl-C.
 """
 
 from __future__ import annotations
@@ -24,12 +15,13 @@ import argparse
 import logging
 import sys
 import threading
-import time
 import webbrowser
 
 import uvicorn
 
 from scripts.common.credentials import load_card
+from scripts.opswall.consumer import start_threads
+from scripts.opswall.feed import Feed
 from scripts.opswall.server import create_app
 from scripts.opswall.state import OpsWallState
 
@@ -45,7 +37,6 @@ def _parser() -> argparse.ArgumentParser:
         help="Bind host (default 127.0.0.1; use 0.0.0.0 to show on a second device)",
     )
     p.add_argument("--no-browser", action="store_true", help="Do not auto-open a browser")
-    p.add_argument("--mock", action="store_true", help="Scripted demo feed — no Kafka, no credential card needed")
     p.add_argument("-v", "--verbose", action="store_true", help="Also log consumer debug lines")
     return p
 
@@ -57,34 +48,17 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     state = OpsWallState()
-    stop = threading.Event()
-    feeds: list[threading.Thread] = []
+    path, card = load_card(args.creds)
+    logger.info("Using credential card: %s", path)
 
-    if args.mock:
-        from scripts.opswall.mock import MockDriver
+    def starter(stop: threading.Event) -> list[threading.Thread]:
+        return start_threads(state=state, card=card, stop=stop)
 
-        driver = MockDriver(state=state, start_wall=time.time())
-        driver.seed_deployments()
-
-        def pump():
-            while not stop.is_set():
-                driver.tick(time.time())
-                time.sleep(0.25)
-
-        feeds.append(threading.Thread(target=pump, name="ops-wall-mock", daemon=True))
-    else:
-        path, card = load_card(args.creds)
-        logger.info("Using credential card: %s", path)
-        from scripts.opswall.consumer import start_threads
-
-        feeds.extend(start_threads(state=state, card=card, stop=stop))
-
-    for t in feeds:
-        if not t.is_alive():
-            t.start()
+    feed = Feed(state, starter)
+    feed.start()
 
     url = f"http://{args.host if args.host != '0.0.0.0' else 'localhost'}:{args.port}"
-    logger.info("ops-wall live at %s  (Ctrl-C to stop)%s", url, "  [MOCK FEED]" if args.mock else "")
+    logger.info("ops-wall live at %s  (Ctrl-C to stop)", url)
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
@@ -94,7 +68,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        stop.set()
+        feed.stop()
 
 
 if __name__ == "__main__":  # pragma: no cover

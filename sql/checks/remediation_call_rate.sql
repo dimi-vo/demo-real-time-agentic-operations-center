@@ -1,7 +1,7 @@
 -- Agent calls track anomalies, not windows (brief section 3, improvement 4).
 --
 -- Three running totals over everything both tables hold. Expect `agent decisions` to
--- track `anomalous rows`, not `service_health rows`: six services produce 360 rows per
+-- track `anomalous rows`, not `service_health rows`: three services produce 180 rows per
 -- 10 quiet minutes and should cost no agent calls at all.
 --
 -- Plain aggregates on purpose: `remediation_decisions` declares no watermark, so a

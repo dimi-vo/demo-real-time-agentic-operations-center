@@ -1,6 +1,10 @@
-"""Persist the generator's deployment state so a restart continues from the current
-versions (brief section 4.5). Replicas are fixed per service and come from the
-catalog, so only versions / deployed_at / last_change are persisted.
+"""Persist the generator's state so a restart continues from the current versions
+and incident numbering (brief section 4.5, D-046). Replicas are fixed per service and
+come from `opsgen/services.py`, so only versions (current, previous, and the highest ever
+run, so a deploy never reuses a number: D-067) / deployed_at / last_change are persisted
+per service, plus the last incident number used:
+
+    {"services": {"checkout": {"version": ..., ...}, ...}, "incident_counter": 7}
 """
 
 from __future__ import annotations
@@ -19,8 +23,8 @@ def state_path(root: Path) -> Path:
     return run_dir(root) / STATE_FILENAME
 
 
-def load_state(path: Path) -> dict[str, dict] | None:
-    """The persisted per-service state, or None if there is none / it's unreadable."""
+def load_state(path: Path) -> dict | None:
+    """The persisted state, or None if there is none / it's unreadable."""
     path = Path(path)
     if not path.is_file():
         return None
@@ -31,7 +35,7 @@ def load_state(path: Path) -> dict[str, dict] | None:
     return data if isinstance(data, dict) else None
 
 
-def save_state(path: Path, snapshot: dict[str, dict]) -> None:
+def save_state(path: Path, snapshot: dict) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
