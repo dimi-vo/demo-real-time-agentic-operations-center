@@ -96,7 +96,7 @@ def test_simulate_an_hour_has_overlapping_incidents():
             most = max(most, len(open_now))
         else:
             assert open_now.pop(svc) == itype, ln
-    assert most == 3
+    assert most == 2  # checkout and payments; web-gateway is not in the shared scheduler (D-067)
 
 
 def test_simulate_every_deploy_is_a_bad_deploy():
@@ -149,7 +149,7 @@ def test_an_incident_end_line_says_who_resolved_it_and_when():
 def test_simulate_without_decisions_every_incident_expires_at_the_cap():
     # --simulate reads no decisions (D-065), so every incident runs its 35 s.
     ends = [ln for ln in _simulate(minutes=60).splitlines() if "INCIDENT END" in ln]
-    assert len(ends) > 40
+    assert len(ends) > 30  # about 36 in the first hour on checkout and payments (D-067)
     assert all(ln.endswith(" expired after 35 s") for ln in ends), ends
     assert any(", expired after 35 s" in ln and "rollback" in ln for ln in ends)
 

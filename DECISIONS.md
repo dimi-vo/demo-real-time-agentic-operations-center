@@ -1442,9 +1442,10 @@ data. No change to Terraform, the schemas or the DDL. Tests: `CANDIDATES` is pin
 `scripts/preprovisioned/` and its tests are Confluent Cloud API answers, not `auth`.
 
 **Amended by D-067.** `web-gateway` is no longer a candidate of any shared incident type:
-`BAD_DEPLOY`, `TRAFFIC_SURGE` and `UPSTREAM_DROP` all go to `checkout` and `payments`.
-web-gateway deploys on its own clock; its bad deploys are `BAD_DEPLOY_ERRORS`, flagged by an
-error-rate threshold in lab 2.2.
+`BAD_DEPLOY` goes to `checkout` and `payments`, `TRAFFIC_SURGE` to `checkout`, and
+`UPSTREAM_DROP` to `payments` only (a traffic series with both surges and drops misses the
+drops). web-gateway deploys on its own clock; its bad deploys are `BAD_DEPLOY_ERRORS`,
+flagged by an error-rate threshold in lab 2.2.
 
 ### D-057 · DECISION · No benign deploys
 **What.** `ops-sim` deployed a random healthy service every 3-5 minutes (first at 60 s): a
@@ -1827,8 +1828,9 @@ and so end mid-window. The gap and the rests count from each incident's schedule
 still follows `--seed`. About 56 incidents an hour; a service's shortest gap between
 incidents is 25 s (T+35 to the boundary at T+60). The banner prints `max` for `duration`.
 
-**Amended by D-067.** The shared scheduler serves `checkout` and `payments` only.
-web-gateway has its own deploy clock with its own RNG (`seed + 2`): a deploy every 60–90 s,
+**Amended by D-067.** The shared scheduler serves `checkout` (bad deploys and surges) and
+`payments` (bad deploys and drops) only: about 37 incidents an hour, 19 per service as
+before. web-gateway has its own deploy clock with its own RNG (`seed + 2`): a deploy every 60–90 s,
 bad with probability ½, outside the quiet period, the gap, the rests and the "one of each"
 rule.
 
@@ -2296,8 +2298,8 @@ the agent, the agent's answer closes the loop, D-065), then move to ARIMA.
   effect and trigger.
 - web-gateway's schedule: (a) its own deploy clock; (b) the shared scheduler with a shorter
   rest.
-- Surges, whose only candidate was web-gateway: (a) move them to checkout and payments;
-  (b) drop them.
+- Surges, whose only candidate was web-gateway: (a) surges on checkout, drops on payments;
+  (b) both on both services, the first proposal; (c) drop them.
 **Choice.** (a) each time, decided with the user in a grilling session on 2026-11-16
 (`.scratch/web-gateway-threshold/spec.md`). The story for web-gateway: a deploy happens, a
 lot of requests start failing, so it must have been a bad deploy; the release agent answers
@@ -2312,11 +2314,13 @@ ROLLBACK and the errors stop.
   `BAD_DEPLOY_ERRORS` incident: 40 % of requests fail, traffic and latency stay normal,
   expected trigger `ERROR_RATE_HIGH`, expected action `ROLLBACK`, capped at 35 s and
   resolved like any incident (D-065). `--no-incidents`: web-gateway doesn't deploy.
-- **checkout and payments** keep the shared scheduler and its three types, now with both of
-  them as candidates for each (`TRAFFIC_SURGE` gains them, `BAD_DEPLOY` loses web-gateway).
-  Their bad deploys keep latency ×4 and 12 % errors. The quiet period, the "first three are
-  one of each" rule, the gap and the rests stay, unless an offline re-check of detection
-  (×5 surges at 30 rps, three types per service) finds it worse than before.
+- **checkout and payments** keep the shared scheduler and its three types: bad deploys on
+  both, surges on checkout, drops on payments (`BAD_DEPLOY` loses web-gateway,
+  `TRAFFIC_SURGE` moves from web-gateway to checkout). Their bad deploys keep latency ×4 and
+  12 % errors. The quiet period, the "first three are one of each" rule, the gap and the
+  rests stay. Each service still gets about 19 incidents an hour, 37 in all (was 56 on three).
+  The grilling first agreed on all three types on both services; the offline re-check below
+  found it lost the drops, and the user chose the split on 2026-11-17.
 - **Versions never repeat.** A deploy bumps the patch past the highest version the service
   has run, on every service. Before, it bumped the current version, so the first deploy
   after a rollback reused the bad version's number. The generator state file (D-046) keeps
@@ -2364,7 +2368,12 @@ ROLLBACK and the errors stop.
 - With good deploys, "3.4.4 is bad, rolled back, then 3.4.4 deployed again and fine" would
   contradict itself.
 - Surges move rather than go, so the capacity agent keeps both of its answers and ARIMA's
-  traffic detector keeps seeing changes in both directions.
+  traffic detector keeps seeing changes in both directions. They go to one service and drops
+  to the other because a traffic series with both loses the drops: ×5 surges widen its band,
+  which is symmetric, until the lower bound is below zero (about −500 requests per window on
+  checkout), and a ×0.1 drop to about 30 never falls under it. Before, the split by service
+  came from the story (the edge gets surges, the backends get drops) and kept each series
+  spiking one way without anyone writing down why.
 **Measured.** Offline, the share of web-gateway windows (50 rps, about 500 requests) at or
 above 25 % when *k* of their 10 seconds fail at the bad-deploy rate and the rest at 0.5 %;
 `opsgen.distributions`, 20,000 windows per cell, seed 1
@@ -2382,6 +2391,22 @@ k = 10 is the first window after a bad deploy. k = 1–3 is the window the rollb
 when an agent answers (about 1 s after detection, D-066). k = 5 is the window an expired
 incident ends in: at 0.40, 0.5 % of those are flagged again, with `last_change = ROLLBACK`,
 so the release agent answers OBSERVE.
+
+ARIMA on checkout and payments, offline (`scripts/tuning/research/shared_scheduler.py`, output
+in `.scratch/web-gateway-threshold/research/shared_scheduler.out`): the real generator through
+the AR(1) replica at the labs' settings (12/360/99.95), scored with `evaluate`'s code, 300 seeds
+× 3 h per run, same seeds, no fix:
+
+| Candidates | Inc/h | Mix BD/SURGE/DROP % | Bad deploys | Surges | Drops | Echoes, other FPs | Fresh /svc |
+|---|---|---|---|---|---|---|---|
+| Before, all three services scored (D-065 row C) | 55.9 | 44/19/37 | 100 % | 100 % | 100 % | 0, 0 | 0.05 |
+| Before, checkout and payments scored | 37.3 | 44/0/56 | 100 % | – | 100 % | 0, 0 | 0.04 |
+| All three types on both (rejected) | 57.9 | 28/36/36 | 100 % | 100 % | **1.6 %** | 0, 0 | 0.04 |
+| **Surges on checkout, drops on payments** | 37.3 | 44/28/28 | 100 % | 100 % | 100 % | 0, 0 | 0.04 |
+
+Every incident fixed at T+11 (an answer about 1 s after detection) gives the same recall and
+no echoes. The harness reproduces D-065's row C (55.9 an hour, 100 %, no echoes; fresh-start
+0.05 against 0.06).
 **Pending (live).** The time from a web-gateway bad deploy to its rollback; the release
 agent's answers to `ERROR_RATE_HIGH` (ROLLBACK, right target); ARIMA's recall, false alarms
 and echoes on checkout and payments with surges.
@@ -2391,6 +2416,16 @@ and echoes on checkout and payments with surges.
 `highest()`), `opsgen/simulation.py` (restores it, `state_snapshot` saves it),
 `opsgen/state.py` (docstring). Tests: `opsgen/tests/test_deployments.py` (no version
 reused after a rollback, numeric order), `opsgen/tests/test_engine.py` (a restart keeps the
-highest version; a state file from before D-067). The spec's other issues add theirs.
+highest version; a state file from before D-067).
+Issue 02 (the shared scheduler): `opsgen/engine.py` (`SHARED_SERVICES`, `CANDIDATES`, the
+docstring's rules and rate). `scripts/tuning/sweep.py` and `scripts/tuning/research/tune.py`
+score checkout and payments only (`ARIMA_SERVICES`; `tune.py`'s `TYPES_OF` follows the new
+candidates); `scripts/tuning/research/close_loop.py`'s scoring is split out as `score_run`
+(same output, checked on three scenarios) for the new `shared_scheduler.py`; the research
+README. Tests: `opsgen/tests/test_engine.py` (the candidates; web-gateway gets no shared
+incident; about 37 an hour; the gap/rest, chooser and resolve tests on checkout and payments),
+`opsgen/tests/test_simulation.py` and `opsgen/tests/test_output.py` (surges on checkout,
+drops on payments, two services open at once), `tests/test_tuning.py` (a quarter-hour's
+traffic bound). The spec's other issues add theirs.
 
 Amends D-056, D-057, D-058, D-060 and D-066.

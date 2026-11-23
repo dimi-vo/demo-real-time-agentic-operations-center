@@ -64,7 +64,9 @@ def test_sweep_simulation_windows_are_complete_and_scored():
     assert len(per_service) == 3
     for srows in per_service.values():
         assert len(srows) == 90  # 15 minutes of 10-second windows, none missing
-    assert 100 < rate < 125  # ~110 requests/s of traffic_count (D-059 means 50/30/30)
+    # ~110 requests/s of traffic_count at baseline (D-059 means 50/30/30); a quarter-hour run
+    # holds several surges on checkout and payments (D-067), which lift it.
+    assert 100 < rate < 140
     rep = score(apply_detector(rows, CURRENT), incidents, start, end - 100)
     assert sum(s.warmup_rows for s in rep.services.values()) == 3 * 13
 

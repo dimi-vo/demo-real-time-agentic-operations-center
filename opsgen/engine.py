@@ -6,7 +6,10 @@ incidents, mutates the `DeploymentState`s on deploys and rollbacks, and returns 
 ends an incident early on an agent's correct answer. All scheduling randomness comes from
 the single rng, drawn in a fixed order, so `--seed` reproduces the whole schedule.
 
-Rules (D-060, which amends D-042; D-065 amends both):
+Rules (D-060, which amends D-042; D-065 and D-067 amend both):
+- The schedule serves checkout (bad deploys and surges) and payments (bad deploys and drops),
+  D-067. web-gateway is a candidate of none: it deploys on its own clock. A traffic series
+  never gets both a surge and a drop: its band would widen too far to catch the drop.
 - Every service runs its own schedule: incidents on different services may overlap, and a
   service has at most one at a time. Each service has its own detector model (D-009), so
   overlap costs no accuracy.
@@ -19,8 +22,9 @@ Rules (D-060, which amends D-042; D-065 amends both):
   last one's scheduled end (start + `max_duration`), with a type whose rest is over. Rests
   are per service and type, measured from the scheduled end of that type's last incident on
   that service (`rests`, D-059). Counting from the scheduled end, not the actual one, keeps
-  the schedule the same however incidents end. The rests set the rate (about 56 an hour) and
-  keep the same metric's spikes on a service far enough apart for the detector.
+  the schedule the same however incidents end. The rests set the rate (about 37 an hour,
+  about 19 on each of the two services, D-067) and keep the same metric's spikes on a service far
+  enough apart for the detector.
 - At each boundary, while some service can start one: pick the type by weight among the
   types allowed now, then a random service allowed for it. Until all three types have
   happened, only types not seen yet are allowed, so the first three are one of each.
@@ -39,7 +43,6 @@ from dataclasses import dataclass, field
 
 from opsgen.deployments import DeploymentState
 from opsgen.distributions import ERROR_RATE
-from opsgen.services import service_names
 
 # Incident types, their weights, candidate services, trigger and expected action. Every
 # type has exactly one expected action, whatever the service (D-043).
@@ -49,10 +52,15 @@ UPSTREAM_DROP = "UPSTREAM_DROP"
 
 INCIDENT_TYPES = (BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP)
 INCIDENT_WEIGHTS = {BAD_DEPLOY: 0.50, TRAFFIC_SURGE: 0.25, UPSTREAM_DROP: 0.25}
+# D-067: the shared scheduler serves checkout and payments only; web-gateway is a candidate of
+# none (it gets its own deploy clock). Surges and drops stay on different services: a traffic
+# series that has both gets a band so wide (it is symmetric) that a drop no longer falls below
+# it. Offline, with both types on both services, 1.6 % of drops were caught.
+SHARED_SERVICES = ("checkout", "payments")
 CANDIDATES = {
-    BAD_DEPLOY: tuple(service_names()),
-    TRAFFIC_SURGE: ("web-gateway",),
-    UPSTREAM_DROP: ("checkout", "payments"),
+    BAD_DEPLOY: SHARED_SERVICES,
+    TRAFFIC_SURGE: ("checkout",),
+    UPSTREAM_DROP: ("payments",),
 }
 TRIGGER = {BAD_DEPLOY: "LATENCY_HIGH", TRAFFIC_SURGE: "TRAFFIC_HIGH", UPSTREAM_DROP: "TRAFFIC_LOW"}
 EXPECTED_ACTION = {BAD_DEPLOY: "ROLLBACK", TRAFFIC_SURGE: "SCALE_OUT", UPSTREAM_DROP: "INVESTIGATE_UPSTREAM"}
@@ -84,7 +92,8 @@ def _first_tick_of_window(now: float) -> bool:
 # The time a service waits, from the scheduled end of an incident of a type, before it can
 # have that type again, the same on every service (D-059). The detector trains on its spike
 # windows: too many of them on one metric and its band outgrows the next spike. These rests
-# keep every type caught and land on about 56 incidents an hour (D-065); the long bad-deploy
+# keep every type caught and land on about 19 incidents an hour per service: 56 on three
+# services (D-065), 37 on D-067's two. The long bad-deploy
 # rest brings the rate down without making traffic spikes rarer, which would add after-spike
 # false alarms.
 RESTS = {BAD_DEPLOY: 390.0, TRAFFIC_SURGE: 300.0, UPSTREAM_DROP: 300.0}

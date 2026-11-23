@@ -124,8 +124,8 @@ def _run(sim: Simulation, ticks: range) -> dict[str, list[dict]]:
 @pytest.mark.parametrize(
     ("itype", "service", "traffic_mult", "latency_mult"),
     [
-        (TRAFFIC_SURGE, "web-gateway", engine.SURGE_LAMBDA_MULT, 1.0),  # no latency effect (D-059)
-        (UPSTREAM_DROP, "checkout", engine.DROP_LAMBDA_MULT, 1.0),
+        (TRAFFIC_SURGE, "checkout", engine.SURGE_LAMBDA_MULT, 1.0),  # no latency effect (D-059)
+        (UPSTREAM_DROP, "payments", engine.DROP_LAMBDA_MULT, 1.0),
         (BAD_DEPLOY, "payments", 1.0, engine.BAD_DEPLOY_LATENCY_MULT),
     ],
     ids=["surge", "drop", "bad_deploy"],
@@ -275,7 +275,7 @@ def test_incident_ends_on_a_tick_at_the_logged_ended_at():
 # --- resolving an incident (D-065) ---------------------------------------------
 
 AGENT_FOR_TRIGGER = {"LATENCY_HIGH": "release_agent", "TRAFFIC_HIGH": "capacity_agent", "TRAFFIC_LOW": "capacity_agent"}
-ONE_OF_EACH = [(BAD_DEPLOY, "payments"), (TRAFFIC_SURGE, "web-gateway"), (UPSTREAM_DROP, "checkout")]
+ONE_OF_EACH = [(BAD_DEPLOY, "payments"), (TRAFFIC_SURGE, "checkout"), (UPSTREAM_DROP, "payments")]
 
 
 def _resolved_on_tick_17(itype, svc):

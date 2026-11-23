@@ -45,6 +45,17 @@ _DEFAULTS = _defaults()
 START_BASE = 1_800_000_000.0  # a 10-second boundary
 
 
+def _arima_services() -> tuple[str, ...]:
+    import opsgen.engine as eng
+
+    return eng.SHARED_SERVICES
+
+
+# The services ARIMA scores: the shared scheduler's (labs 2.3-2.5 filter to them). web-gateway
+# is detected by an error-rate threshold instead (D-067), so its rows are left out of scoring.
+ARIMA_SERVICES = _arima_services()
+
+
 @dataclass(frozen=True)
 class DataConfig:
     rates: tuple[tuple[str, float], ...] = ()  # service -> traffic mean (per second) overrides
@@ -168,6 +179,8 @@ def apply_detector(rows: list[HealthRow], cfg: DetectorConfig) -> list[HealthRow
 def run_one(args: tuple[DataConfig, DetectorConfig, int, float]) -> dict:
     data, cfg, seed, hours = args
     rows, incidents, start, end, rate = simulate(data, seed, hours)
+    rows = [r for r in rows if r.service_name in ARIMA_SERVICES]
+    incidents = [i for i in incidents if i.service_name in ARIMA_SERVICES]
     rep = score(apply_detector(rows, cfg), incidents, start, end - 100)
     out = {"rate": rate, "types": [], "drops": [], "fp": [], "hours": {}, "fresh": {}}
     for r in rep.incidents:

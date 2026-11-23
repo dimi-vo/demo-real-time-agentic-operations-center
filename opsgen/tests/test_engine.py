@@ -14,6 +14,7 @@ from opsgen.engine import (
     CANDIDATES,
     INCIDENT_TYPES,
     INCIDENT_WEIGHTS,
+    SHARED_SERVICES,
     TRAFFIC_SURGE,
     UPSTREAM_DROP,
     WINDOW_SECONDS,
@@ -115,7 +116,16 @@ def test_never_two_incidents_at_once_on_a_service(seed):
             assert open_on[e.service_name] == 1, e
         elif e.kind == "incident_end":
             open_on[e.service_name] -= 1
-    assert len(open_on) == 3
+    assert set(open_on) == set(SHARED_SERVICES)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_the_shared_scheduler_never_starts_an_incident_on_web_gateway(seed):
+    # D-067: web-gateway deploys on its own clock. The shared scheduler serves checkout (bad
+    # deploys and surges) and payments (bad deploys and drops).
+    events, _, _ = _run(Config(), seed=seed, horizon=3 * 3600)
+    by_service = {svc: {i.type for i in incs} for svc, incs in _by_service(_incidents(events)).items()}
+    assert by_service == {"checkout": {BAD_DEPLOY, TRAFFIC_SURGE}, "payments": {BAD_DEPLOY, UPSTREAM_DROP}}
 
 
 @pytest.mark.parametrize("seed", range(5))
@@ -154,18 +164,18 @@ def test_the_first_three_incidents_are_one_of_each_type():
     assert len(orders) >= 4, orders
 
 
-def test_about_56_incidents_an_hour():
-    # D-065: the 35 s cap, with gap and rests dated from its scheduled end, takes D-059's 59
-    # an hour down to about 56. These seeds give 54 in the first hour for every one and 57 an
-    # hour at steady state (hours 2 and 3 of a 3-hour run): 56 over 3 hours, as offline (55.9).
+def test_about_37_incidents_an_hour():
+    # About 19 an hour per service: D-065 had 56 on three services, D-067 leaves two
+    # (checkout and payments). These seeds give 36 in the first hour for every one and 38 an
+    # hour at steady state (hours 2 and 3 of a 3-hour run).
     first_hour, steady = [], []
     for seed in range(20):
         events, _, _ = _run(Config(), seed=seed, horizon=3 * 3600)
         starts = [i.degradation_start for i in _incidents(events)]
         first_hour.append(sum(t < 3600 for t in starts))
         steady.append(sum(t >= 3600 for t in starts) / 2)
-    assert all(51 <= n <= 57 for n in first_hour), first_hour
-    assert 54 <= sum(steady) / len(steady) <= 60, steady
+    assert all(34 <= n <= 39 for n in first_hour), first_hour
+    assert 36 <= sum(steady) / len(steady) <= 40, steady
 
 
 def test_bad_deploy_lifecycle_and_rollback():
@@ -214,30 +224,30 @@ def test_the_cap_ends_an_incident_mid_window():
 
 def test_gap_and_rests_count_from_the_scheduled_end():
     # D-065: an incident that ends early leaves the schedule as it was. Cut a surge on
-    # web-gateway to 10 s by hand: the service's next incident still waits for the gap after
+    # checkout to 10 s by hand: the service's next incident still waits for the gap after
     # start + 35 s, and its next surge for the surge's rest after start + 35 s.
     eng = _past_first_three(Engine(rng=random.Random(0), start=0.0, config=Config(quiet_period=0)))
     deployments = _deployments()
     real_choice = eng._choose_incident
-    _force(eng, TRAFFIC_SURGE, "web-gateway")
+    _force(eng, TRAFFIC_SURGE, "checkout")
     eng.tick(0.0, deployments)
     eng._choose_incident = real_choice
-    surge = eng.active["web-gateway"]
+    surge = eng.active["checkout"]
     assert surge.scheduled_end == 35
     surge.degradation_end = 10.0
-    on_gateway = []
+    on_checkout = []
     for k in range(1, 400):
         started = _incidents(eng.tick(float(k), deployments))
-        on_gateway += [(i.type, i.degradation_start) for i in started if i.service_name == "web-gateway"]
+        on_checkout += [(i.type, i.degradation_start) for i in started if i.service_name == "checkout"]
     # Dated from the real end (10 s), the gap would allow a bad deploy at 30 and the rest a
     # surge at 310.
-    assert on_gateway[:2] == [(BAD_DEPLOY, 60.0), (TRAFFIC_SURGE, 340.0)]
+    assert on_checkout[:2] == [(BAD_DEPLOY, 60.0), (TRAFFIC_SURGE, 340.0)]
 
 
 # --- resolving an incident (D-065) ---------------------------------------------
 
 AGENT_FOR_TRIGGER = {"LATENCY_HIGH": "release_agent", "TRAFFIC_HIGH": "capacity_agent", "TRAFFIC_LOW": "capacity_agent"}
-ONE_OF_EACH = [(BAD_DEPLOY, "payments"), (TRAFFIC_SURGE, "web-gateway"), (UPSTREAM_DROP, "checkout")]
+ONE_OF_EACH = [(BAD_DEPLOY, "payments"), (TRAFFIC_SURGE, "checkout"), (UPSTREAM_DROP, "payments")]
 
 
 def _started(itype, svc):
@@ -293,10 +303,10 @@ def test_a_correct_decision_ends_its_incident_on_the_tick_that_reads_it(itype, s
     [
         (BAD_DEPLOY, "payments", "OBSERVE"),
         (BAD_DEPLOY, "payments", "INVALID"),
-        (TRAFFIC_SURGE, "web-gateway", "OBSERVE"),
-        (TRAFFIC_SURGE, "web-gateway", "INVESTIGATE_UPSTREAM"),  # the wrong capacity action
-        (UPSTREAM_DROP, "checkout", "INVALID"),
-        (UPSTREAM_DROP, "checkout", "SCALE_OUT"),  # the wrong capacity action
+        (TRAFFIC_SURGE, "checkout", "OBSERVE"),
+        (TRAFFIC_SURGE, "checkout", "INVESTIGATE_UPSTREAM"),  # the wrong capacity action
+        (UPSTREAM_DROP, "payments", "INVALID"),
+        (UPSTREAM_DROP, "payments", "SCALE_OUT"),  # the wrong capacity action
     ],
 )
 def test_any_other_action_leaves_the_incident_running_to_its_cap(itype, svc, action):
@@ -308,8 +318,8 @@ def test_any_other_action_leaves_the_incident_running_to_its_cap(itype, svc, act
 
 
 def test_a_correct_answer_on_a_later_window_still_resolves_it():
-    eng, deployments, _ = _started(TRAFFIC_SURGE, "web-gateway")
-    inc = eng.active["web-gateway"]
+    eng, deployments, _ = _started(TRAFFIC_SURGE, "checkout")
+    inc = eng.active["checkout"]
     decisions = {13: [_answer(inc, window_end=10.0, action="OBSERVE")], 23: [_answer(inc, window_end=20.0)]}
     [end] = _tick_through(eng, deployments, range(1, 40), decisions)
     assert end.now == inc.degradation_end == 23.0
@@ -335,8 +345,8 @@ def test_a_decision_that_does_not_match_the_incident_is_ignored(changes):
 
 
 def test_only_the_first_correct_decision_resolves_it():
-    eng, deployments, _ = _started(UPSTREAM_DROP, "checkout")
-    inc = eng.active["checkout"]
+    eng, deployments, _ = _started(UPSTREAM_DROP, "payments")
+    inc = eng.active["payments"]
     assert eng.resolve(_answer(inc, window_end=10.0), 17.0) is True
     # a second correct answer read on the same tick, and another after the incident ended
     assert eng.resolve(_answer(inc, window_end=20.0, agent_name="someone_else"), 17.0) is False
@@ -346,8 +356,8 @@ def test_only_the_first_correct_decision_resolves_it():
 
 
 def test_a_correct_decision_after_the_incident_expired_is_ignored():
-    eng, deployments, _ = _started(UPSTREAM_DROP, "checkout")
-    inc = eng.active["checkout"]
+    eng, deployments, _ = _started(UPSTREAM_DROP, "payments")
+    inc = eng.active["payments"]
     [end] = _tick_through(eng, deployments, range(1, 36))
     assert end.now == 35.0
     assert eng.resolve(_answer(inc, window_end=40.0), 41.0) is False
@@ -370,7 +380,7 @@ def test_the_schedule_is_the_same_whether_incidents_are_resolved_or_not():
         return out
 
     never = starts(None)
-    assert len(never) > 150
+    assert len(never) > 100  # about 37 an hour (D-067)
     assert starts(15) == never
 
 
@@ -413,24 +423,22 @@ def _past_first_three(eng):
 def test_choose_incident_skips_a_type_still_resting():
     eng = _past_first_three(Engine(rng=random.Random(0), start=0.0))
     now = 1000.0
-    # web-gateway is the only surge candidate; its surge ended 100 s ago (rest 300 s).
-    eng.last_incident_end["web-gateway"] = eng.last_type_end[("web-gateway", TRAFFIC_SURGE)] = now - 100
+    # checkout is the only surge candidate; its surge ended 100 s ago (rest 300 s).
+    eng.last_incident_end["checkout"] = eng.last_type_end[("checkout", TRAFFIC_SURGE)] = now - 100
     picks = [eng._choose_incident(now) for _ in range(500)]
     assert all(p is not None for p in picks)
     assert all(p[0] != TRAFFIC_SURGE for p in picks)
-    assert ("web-gateway", BAD_DEPLOY) in {(svc, t) for t, svc in picks}  # its other type is allowed
+    assert ("checkout", BAD_DEPLOY) in {(svc, t) for t, svc in picks}  # its other type is allowed
 
 
 def test_choose_incident_skips_a_service_mid_incident_or_in_its_gap():
     eng = _past_first_three(Engine(rng=random.Random(0), start=0.0))
     now = 1000.0
-    eng.active["checkout"] = _incident(UPSTREAM_DROP, "checkout", start=now - 10)
-    eng.last_incident_end["payments"] = now - 10  # within the 20 s gap
-    picks = {eng._choose_incident(now) for _ in range(500)}
-    assert {svc for _, svc in picks} == {"web-gateway"}
-    eng.last_incident_end["web-gateway"] = now - 19
-    assert eng._choose_incident(now) is None
-    assert eng._choose_incident(now + 1) is not None  # web-gateway's gap is over
+    eng.active["checkout"] = _incident(TRAFFIC_SURGE, "checkout", start=now - 10)
+    eng.last_incident_end["payments"] = now - 19  # within the 20 s gap
+    assert eng._choose_incident(now) is None  # and web-gateway is never a candidate
+    picks = {eng._choose_incident(now + 1) for _ in range(500)}
+    assert {svc for _, svc in picks} == {"payments"}  # payments' gap is over
 
 
 def test_choose_incident_draws_the_type_by_weight():
@@ -440,7 +448,7 @@ def test_choose_incident_draws_the_type_by_weight():
     for itype, weight in INCIDENT_WEIGHTS.items():
         share = sum(t == itype for t, _ in picks) / len(picks)
         assert share == pytest.approx(weight, abs=0.02), (itype, share)
-    assert {svc for t, svc in picks if t == BAD_DEPLOY} == set(service_names())
+        assert {svc for t, svc in picks if t == itype} == set(CANDIDATES[itype])
 
 
 def test_choose_incident_only_unseen_types_until_all_three_have_happened():
@@ -463,12 +471,13 @@ def test_every_incident_has_exactly_one_expected_action(itype, svc):
 
 
 def test_incident_candidates_match_spec():
-    # D-056: three services. Surges only on web-gateway, drops on checkout and payments,
-    # bad deploys on all three.
+    # D-056, D-067: three services. The shared scheduler serves checkout and payments only
+    # (web-gateway deploys on its own clock): bad deploys on both, surges on checkout, drops on
+    # payments. A surge and a drop never share a traffic series.
     assert set(service_names()) == {"web-gateway", "checkout", "payments"}
-    assert CANDIDATES[TRAFFIC_SURGE] == ("web-gateway",)
-    assert set(CANDIDATES[UPSTREAM_DROP]) == {"checkout", "payments"}
-    assert set(CANDIDATES[BAD_DEPLOY]) == {"web-gateway", "checkout", "payments"}
+    assert SHARED_SERVICES == ("checkout", "payments")
+    assert CANDIDATES == {BAD_DEPLOY: SHARED_SERVICES, TRAFFIC_SURGE: ("checkout",), UPSTREAM_DROP: ("payments",)}
+    assert not set(CANDIDATES[TRAFFIC_SURGE]) & set(CANDIDATES[UPSTREAM_DROP])
 
 
 def test_incident_numbering_continues_after_a_restart(tmp_path):

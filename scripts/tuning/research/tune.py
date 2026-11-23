@@ -40,11 +40,16 @@ SHORT = {"BAD_DEPLOY": "BD", "TRAFFIC_SURGE": "SURGE", "UPSTREAM_DROP": "DROP"}
 TRIGGER = {"BAD_DEPLOY": "LATENCY_HIGH", "TRAFFIC_SURGE": "TRAFFIC_HIGH", "UPSTREAM_DROP": "TRAFFIC_LOW"}
 WEIGHTS = {"BAD_DEPLOY": 0.5, "TRAFFIC_SURGE": 0.25, "UPSTREAM_DROP": 0.25}
 SERVICES = ("web-gateway", "checkout", "payments")
+# D-067: checkout gets bad deploys and surges, payments bad deploys and drops; web-gateway
+# deploys on its own clock and is detected by an error-rate threshold, so it is not scored
+# here (D-059/D-060 had web-gateway BAD_DEPLOY + TRAFFIC_SURGE, the others BAD_DEPLOY +
+# UPSTREAM_DROP).
 TYPES_OF = {
-    "web-gateway": ("BAD_DEPLOY", "TRAFFIC_SURGE"),
-    "checkout": ("BAD_DEPLOY", "UPSTREAM_DROP"),
+    "web-gateway": (),
+    "checkout": ("BAD_DEPLOY", "TRAFFIC_SURGE"),
     "payments": ("BAD_DEPLOY", "UPSTREAM_DROP"),
 }
+ARIMA_SERVICES = tuple(s for s in SERVICES if TYPES_OF[s])
 MEDIAN = {"web-gateway": 35.0, "checkout": 140.0, "payments": 220.0}
 GRID = (0, 60, 120, 180, 240, 300, 420, 600, 900, 1200)
 
@@ -223,7 +228,7 @@ def run_demo(args):
     det = c.det()
     rows = []
     data = (c.means, c.surge, c.drop, c.bd, c.dur)  # the data seed ignores the detector
-    for s in SERVICES:
+    for s in ARIMA_SERVICES:
         mine = [(int((st - START) // W), t) for t, sv, st, _ in incs if sv == s]
         rows += detect_rows(s, windows(s, c, n, mine, rng_for("d", data, seed, s)), det)
     incidents = [Incident(f"I{i}", t, s, st, en, TRIGGER[t], "") for i, (t, s, st, en) in enumerate(incs)]

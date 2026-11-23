@@ -130,7 +130,13 @@ def one(args: tuple[str, int, float]) -> dict:
     key, seed, hours = args
     sc = SCENARIOS[key]
     rows, incidents, start, end, _ = simulate(sc, seed, hours)
-    scored = sw.apply_detector(rows, dataclasses.replace(sw.CURRENT, confidence=sc.confidence))
+    return score_run(rows, incidents, start, end, sc.confidence)
+
+
+def score_run(rows, incidents, start: float, end: float, confidence: float) -> dict:
+    """One run's window rows through the replica at `confidence`, scored with evaluate's code;
+    the per-run counts `summarize` adds up. Also used by `shared_scheduler.py` (D-067)."""
+    scored = sw.apply_detector(rows, dataclasses.replace(sw.CURRENT, confidence=confidence))
     rep = det.score(scored, incidents, start, end - 100)
     by_svc: dict[str, list[det.HealthRow]] = defaultdict(list)
     for r in scored:

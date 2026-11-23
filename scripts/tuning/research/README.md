@@ -43,6 +43,7 @@ Runs are seeded, so the same arguments print the same numbers. The scripts use e
 | `window_phi.py` | Which AR(1) coefficient does the detector fit at each window size? | real generator |
 | `live_recovery.py` | Live vs replica: how much does the band widen after an incident, and how fast does it recover? | a live `service_health` dump |
 | `live_surge_end.py` | Live vs replica, window by window, around the end of each incident | a live `service_health` dump |
+| `shared_scheduler.py` | With web-gateway out of the shared scheduler, which candidates keep every incident caught on checkout and payments? (D-067) | real generator |
 | `sampler.py` | (library) One 10-s window of the per-second `service_metrics` model | - |
 
 ### `tune.py`: data × detector settings
@@ -131,8 +132,9 @@ Once a setup is chosen, carry it into the code: means in `opsgen/services.py`, s
 `max_duration` and rests in `opsgen/engine.py`, detector settings in `sql/2.3_*.sql` and
 `sql/2.4_service_health.sql`. Then confirm it on the real
 generator with `scripts.tuning.sweep` and live with `evaluate`. `tune.py`'s service constants
-(`MEDIAN`, `TYPES_OF`, `WEIGHTS`) and `sampler.py` mirror the simulator as of D-059/D-060.
-Update them if the simulator's model changes.
+(`MEDIAN`, `TYPES_OF`, `WEIGHTS`) and `sampler.py` mirror the simulator: D-059/D-060, with
+D-067's candidates (checkout gets bad deploys and surges, payments bad deploys and drops;
+web-gateway is not scored, it is detected by an error-rate threshold). Update them if the simulator's model changes.
 
 ### `tune_diag.py`: where false alarms come from
 
