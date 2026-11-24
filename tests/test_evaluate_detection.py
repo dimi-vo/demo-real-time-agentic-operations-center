@@ -84,9 +84,9 @@ def test_signals_inside_span_are_not_false_positives_outside_are():
 def test_echo_tag_only_in_the_minute_after_an_incident():
     # D-057: no tag for a recent deploy. Every deploy is a bad deploy (inside its span)
     # or its rollback (at the incident's end, where the echo minute starts).
-    rows = _series("web-gateway", 400, {46: {"trf": "LOW"}, 200: {"lat": "HIGH", "ssd": 15}})
-    rep = _score(rows, [_inc("web-gateway", 40, 0, 55, trigger="TRAFFIC_HIGH", typ="TRAFFIC_SURGE")])
-    tags = {fp.row.window_start: fp.tag for fp in rep.services["web-gateway"].false_positives}
+    rows = _series("payments", 400, {46: {"trf": "HIGH"}, 200: {"lat": "HIGH", "ssd": 15}})
+    rep = _score(rows, [_inc("payments", 40, 0, 55, trigger="TRAFFIC_LOW", typ="UPSTREAM_DROP")])
+    tags = {fp.row.window_start: fp.tag for fp in rep.services["payments"].false_positives}
     assert tags == {T0 + 460: "echo", T0 + 2000: ""}
 
 
@@ -200,11 +200,11 @@ def test_evaluate_reads_what_the_generator_emits():
 
 
 def test_opposite_signal_in_the_end_window_is_an_echo_not_wrong_direction():
-    # surge from window 40 to 45.5: window 45 holds the return to normal
-    inc = _inc("web-gateway", 40, 0, 55, trigger="TRAFFIC_HIGH", typ="TRAFFIC_SURGE")
-    r = _score(_series("web-gateway", 60, {40: {"trf": "HIGH"}, 45: {"trf": "LOW"}}), [inc]).incidents[0]
+    # drop from window 40 to 45.5: window 45 holds the return to normal
+    inc = _inc("payments", 40, 0, 55, trigger="TRAFFIC_LOW", typ="UPSTREAM_DROP")
+    r = _score(_series("payments", 60, {40: {"trf": "LOW"}, 45: {"trf": "HIGH"}}), [inc]).incidents[0]
     assert r.status == DETECTED and not r.wrong_direction
-    assert r.other_signals == [(6, "TRAFFIC_LOW", True)]
+    assert r.other_signals == [(6, "TRAFFIC_HIGH", True)]
 
 
 def test_fractional_ended_at_takes_effect_at_the_next_tick():
