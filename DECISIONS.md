@@ -2331,7 +2331,9 @@ review: the consumer stays.
 **Amended by D-068.** The wall takes the frame of `inspiration/Ops wall redesign.html`: one
 full-width row per service with an Issues panel, the dotted background, Geist and the
 design's palette. The summary table, the legend and the Confluent logo go. checkout's row
-shows its ticket sources, its ticket list and the two agents' lanes.
+shows its ticket sources, its ticket list and the two agents' lanes. The charts keep their
+token names on the nearest new colours: detection is blue `#8FB8FF`, answers amber
+`#F5B544`, and the incident boxes take the red `--crit`, since purple's nearest is that blue.
 
 ### D-067 · DECISION · web-gateway is detected by an error-rate threshold
 **What.** Every service was detected the same way: `ML_DETECT_ANOMALIES` (ARIMA) on
@@ -2872,6 +2874,39 @@ options). `uv run ops-sim --dry-run --simulate 15 --seed 1`: 63 tickets, the fir
 (P1 7 HIGH and 8 LOW, P2 24, P3 24; ROLLBACK 2, SCALE_OUT 2, INVESTIGATE_UPSTREAM 3). Leaving
 out the ticket lines, the banner (which now names the ticket clock) and the closing summary,
 the output is the same as issue 02's for that seed line for line, metric values included.
+
+Issue 08 (the design's frame and the Issues panels): `scripts/opswall/state.py` (each service
+in the snapshot gets `issues`, over the incidents that *started* in the last 10 minutes, so an
+incident cut by the chart's left edge is drawn but not counted: `injected`; `detected`, an
+owned block and not missed, so a missed incident whose run is still drawn counts as missed
+only; `missed`; `medianTimeToDetect`; `medianTimeToRemediate`, start → the first answer of
+its blocks, both medians over answered incidents; a ticket service's come from
+`_ticket_issues`, zeros until issue 09; the global `summary` and `_summary` gone, nothing else
+read them; the docstring), `static/index.html` (the design's header: "Ops wall", "Releases,
+incidents and live signals", "Updated hh:mm:ss" and the lamp, Live, Connecting… or
+Reconnecting…; one `#rows` container; the summary table, the legend and the Confluent logo
+gone), `static/opswall.css` (rewritten: the design's palette, the dotted page, the panels and
+their "+" corner marks, a row of a main panel and a 200-px Issues panel that moves below the
+row under 1000 px with its four numbers side by side; the chart tokens keep their names on the
+nearest new colour, `--metric` `#8B919B`, `--cyan` `#8FB8FF`, `--amber` `#F5B544`, and the
+incident boxes take `--crit`, because D-066's purple is nearest the blue detection already
+holds; every chart mark is OKLab ΔE ≥ 15 from the others, 15.7 between the line and detection
+at the closest; an anomaly turns the main panel's border red), `static/opswall.js` (a row per
+service with its Issues panel, durations "6s" and "1m 05s" as the design writes them, "—"
+with none; checkout's row hides its chart body; the clock on the 24-hour clock; the summary
+code gone; the charts, tooltips, keyboard stops and in-place updates unchanged),
+`static/fonts/` (`geist.woff2` and `geist-mono.woff2`, variable 400–700, copied from the
+design file's bundle; `LICENSE.md` carries its OFL comment; the three Plex files gone),
+`static/confluent-logo.svg` gone (the favicon stays). Tests: `tests/test_opswall_state.py`
+(each service's `issues`; remediation is start → answer; a missed incident is missed and not
+detected; an open one is injected only; only incidents started in the last 10 minutes; no
+global summary; checkout's panel reads zeros; a false alarm counts nowhere; the summary tests
+gone), `tests/test_opswall_server.py` (the snapshot's shape). Offline render in headless
+Chrome at 1440 and 820 px (`.scratch/checkout-tickets/research/issue08_wall_render.py`): the
+frame lands on the design's coordinates, with web-gateway 4 of 4, payments 3 of 4 with "1
+missed" (its stand-in agents sat out one incident on purpose) and checkout at zeros; a box's
+hover tooltip and a mark's keyboard focus work, and the focused node and the boxes survive the
+next snapshots.
 
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.

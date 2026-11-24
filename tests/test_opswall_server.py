@@ -60,6 +60,8 @@ def test_websocket_sends_a_snapshot_on_connect(client):
         snap = json.loads(payload)
         assert snap["axisSeconds"] == 600
         assert isinstance(snap["services"], list) and len(snap["services"]) == 3
-        assert snap["summary"]["injected"] == 0
+        assert "summary" not in snap  # each row has its own Issues panel (D-068)
         for s in snap["services"]:
             assert "blocks" in s and "groundTruth" in s
+            assert s["issues"] == {"injected": 0, "detected": 0, "missed": 0,
+                                   "medianTimeToDetect": None, "medianTimeToRemediate": None}
