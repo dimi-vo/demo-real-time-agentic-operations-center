@@ -24,17 +24,18 @@ from scripts.common import deployment_meta as meta
 from scripts.common.credentials import set_active_card
 from scripts.common.flink import FlinkSession, list_tables, model_exists
 from scripts.common.login_checks import confluent_logged_in
+from scripts.common.topics import OUTPUT_TOPICS, SOURCE_TOPICS
 from scripts.common.ui import confirm
 from scripts.preprovisioned import keys, lookup
 
 PREFIX = "DEMO"
 KEY_LOCATION = "Console → API keys → My account"
 MODEL_NAME = "llm_textgen_model"
-# The generator writes these; checkout's tickets and their answer key since D-068.
-SOURCE_TABLES = ("service_metrics", "service_deployments", "service_incidents", "support_tickets", "ticket_answer_key")
-# The labs fill these with INSERT statements; the platform team's Terraform creates them (D-050).
-# Section 5's P1 tickets and the classifier's verdicts since D-068.
-OUTPUT_TABLES = ("service_error_rate", "service_health", "remediation_decisions", "p1_tickets", "ticket_triage")
+# Each table is its topic's: the generator writes the sources, and the labs fill the outputs
+# with INSERT statements; the platform team's Terraform creates all ten (D-050). The lists are
+# `reset`'s (scripts/common/topics.py).
+SOURCE_TABLES = SOURCE_TOPICS
+OUTPUT_TABLES = OUTPUT_TOPICS
 PLATFORM_TABLES = SOURCE_TABLES + OUTPUT_TABLES
 
 CARD_FIELDS = {

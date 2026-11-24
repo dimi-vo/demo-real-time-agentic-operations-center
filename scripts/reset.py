@@ -18,10 +18,12 @@ Troubleshooting only; the continuous workshop never needs it in the normal flow.
 The output tables are the platform team's (Terraform creates them, D-050), so they are
 emptied, never dropped: a dropped table would not come back. Nothing is rebuilt
 automatically afterwards: run the lab INSERTs again. `--keep-source` skips the five source
-topics in step 4; the output topics are always emptied, because they would otherwise
-hold duplicates once their INSERTs run again. Everything reports whether it worked;
-anything that didn't exits nonzero. To clear only the detection and the agents' output,
-use `uv run reset-health`.
+topics in step 4 and keeps the state file in step 5: the kept topics hold the incidents,
+versions and tickets it counts past, so the next ops-sim never reuses an incident id (D-046),
+a version (D-067) or a ticket id (D-068) next to them. The output topics are always emptied,
+because they would otherwise hold duplicates once their INSERTs run again. Everything reports
+whether it worked; anything that didn't exits nonzero. To clear only the detection and the
+agents' output, use `uv run reset-health`.
 """
 
 from __future__ import annotations
@@ -106,7 +108,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--keep-source",
         action="store_true",
-        help="Keep the accumulated data in the five source topics (the output topics are always emptied)",
+        help="Keep the accumulated data in the five source topics, and the generator state that numbers past it "
+        "(the output topics are always emptied)",
     )
     parser.add_argument("--force", action="store_true", help="Reset even if a local ops-sim seems to be running")
     args = parser.parse_args(argv)
@@ -132,10 +135,13 @@ def main(argv: list[str] | None = None) -> None:
         problems += empty_topics(card, SOURCE_TOPICS, "Emptying the source topics...")
     problems += empty_topics(card, OUTPUT_TOPICS, "Emptying the output topics (the tables stay)...")
 
-    # Local generator state (the ground truth lives in service_incidents and ticket_answer_key,
-    # emptied above).
-    state_path(root).unlink(missing_ok=True)
-    print("\nDeleted the generator's persisted state.")
+    # Local generator state: its counters number past what the source topics hold, so it goes
+    # with them (the ground truth lives in service_incidents and ticket_answer_key).
+    if args.keep_source:
+        print("\nKept the generator's persisted state, so ops-sim numbers past the kept source topics.")
+    else:
+        state_path(root).unlink(missing_ok=True)
+        print("\nDeleted the generator's persisted state.")
 
     if problems:
         print("\nReset finished with problems: " + "; ".join(problems))

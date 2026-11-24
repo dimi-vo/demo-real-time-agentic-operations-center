@@ -118,12 +118,27 @@ def test_a_missing_topic_is_reported_and_exits_nonzero(run_reset, capsys):
     assert "Topic service_health: cleared" in out  # the others are still emptied
 
 
-def test_deletes_the_generator_state_file(run_reset, tmp_path):
-    path = state_path(tmp_path)
+def _state_file(root):
+    path = state_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{}")
+    path.write_text('{"incident_counter": 7, "next_ticket_numbers": {"ZENDESK": 48231, "SERVICENOW": 41889}}')
+    return path
+
+
+def test_deletes_the_generator_state_file(run_reset, tmp_path):
+    path = _state_file(tmp_path)
     run_reset()
     assert not path.exists()
+
+
+def test_keep_source_keeps_the_generator_state_file(run_reset, tmp_path, capsys):
+    # The kept source topics hold the incidents, versions and tickets the file counts past, so
+    # deleting it would make the next ops-sim reuse their ids next to them (D-046, D-067, D-068).
+    path = _state_file(tmp_path)
+    before = path.read_text()
+    run_reset("--keep-source")
+    assert path.read_text() == before
+    assert "Kept the generator's persisted state" in capsys.readouterr().out
 
 
 def test_refuses_while_a_local_ops_sim_runs(install_fakes, monkeypatch, capsys):
