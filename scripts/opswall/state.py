@@ -85,9 +85,8 @@ TRIGGERS = (
     Trigger("TRAFFIC_LOW", "traffic", "down", "health", "traffic_status", "LOW", "traffic low"),
     Trigger("ERROR_RATE_HIGH", "errors", "up", "error_rates", "error_status", "HIGH", "error rate high"),
 )
-INCIDENT_METRIC = {
+INCIDENT_METRIC = {  # no TRAFFIC_SURGE: surges are retired (D-068)
     "BAD_DEPLOY": "latency",
-    "TRAFFIC_SURGE": "traffic",
     "UPSTREAM_DROP": "traffic",
     "BAD_DEPLOY_ERRORS": "errors",
 }

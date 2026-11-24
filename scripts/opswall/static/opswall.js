@@ -89,7 +89,6 @@ const range = (a, b) => `${ago(a)} to ${ago(b)}, ${dur(Math.min(b, AXIS) - a)}`;
 const human = t => ({
   BAD_DEPLOY: "Bad deploy",
   BAD_DEPLOY_ERRORS: "Bad deploy (errors)",
-  TRAFFIC_SURGE: "Traffic surge",
   UPSTREAM_DROP: "Upstream drop",
 }[t] || t.toLowerCase().replace(/_/g, " ").replace(/^./, c => c.toUpperCase()));
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;

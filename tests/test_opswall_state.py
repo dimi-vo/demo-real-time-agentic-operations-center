@@ -145,6 +145,15 @@ def test_health_rows_alone_draw_no_line():
 # --- incidents ----------------------------------------------------------------
 
 
+def test_the_wall_knows_the_chart_of_every_incident_type_the_simulator_starts_and_no_other():
+    # D-068: surges are retired, so TRAFFIC_SURGE leaves the map with the engine's types.
+    from opsgen import engine
+    from scripts.opswall.state import INCIDENT_METRIC
+
+    assert set(INCIDENT_METRIC) == {*engine.INCIDENT_TYPES, engine.BAD_DEPLOY_ERRORS}
+    assert INCIDENT_METRIC[engine.UPSTREAM_DROP] == "traffic"
+
+
 def test_start_record_opens_the_box_end_record_closes_it():
     st = OpsWallState()
     _incident(st, "checkout", NOW - 200)
@@ -433,17 +442,17 @@ def test_the_summary_counts_verdicts_and_takes_medians_over_answered_incidents()
     _incident(st, "checkout", T0, T0 + 40, iid="INC-A")
     _health(st, "checkout", T0 + 10, lat="HIGH")
     _decide(st, "checkout", T0 + 10, at=T0 + 24)
-    # answered: a surge detected 26 s after it started, answered 12 s later
-    _incident(st, "web-gateway", T0, T0 + 40, incident_type="TRAFFIC_SURGE", iid="INC-B")
-    _health(st, "web-gateway", T0 + 20, trf="HIGH")
-    _decide(st, "web-gateway", T0 + 20, at=T0 + 38, action="SCALE_OUT", trigger="TRAFFIC_HIGH", target="5",
-            agent="capacity_agent")
+    # answered: a drop detected 26 s after it started, answered 12 s later
+    _incident(st, "web-gateway", T0, T0 + 40, incident_type="UPSTREAM_DROP", iid="INC-B")
+    _health(st, "web-gateway", T0 + 20, trf="LOW")
+    _decide(st, "web-gateway", T0 + 20, at=T0 + 38, action="INVESTIGATE_UPSTREAM", trigger="TRAFFIC_LOW",
+            target=None, agent="capacity_agent")
     # missed: detected, never answered
     _incident(st, "payments", T0, T0 + 40, iid="INC-C")
     _health(st, "payments", T0 + 10, lat="HIGH")
     # pending: still running, nothing detected yet (checkout's second incident)
     _incident(st, "checkout", NOW - 5, iid="INC-D")
-    # false alarm: latency, so the surge on the same service doesn't own it
+    # false alarm: latency, so the drop on the same service doesn't own it
     _health(st, "web-gateway", T0 + 100, lat="HIGH")
     _decide(st, "web-gateway", T0 + 100, at=T0 + 114, action="OBSERVE", target=None)
 
