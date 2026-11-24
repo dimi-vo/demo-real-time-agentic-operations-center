@@ -13,8 +13,9 @@ are:
   `INVESTIGATE_UPSTREAM`. A decision whose agent doesn't match its trigger is a routing error.
   **Mutual exclusivity**: no (service, window) may appear under both metric agents.
 - **Ticket decisions** (D-068) are the rows with a `ticket_id`: the responder's answer about a
-  ticket, not a window. `score_decisions` leaves them out, since they have no health row and
-  would count as unexpected and move `counted_from`; `tickets.py` scores them.
+  ticket, not a window. `score_decisions` leaves them out, here and nowhere else, since they
+  have no health row and would count as unexpected and move `counted_from`; `tickets.py`
+  scores them.
 - **Coverage.** Every anomalous `service_health` row should produce exactly one decision,
   and no other row should produce any: agent calls track anomalies, not windows. A row is
   *expected to call* the capacity agent when `traffic_status` is HIGH or LOW, and the
@@ -241,7 +242,8 @@ class Coverage:
 class DecisionReport:
     range_from: float
     range_to: float
-    total_decisions: int
+    read: int  # the metric decisions given, in any range: no ticket decision (D-068)
+    total_decisions: int  # those in range
     agents: dict[str, AgentSummary]
     incidents: list[IncidentDecisions]
     outside: list[DecisionRow]
@@ -266,10 +268,12 @@ def score_decisions(
     range_from: float,
     range_to: float,
 ) -> DecisionReport:
-    """Score the decisions in `[range_from, range_to)` against the incidents and the
-    health rows that should have triggered them."""
+    """Score the metric decisions in `[range_from, range_to)` against the incidents and the
+    health rows that should have triggered them. The ticket decisions among `decisions` are
+    left out (D-068)."""
+    metric = [d for d in decisions if not d.is_ticket]
     scoped = sorted(
-        (d for d in decisions if not d.is_ticket and range_from <= d.window_end < range_to),
+        (d for d in metric if range_from <= d.window_end < range_to),
         key=lambda d: (d.window_end, d.service_name, d.agent_name),
     )
     health = {(r.service_name, r.window_end): r for r in health_rows}
@@ -306,6 +310,7 @@ def score_decisions(
     return DecisionReport(
         range_from=range_from,
         range_to=range_to,
+        read=len(metric),
         total_decisions=len(scoped),
         agents=agents,
         incidents=per_incident,

@@ -14,6 +14,7 @@ from scripts.evaluation.decisions import (
 from scripts.evaluation.tickets import (
     AnswerKey,
     Ticket,
+    TicketTables,
     Triage,
     score_tickets,
 )
@@ -59,7 +60,7 @@ def _score(cases, extra_tickets=(), p1=(), triage=(), decisions=(), frm=T0, to=T
         if action is not None:
             answers.append(_answer(n, action))
     p1_rows = [t for t in tickets if t.priority == "P1"] + list(p1)
-    return score_tickets(tickets, keys, p1_rows, rows, answers, frm, to)
+    return score_tickets(TicketTables(tickets, keys, p1_rows, rows), answers, frm, to)
 
 
 # --- classification --------------------------------------------------------------------
@@ -77,7 +78,9 @@ def test_the_two_by_two_counts_true_severity_against_the_verdict():
 def test_invalid_and_never_classified_count_as_wrong():
     rep = _score([(HIGH, HIGH), (LOW, LOW), (HIGH, "INVALID"), (LOW, None)])
     assert rep.invalid == 1 and rep.never_classified == 1
-    assert rep.matrix[(HIGH, "INVALID")] == 1 and rep.matrix[(LOW, "NEVER")] == 1
+    assert rep.matrix[(HIGH, "INVALID")] == 1 and rep.matrix[(LOW, None)] == 1
+    # never classified is no verdict at all: a verdict is HIGH, LOW or INVALID
+    assert [r.verdict for r in rep.results] == [HIGH, LOW, "INVALID", None]
     assert rep.classifier_accuracy == 0.5
 
 
@@ -86,7 +89,7 @@ def test_a_verdict_written_more_than_30_s_after_the_span_ends_is_never_classifie
     late, on_time = _triage(9, LOW, after=41.0), _triage(8, LOW, after=50.0)  # 131 s and 130 s
     rep = _score([(LOW, None)] * 10, triage=[late, on_time], to=to)
     assert len(rep.results) == 10
-    assert [r.ticket.ticket_id for r in rep.results if r.verdict == "NEVER"] == [_id(n) for n in range(8)] + [_id(9)]
+    assert [r.ticket.ticket_id for r in rep.results if r.verdict is None] == [_id(n) for n in range(8)] + [_id(9)]
     unstamped = _score([(LOW, None)], triage=[_triage(0, LOW, after=None)], to=T0 + 5)
     assert unstamped.never_classified == 0  # no Kafka timestamp to judge it by: it counts
 
@@ -355,6 +358,7 @@ def test_empty_ticket_tables_and_no_ticket_decisions_name_what_fills_them(monkey
     assert "No ticket decisions in `remediation_decisions` yet. Run the INSERT in " in out
     assert "sql/5.3_insert_ticket_responder.sql to fill it." in out
     assert "Classifier: 0/20 right" in out  # every P1 never classified
+    assert f"{_id(0)} really HIGH, never classified: subject 0" in out  # in the report's words, not as a verdict
     assert "Responder: NO_DATA" in out
 
 

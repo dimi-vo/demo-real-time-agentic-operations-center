@@ -38,15 +38,13 @@ from dataclasses import dataclass, field
 from statistics import median
 
 from scripts.common.topic_reader import KAFKA_TIMESTAMP, epoch_seconds
-from scripts.evaluation.decisions import ALLOWED_ACTIONS, TICKET_RESPONDER, DecisionRow
+from scripts.evaluation.decisions import ALLOWED_ACTIONS, INVALID, TICKET_RESPONDER, DecisionRow
 from scripts.evaluation.detection import NO_DATA, UNLOGGED_TAIL_SECONDS
 
 P1_TICKETS = "p1_tickets"
 TICKET_TRIAGE = "ticket_triage"
 HIGH = "HIGH"
 LOW = "LOW"
-INVALID = "INVALID"
-NEVER = "NEVER"  # no triage record: the verdict of a ticket the classifier never saw
 # A verdict counts when it was written by the end of the span plus this grace.
 CLASSIFY_GRACE_SECONDS = 30.0
 CLASSIFIER_TARGET = 0.95
@@ -120,6 +118,17 @@ def _text(v: str | None) -> str:
     return v.strip() if isinstance(v, str) else ""
 
 
+@dataclass
+class TicketTables:
+    """The four ticket tables, parsed: what the generator filed (`support_tickets`), its answer
+    key (`ticket_answer_key`), and what labs 5.1 (`p1_tickets`) and 5.2 (`ticket_triage`) wrote."""
+
+    tickets: list[Ticket]
+    answer_keys: list[AnswerKey]
+    p1_rows: list[Ticket]
+    triage: list[Triage]
+
+
 def default_range(tickets: list[Ticket], minutes: float) -> tuple[float, float]:
     """The last `minutes` of tickets, ending UNLOGGED_TAIL_SECONDS before the newest one: the
     metric half's rule, for a run that has no metric rows."""
@@ -135,8 +144,9 @@ class TicketResult:
     decision: DecisionRow | None = None  # the responder's first answer
 
     @property
-    def verdict(self) -> str:
-        return self.triage.severity if self.triage is not None else NEVER
+    def verdict(self) -> str | None:
+        """HIGH, LOW or INVALID; None when the ticket was never classified."""
+        return self.triage.severity if self.triage is not None else None
 
     @property
     def classified_right(self) -> bool:
@@ -165,6 +175,7 @@ class TicketReport:
 
     @property
     def matrix(self) -> Counter:
+        """(true severity, verdict) counts; the verdict is None for never classified."""
         return Counter((r.truth.true_severity, r.verdict) for r in self.results)
 
     @property
@@ -177,7 +188,7 @@ class TicketReport:
 
     @property
     def never_classified(self) -> int:
-        return sum(r.verdict == NEVER for r in self.results)
+        return sum(r.verdict is None for r in self.results)
 
     @property
     def classifier_accuracy(self) -> float | None:
@@ -238,15 +249,12 @@ def _median(values: list[float]) -> float | None:
 
 
 def score_tickets(
-    tickets: list[Ticket],
-    answer_keys: list[AnswerKey],
-    p1_rows: list[Ticket],
-    triage: list[Triage],
-    decisions: list[DecisionRow],
-    range_from: float,
-    range_to: float,
+    tables: TicketTables, decisions: list[DecisionRow], range_from: float, range_to: float
 ) -> TicketReport:
-    keys = {k.ticket_id: k for k in answer_keys}
+    """Score the P1 tickets created in `[range_from, range_to)`; `decisions` are the ticket
+    decisions (the rows with a `ticket_id`)."""
+    tickets, triage = tables.tickets, tables.triage
+    keys = {k.ticket_id: k for k in tables.answer_keys}
     cutoff = range_to + CLASSIFY_GRACE_SECONDS
     verdicts: dict[str, Triage] = {}  # what the classifier said in time, for the classification
     any_verdict: dict[str, Triage] = {}  # what the responder's INSERT could have seen, for its routing
@@ -264,7 +272,7 @@ def score_tickets(
         bad_targets=[d for d in scoped if d.target],
         misrouted=[d for d in scoped if not d.routed_correctly],
     )  # fmt: skip
-    rep.leaks = _leaks(tickets, p1_rows, triage, range_from, range_to)
+    rep.leaks = _leaks(tickets, tables.p1_rows, triage, range_from, range_to)
     for tid, d in answers.items():
         truth, verdict = keys.get(tid), any_verdict.get(tid)
         if verdict is None or verdict.severity != HIGH:

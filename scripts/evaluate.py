@@ -58,7 +58,6 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,6 +67,7 @@ from rich.table import Table
 from scripts.common.paths import get_project_root
 from scripts.common.topic_reader import epoch_seconds, jsonable
 from scripts.evaluation.decisions import (
+    INVALID,
     VALID_ACTION_TARGET,
     DecisionReport,
     DecisionRow,
@@ -95,15 +95,14 @@ from scripts.evaluation.tickets import (
     CLASSIFY_GRACE_SECONDS,
     FAIL,
     HIGH,
-    INVALID,
     LOW,
-    NEVER,
     P1_TICKETS,
     RESPONDER_TARGET,
     TICKET_TRIAGE,
     AnswerKey,
     Ticket,
     TicketReport,
+    TicketTables,
     Triage,
     score_tickets,
 )
@@ -288,17 +287,6 @@ def _load_decisions(args, root: Path) -> list[dict] | None:
     return records or None
 
 
-@dataclass
-class TicketTables:
-    """The four ticket tables (D-068), parsed, and where the tickets came from."""
-
-    source: str
-    tickets: list[Ticket]
-    answer_keys: list[AnswerKey]
-    p1_rows: list[Ticket]
-    triage: list[Triage]
-
-
 def _load_ticket_table(args, root: Path, topic: str, rows: str | None, dump: str | None) -> list[dict] | None:
     """One ticket table's records; None when the topic doesn't exist, and [] offline without
     its dump."""
@@ -343,7 +331,6 @@ def _load_tickets(args, root: Path) -> TicketTables | None:
     triage = _load_ticket_table(args, root, args.triage_topic, args.triage_rows, args.dump_triage)
     _has_rows(args.triage_topic, triage, FILL_TICKET_TRIAGE)
     return TicketTables(
-        source=args.ticket_rows or args.tickets_topic,
         tickets=[Ticket.from_record(r) for r in tickets],
         answer_keys=[AnswerKey.from_record(r) for r in keys],
         p1_rows=[Ticket.from_record(r) for r in p1 or []],
@@ -387,15 +374,10 @@ def main(argv: list[str] | None = None) -> None:
 
     decisions = [DecisionRow.from_record(r) for r in _load_decisions(args, root) or []]
     if rows:
-        # Ticket decisions go to the ticket half; the metric half never sees them (D-068).
-        metric = [d for d in decisions if not d.is_ticket]
-        if metric:
-            _render_decisions(
-                score_decisions(metric, rows, incidents, range_from, range_to),
-                args.decision_rows or args.decisions_topic,
-                len(metric),
-                args.details,
-            )
+        # score_decisions leaves the ticket decisions to the ticket half (D-068).
+        rep = score_decisions(decisions, rows, incidents, range_from, range_to)
+        if rep.read:
+            _render_decisions(rep, args.decision_rows or args.decisions_topic, args.details)
         else:
             console.print(
                 f"\n[dim]No decisions from the metric agents in `{args.decisions_topic}` yet — the decision "
@@ -409,10 +391,8 @@ def main(argv: list[str] | None = None) -> None:
                 f"\n[yellow]No ticket decisions in `{args.decisions_topic}` yet. "
                 f"{FILL_TICKET_DECISIONS} to fill it.[/yellow]"
             )
-        rep = score_tickets(
-            tickets.tickets, tickets.answer_keys, tickets.p1_rows, tickets.triage, answers, range_from, range_to
-        )
-        _render_tickets(rep, tickets.source, len(tickets.tickets), args.details)
+        rep = score_tickets(tickets, answers, range_from, range_to)
+        _render_tickets(rep, args.ticket_rows or args.tickets_topic, len(tickets.tickets), args.details)
 
 
 def _render(rep: DetectionReport, source: str, gt_source: str, n_incidents: int, details: bool) -> None:
@@ -517,10 +497,10 @@ def _render(rep: DetectionReport, source: str, gt_source: str, n_incidents: int,
     console.print(f"  Fresh-start noise: worst service {worst_fresh} in 5 min (target ≤ {FRESH_START_TARGET})")
 
 
-def _render_decisions(rep: DecisionReport, source: str, total_read: int, details: bool) -> None:
+def _render_decisions(rep: DecisionReport, source: str, details: bool) -> None:
     console.print(
         f"\n[bold]{source}[/bold]: {rep.total_decisions} decisions in the scored range "
-        f"({total_read} read in total)\n"
+        f"({rep.read} read in total)\n"
     )
     if not rep.total_decisions:
         console.print("[yellow]No decisions in range. Are both INSERT statements running?[/yellow]")
@@ -657,7 +637,7 @@ def _render_tickets(rep: TicketReport, source: str, total_read: int, details: bo
         for sev in (HIGH, LOW):
             n = sum(v for (truth, _), v in m.items() if truth == sev)
             t.add_row(
-                sev, *(str(m[(sev, v)]) for v in (HIGH, LOW)), _flag(m[(sev, INVALID)]), _flag(m[(sev, NEVER)]),
+                sev, *(str(m[(sev, v)]) for v in (HIGH, LOW)), _flag(m[(sev, INVALID)]), _flag(m[(sev, None)]),
                 f"{m[(sev, sev)]}/{n}",
             )  # fmt: skip
         console.print(t)
@@ -707,7 +687,8 @@ def _render_tickets(rep: TicketReport, source: str, total_read: int, details: bo
     if wrong:
         console.print("\n[bold]Wrong verdicts[/bold] (true severity vs verdict, with the classifier's own words)")
         for r in wrong if details else wrong[:10]:
-            console.print(f"  [red]{r.ticket.ticket_id}[/red] really {r.truth.true_severity}, got {r.verdict}: "
+            got = "never classified" if r.verdict is None else f"got {r.verdict}"
+            console.print(f"  [red]{r.ticket.ticket_id}[/red] really {r.truth.true_severity}, {got}: "
                           f"{r.ticket.subject or '-'}")  # fmt: skip
             if r.triage is not None:
                 console.print(f"    reason: {r.triage.reason or '-'}")
@@ -725,7 +706,8 @@ def _render_tickets(rep: TicketReport, source: str, total_read: int, details: bo
     if (wrong or wrong_actions) and not details:
         console.print("  [dim]--details lists them all, each with the agent's raw_response.[/dim]")
 
-    def verdict(status: str, text: str) -> str:
+    def status_text(status: str, text: str) -> str:
+        """An acceptance line's figure, coloured by its PASS, FAIL or NO_DATA status."""
         if status == NO_DATA:
             return "[dim]NO_DATA[/dim]"
         return f"[red]{text}[/red]" if status == FAIL else f"[green]{text}[/green]"
@@ -733,15 +715,15 @@ def _render_tickets(rep: TicketReport, source: str, total_read: int, details: bo
     console.print("\n[bold]Acceptance (D-068)[/bold]")
     n, share = len(rep.results), rep.classifier_accuracy
     console.print(
-        f"  Classifier: {verdict(rep.classifier_status, f'{rep.classified_right}/{n} right')}"
+        f"  Classifier: {status_text(rep.classifier_status, f'{rep.classified_right}/{n} right')}"
         + (f" ({share:.0%}, target ≥ {CLASSIFIER_TARGET:.0%})" if share is not None else " (no P1 tickets)")
     )
     n, share = len(rep.answered), rep.responder_accuracy
     console.print(
-        f"  Responder: {verdict(rep.responder_status, f'{rep.right_actions}/{n} answers right')}"
+        f"  Responder: {status_text(rep.responder_status, f'{rep.right_actions}/{n} answers right')}"
         + (f" ({share:.0%}, target ≥ {RESPONDER_TARGET:.0%})" if share is not None else " (no answers)")
     )
-    console.print(f"  Filter leaks: {verdict(rep.leaks_status, str(len(rep.leaks)))} (target 0)")
+    console.print(f"  Filter leaks: {status_text(rep.leaks_status, str(len(rep.leaks)))} (target 0)")
 
 
 def _ids(decisions: list[DecisionRow]) -> str:
