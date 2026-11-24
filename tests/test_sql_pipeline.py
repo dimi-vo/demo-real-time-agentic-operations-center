@@ -8,6 +8,9 @@ files, each INSERT body equal to its query, the same detector config for both me
 fixed 10-second window, source watermarks that let a window close on the tick at its end,
 explicit earliest-offset hints, which services each lab covers, and the column lists of
 service_error_rate and service_health (in the queries and in the platform team's DDL).
+
+Section 5 (D-068) starts with the P1 filter (5.1): one INSERT from support_tickets into
+p1_tickets, on the priority alone, with p1_tickets' columns in order and no offset hint.
 """
 
 import re
@@ -390,3 +393,45 @@ def test_the_error_rate_verdict_is_stamped_like_service_health():
     body = _norm(_body("2.2_error_rate.sql"))
     assert body.endswith("CURRENT_TIMESTAMP AS detected_at FROM windowed;")
     assert "PROCTIME" not in body
+
+
+# --- lab 5.1: route the P1 tickets (D-068) ------------------------------------------------
+
+P1_FILE = "5.1_p1_tickets.sql"
+
+
+def test_the_p1_filter_copies_support_tickets_into_p1_tickets():
+    body = _norm(_body(P1_FILE))
+    assert body.startswith("INSERT INTO `p1_tickets` SELECT ")
+    assert " FROM `support_tickets`" in body
+    # One statement: nothing to run before or after it.
+    assert body.count(";") == 1 and body.endswith(";")
+
+
+def test_the_p1_filter_routes_on_the_priority_alone():
+    # The reporter's priority, nothing else: no join, no second condition. P2 and P3 tickets
+    # stay in support_tickets.
+    body = _norm(_body(P1_FILE))
+    assert body.count(" WHERE ") == 1
+    assert body.endswith(" FROM `support_tickets` WHERE `priority` = 'P1';")
+    assert "JOIN" not in body
+
+
+def test_the_p1_filter_names_the_p1_tickets_columns_in_order():
+    """The INSERT is positional, and every column but event_time is a STRING, so a swap would
+    go unnoticed. Each column is named bare, not `SELECT *`, so the lab shows what moves."""
+    body = _norm(_body(P1_FILE))
+    head = "INSERT INTO `p1_tickets` SELECT "
+    selected = body[len(head) : body.index(" FROM `support_tickets`")].split(", ")
+    ddl = (SQL / "sink_p1_tickets.sql").read_text()
+    declared = re.findall(r"^  `(\w+)` ", ddl, re.MULTILINE)
+    assert len(declared) == 7
+    assert selected == [f"`{name}`" for name in declared]
+
+
+def test_the_p1_filter_reads_from_the_tables_default_offset():
+    # support_tickets' default is the earliest offset, so the filter replays the history with
+    # no hint. The filter is cheap, and 5.2 and 5.3 read from the latest offset anyway.
+    body = _body(P1_FILE)
+    assert "/*+" not in body and "scan.startup.mode" not in body
+    assert "'scan.startup.mode' = 'earliest-offset'" in (SQL / "source_support_tickets.sql").read_text()

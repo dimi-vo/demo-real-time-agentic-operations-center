@@ -2929,6 +2929,20 @@ both tables' options and on `remediation_decisions`' `ticket_id`). `IF NOT EXIST
 changes a table, so `remediation_decisions` is dropped before the apply that recreates it; the
 user does both.
 
+Issue 05 (lab 5.1, route the P1 tickets): `sql/5.1_p1_tickets.sql` (new; one INSERT from
+`support_tickets` into `p1_tickets`, the seven columns named in `p1_tickets`' order, rather
+than `SELECT *`, and `WHERE priority = 'P1'` its only filter; no hint, so it reads from the
+table's default, the earliest offset, and replays up to 24 hours of tickets; the header opens
+section 5, "A second architecture: support tickets": checkout produces tickets rather than
+metrics, the reporter sets the priority and Flink routes on it, so only the P1s reach the
+agents and their model calls, and P2 and P3 tickets stay in `support_tickets` with nothing
+further done to them; it says to start 5.2's INSERT once 5.1 has caught up, as `reset-health`
+does). Tests: `tests/test_sql_pipeline.py` (one statement, from `support_tickets` into
+`p1_tickets`; the priority its only filter, with no join; `p1_tickets`' DDL columns, named
+bare and in order; no hint, against `support_tickets`' earliest-offset default; the module
+docstring names section 5). Nothing else needed the lab: `reset`, `reset-health` and the
+call-rate check name 5.1 since issue 04, and Terraform runs no INSERT.
+
 Issue 08 (the design's frame and the Issues panels): `scripts/opswall/state.py` (each service
 in the snapshot gets `issues`, over the incidents that *started* in the last 10 minutes, so an
 incident cut by the chart's left edge is drawn but not counted: `injected`; `detected`, an
