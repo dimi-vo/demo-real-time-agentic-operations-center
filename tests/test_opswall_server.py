@@ -65,3 +65,8 @@ def test_websocket_sends_a_snapshot_on_connect(client):
             assert "blocks" in s and "groundTruth" in s
             assert s["issues"] == {"injected": 0, "detected": 0, "missed": 0,
                                    "medianTimeToDetect": None, "medianTimeToRemediate": None}
+        # checkout's row is the ticket row (D-068), with its list and timeline
+        checkout = next(s for s in snap["services"] if s["row"] == "tickets")
+        assert checkout["tickets"] == {"received": 0, "newest": []}
+        assert (checkout["marks"], checkout["runs"], checkout["openP1"], checkout["agentsWorking"]) == ([], [], 0, 0)
+        assert checkout["timelineSeconds"] == 120

@@ -227,6 +227,87 @@ def test_live_metrics_records_reach_the_charts_and_the_rail(registry):
     assert [m["latency"] for m in payments["metrics"]] == [round(r["latency_ms"], 1) for r in mine]
 
 
+# --- checkout's tickets through the real Avro path (D-068) ---------------------------
+
+# The tables the labs write have no repo .avsc: their value schemas as Confluent Cloud
+# registers them from sql/sink_p1_tickets.sql, sink_ticket_triage.sql and
+# sink_remediation_decisions.sql (TIMESTAMP(3) as local-timestamp-millis, D-027; NOT NULL
+# columns bare, the rest nullable).
+_TS = {"type": "long", "logicalType": "local-timestamp-millis"}
+_TICKET_FIELDS = [
+    {"name": "event_time", "type": ["null", _TS], "default": None},
+    *({"name": n, "type": ["null", "string"], "default": None}
+      for n in ("ticket_id", "source", "service_name", "priority", "subject", "description")),
+]
+
+
+def _flink_schema(fields: list[dict]) -> Schema:
+    return Schema(json.dumps({"type": "record", "name": "record", "namespace": "org.apache.flink.avro.generated",
+                              "fields": fields}), "AVRO")
+
+
+P1_TICKETS_SCHEMA = _flink_schema(_TICKET_FIELDS)
+TRIAGE_SCHEMA = _flink_schema([
+    *_TICKET_FIELDS,
+    {"name": "severity", "type": "string"},
+    {"name": "reason", "type": ["null", "string"], "default": None},
+    {"name": "raw_response", "type": ["null", "string"], "default": None},
+])
+DECISIONS_SCHEMA = _flink_schema([
+    {"name": "window_end", "type": _TS},
+    *({"name": n, "type": "string"} for n in ("service_name", "agent_name", "trigger", "action")),
+    *({"name": n, "type": ["null", "string"], "default": None}
+      for n in ("target", "reason", "raw_response", "ticket_id")),
+])
+
+
+def test_a_record_from_each_ticket_topic_reaches_checkouts_row(registry):
+    from opsgen.simulation import Simulation
+
+    for subject, avsc in (("support_tickets-value", "support_tickets.avsc"),
+                          ("ticket_answer_key-value", "ticket_answer_key.avsc")):
+        registry.register_schema(subject, Schema((ROOT / "schemas" / avsc).read_text(), "AVRO"))
+    registry.register_schema("p1_tickets-value", P1_TICKETS_SCHEMA)
+    registry.register_schema("ticket_triage-value", TRIAGE_SCHEMA)
+    registry.register_schema("remediation_decisions-value", DECISIONS_SCHEMA)
+
+    # The first P1 the real ticket clock produces that is really HIGH (seed 1).
+    start = 1_800_000_000.0
+    sim = Simulation(1, start=start)
+    new = next(n for k in range(3600) for n in sim.tick(start + k)[3]
+               if n.ticket["priority"] == "P1" and n.answer_key["true_severity"] == "HIGH")
+    created = new.ticket["event_time"] / 1000
+
+    deser = make_deserializer(registry)
+    st = OpsWallState()
+
+    def through(topic: str, record: dict) -> dict:
+        return decode_record(_produce(registry, topic, MessageField.VALUE, record), None, topic, deser)
+
+    ticket = through("support_tickets", new.ticket)  # what ops-sim produces
+    st.apply_ticket(ticket)
+    st.apply_answer_key(through("ticket_answer_key", new.answer_key))
+    # what labs 5.1-5.3 write, with each record's Kafka timestamp
+    st.apply_p1_ticket(through("p1_tickets", ticket), kafka_ts=created + 1)
+    st.apply_triage(through("ticket_triage", {**ticket, "severity": "HIGH", "reason": "Everyone is affected.",
+                                              "raw_response": "Severity: HIGH"}), kafka_ts=created + 4)
+    st.apply_decision(through("remediation_decisions", {
+        "window_end": ticket["event_time"], "service_name": "checkout", "agent_name": "ticket_responder",
+        "trigger": "HIGH_SEVERITY_TICKET", "action": new.answer_key["expected_action"], "target": None,
+        "reason": "It matches the cue.", "raw_response": "Action: ...", "ticket_id": new.ticket["ticket_id"]}),
+        kafka_ts=created + 9)
+
+    row = _service(st, "checkout", created + 30)
+    assert row["tickets"]["newest"] == [{
+        "id": new.ticket["ticket_id"], "source": new.ticket["source"], "priority": "P1",
+        "subject": new.ticket["subject"], "eventTime": pytest.approx(created)}]
+    classifier, responder = row["runs"]
+    assert (classifier["label"], classifier["reason"]) == ("High in 3s", "Everyone is affected.")
+    assert responder["label"].endswith(" in 5s") and responder["reason"] == "It matches the cue."
+    assert row["issues"] == {"injected": 1, "detected": 1, "missed": 0,
+                             "medianTimeToDetect": pytest.approx(4.0), "medianTimeToRemediate": pytest.approx(9.0)}
+
+
 # --- the topics the consumer tails ---------------------------------------------------
 
 
@@ -244,7 +325,10 @@ def test_the_consumer_tails_its_topics_from_where_the_chart_starts(monkeypatch):
 
     by_topic = {kw["topic"]: kw for kw in tails}
     assert set(by_topic) == {"service_deployments", "service_health", "service_error_rate",
-                             "remediation_decisions", "service_incidents", "service_metrics"}
+                             "remediation_decisions", "service_incidents", "service_metrics",
+                             # checkout's tickets (D-068)
+                             "support_tickets", "p1_tickets", "ticket_triage", "ticket_answer_key"}
+    assert len(tails) == 10
     metrics = by_topic[METRICS_TOPIC]
     assert metrics["apply"] == st.apply_metric
     assert metrics["key_deserializer"] is None and metrics["use_kafka_ts"] is False
@@ -256,6 +340,16 @@ def test_the_consumer_tails_its_topics_from_where_the_chart_starts(monkeypatch):
     assert errors["key_deserializer"] is None and errors["use_kafka_ts"] is False
     assert errors["assign"](object()) is True
     assert seeks[-1] == ("service_error_rate", 600)
+    # The ticket topics, from the same 10 minutes back. The two the labs write are read with
+    # their Kafka timestamps, as decisions are: they are when each agent started and answered.
+    for topic, apply, uses_ts in (("support_tickets", st.apply_ticket, False),
+                                  ("p1_tickets", st.apply_p1_ticket, True),
+                                  ("ticket_triage", st.apply_triage, True),
+                                  ("ticket_answer_key", st.apply_answer_key, False)):
+        tail = by_topic[topic]
+        assert (tail["apply"], tail["key_deserializer"], tail["use_kafka_ts"]) == (apply, None, uses_ts), topic
+        assert tail["assign"](object()) is True
+        assert seeks[-1] == (topic, 600)
 
 
 def test_the_consumer_reads_uncommitted_records(monkeypatch):

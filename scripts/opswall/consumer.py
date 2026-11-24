@@ -1,10 +1,12 @@
 """Kafka → OpsWallState consumer threads, one per topic.
 
-The dashboard reads six topics with the keys on the attendee's credential card:
+The dashboard reads ten topics with the keys on the attendee's credential card:
 ``service_deployments`` (keyed upsert, from earliest), ``service_health``,
 ``service_error_rate`` (lab 2.2, D-067), ``remediation_decisions`` and ``service_incidents``
-(from ~10 min ago by timestamp), and ``service_metrics`` (from ~11 min ago by timestamp:
-the chart's 10 minutes plus the margin the state keeps, D-061).
+(from ~10 min ago by timestamp), ``service_metrics`` (from ~11 min ago by timestamp:
+the chart's 10 minutes plus the margin the state keeps, D-061), and checkout's four ticket
+topics, ``support_tickets``, ``p1_tickets`` (lab 5.1), ``ticket_triage`` (lab 5.2) and
+``ticket_answer_key`` (from ~10 min ago by timestamp, D-068).
 
 Each topic gets one thread with a dedicated consumer group id (so partitions
 aren't shared across threads and nothing is ever committed; we always tail). The
@@ -41,6 +43,10 @@ ERROR_RATE_TOPIC = "service_error_rate"
 DECISIONS_TOPIC = "remediation_decisions"
 INCIDENTS_TOPIC = "service_incidents"
 METRICS_TOPIC = "service_metrics"
+TICKETS_TOPIC = "support_tickets"
+P1_TICKETS_TOPIC = "p1_tickets"
+TRIAGE_TOPIC = "ticket_triage"
+ANSWER_KEY_TOPIC = "ticket_answer_key"
 
 STARTUP_BACKREAD_SECONDS = AXIS_SECONDS  # read ~10 minutes of history on connect
 METRICS_BACKREAD_SECONDS = AXIS_SECONDS + RETAIN_MARGIN_SECONDS  # ~11 minutes
@@ -220,13 +226,15 @@ def _tail(
 
 
 def start_threads(state: OpsWallState, card: dict[str, str], stop: threading.Event) -> list[threading.Thread]:
-    """Start six daemon consumer threads and return them, each attached from its usual
+    """Start ten daemon consumer threads and return them, each attached from its usual
     starting point."""
     sr = _schema_registry(card)
 
     # (topic, apply, assign, decode the key?, use the Kafka timestamp?). Only
     # service_deployments needs its key: it is the only topic whose value lacks
-    # service_name. service_incidents keys are raw strings, not Avro.
+    # service_name. The keys of service_incidents and the ticket topics are raw strings, not
+    # Avro. A decision's Kafka timestamp is when the agent answered; a p1_tickets record's is
+    # when the classifier's run starts, and a ticket_triage record's when it ends (D-068).
     topics = [
         (DEPLOYMENTS_TOPIC, state.apply_deployment,
          lambda c: _assign_from_earliest(c, DEPLOYMENTS_TOPIC), True, False),
@@ -240,6 +248,14 @@ def start_threads(state: OpsWallState, card: dict[str, str], stop: threading.Eve
          lambda c: _assign_from_timestamp(c, INCIDENTS_TOPIC, STARTUP_BACKREAD_SECONDS), False, False),
         (METRICS_TOPIC, state.apply_metric,
          lambda c: _assign_from_timestamp(c, METRICS_TOPIC, METRICS_BACKREAD_SECONDS), False, False),
+        (TICKETS_TOPIC, state.apply_ticket,
+         lambda c: _assign_from_timestamp(c, TICKETS_TOPIC, STARTUP_BACKREAD_SECONDS), False, False),
+        (P1_TICKETS_TOPIC, state.apply_p1_ticket,
+         lambda c: _assign_from_timestamp(c, P1_TICKETS_TOPIC, STARTUP_BACKREAD_SECONDS), False, True),
+        (TRIAGE_TOPIC, state.apply_triage,
+         lambda c: _assign_from_timestamp(c, TRIAGE_TOPIC, STARTUP_BACKREAD_SECONDS), False, True),
+        (ANSWER_KEY_TOPIC, state.apply_answer_key,
+         lambda c: _assign_from_timestamp(c, ANSWER_KEY_TOPIC, STARTUP_BACKREAD_SECONDS), False, False),
     ]
     threads = []
     for topic, apply, assign, uses_key, uses_ts in topics:

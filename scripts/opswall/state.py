@@ -32,8 +32,8 @@ transaction wrote comes again when the statement replays, D-063).
 - The **Issues panel** of a row (``issues``, D-068), over the incidents that started in the
   last 10 minutes: injected; detected (an owned block, and not missed); missed; the median
   time to detect and the median time to remediate (start → the first answer), both over
-  answered incidents. A ticket service has its own (zeros until the wall reads tickets);
-  the page draws ``issues`` whatever it was counted from. There is no global summary.
+  answered incidents. A ticket service has its own, counted from tickets (below); the page
+  draws ``issues`` whatever it was counted from. There is no global summary.
 - The **samples** are the raw ``service_metrics`` records, one per metric service per
   second (D-058, D-068), kept for the axis plus a margin (``trim()``). The snapshot
   carries the ones on the chart; the page draws them as the latency and traffic lines
@@ -44,6 +44,24 @@ transaction wrote comes again when the statement replays, D-063).
   metrics, has none (D-068). A row with the errors chart
   also gets a **deploy mark** per DEPLOY and ROLLBACK of its service, good deploys
   included, keyed by ``deployed_at`` so the 5-s heartbeat adds nothing.
+- The **row kind** (``row``): ``"tickets"`` for the ticket services of ``opsgen.services``
+  (checkout), ``"metrics"`` for the others, so the page holds no service names (D-068).
+- A **ticket** is one record per ``ticket_id``, filled in from five topics in any order: its
+  fields (``support_tickets``), when lab 5.1 routed it (the ``p1_tickets`` record's Kafka
+  timestamp), the classifier's verdict and reason and when it gave them (``ticket_triage``),
+  its true severity and expected action (``ticket_answer_key``), and the responder's action
+  and reason and when it gave them (a ``remediation_decisions`` record with a ``ticket_id``).
+  Such a decision goes to its ticket and nowhere else: it never closes a metric block,
+  counts as a false alarm or sets a metric row's status.
+- A ticket row's **runs** (the last 2 minutes): the classifier's, from the ``p1_tickets``
+  record to the verdict ("High in 4s"), and for a HIGH verdict the responder's, from the
+  verdict to the decision ("Scale out in 6s"). A run with no answer is open ("Working 3s")
+  until 30 s after it started, then ends there ("No answer"). The row is "Agent resolving
+  P1" while a run is open; ``openP1`` counts the open runs' tickets, ``agentsWorking`` their
+  lanes. Its **Issues panel** counts the really-HIGH P1 tickets created in the last 10
+  minutes: detected (a HIGH verdict), missed (LOW, INVALID, or no verdict 30 s after the
+  ticket), ticket -> verdict, ticket -> action. Its list is the newest 5 tickets, with the
+  count of the last 10 minutes; its marks are the tickets of the last 2 minutes.
 
 State stores absolute epoch seconds everywhere. The snapshot turns positions into the
 axis-relative seconds the page draws with: ``t - (now - axis_seconds)``, clipped to
@@ -161,6 +179,26 @@ class DecisionMark:
 
 
 @dataclass
+class Ticket:
+    """One support ticket, filled in from whichever of its records have arrived (D-068)."""
+    ticket_id: str
+    event_time: float | None = None  # when it was created
+    source: str | None = None        # ZENDESK or SERVICENOW
+    service_name: str | None = None
+    priority: str | None = None      # P1, P2 or P3
+    subject: str | None = None
+    p1_at: float | None = None          # the p1_tickets record's Kafka timestamp (lab 5.1)
+    verdict: str | None = None          # ticket_triage.severity: HIGH, LOW or INVALID (lab 5.2)
+    verdict_reason: str | None = None
+    classified_at: float | None = None  # the ticket_triage record's Kafka timestamp
+    true_severity: str | None = None    # ticket_answer_key: HIGH or LOW
+    expected_action: str | None = None
+    action: str | None = None           # the ticket_responder decision (lab 5.3)
+    action_reason: str | None = None
+    answered_at: float | None = None    # the decision's Kafka timestamp
+
+
+@dataclass
 class ServiceState:
     name: str
     previous_version: str | None = None
@@ -200,6 +238,7 @@ class OpsWallState:
         self.axis_seconds = axis_seconds
         self._lock = threading.RLock()
         self._services = _seeded_services()
+        self._tickets: dict[str, Ticket] = {}  # by ticket_id
         self._connection_errors: dict[str, dict] = {}  # topic -> {code, detail, ts}
 
     # ---- writes ---------------------------------------------------------------
@@ -270,6 +309,10 @@ class OpsWallState:
             rows.append(row)
 
     def apply_decision(self, record: dict, kafka_ts: float | None = None) -> None:
+        if record.get("ticket_id"):  # the responder's: it never touches a metric block (D-068)
+            with self._lock:
+                self._apply_ticket_decision(record, kafka_ts)
+            return
         name = record.get("service_name")
         if not name or name not in self._services:
             return
@@ -337,6 +380,62 @@ class OpsWallState:
                 else:
                     samples.insert(i, sample)
 
+    # A ticket (D-068) fills in from five topics, in whatever order their records arrive. As
+    # for decisions, a record written twice keeps its first Kafka timestamp and the newer
+    # content (D-063). A record without a timestamp falls back to the ticket's event_time.
+
+    def apply_ticket(self, record: dict) -> None:
+        """One ``support_tickets`` record: the ticket's fields."""
+        with self._lock:
+            ticket = self._ticket(record)
+            if ticket is not None:
+                _fill_ticket(ticket, record)
+
+    def apply_p1_ticket(self, record: dict, kafka_ts: float | None = None) -> None:
+        """One ``p1_tickets`` record (lab 5.1): the moment the classifier's run starts."""
+        with self._lock:
+            ticket = self._ticket(record)
+            if ticket is not None:
+                _fill_ticket(ticket, record)
+                ticket.p1_at = _earliest(ticket.p1_at, _written(kafka_ts, ticket))
+
+    def apply_triage(self, record: dict, kafka_ts: float | None = None) -> None:
+        """One ``ticket_triage`` record (lab 5.2): the classifier's verdict and reason."""
+        with self._lock:
+            ticket = self._ticket(record)
+            if ticket is not None:
+                _fill_ticket(ticket, record)
+                ticket.verdict = record.get("severity") or "INVALID"
+                ticket.verdict_reason = record.get("reason")
+                ticket.classified_at = _earliest(ticket.classified_at, _written(kafka_ts, ticket))
+
+    def apply_answer_key(self, record: dict) -> None:
+        """One ``ticket_answer_key`` record: what the ticket really is, for the Issues panel."""
+        with self._lock:
+            ticket = self._ticket(record)
+            if ticket is not None:
+                if ticket.event_time is None:
+                    ticket.event_time = _to_seconds(record.get("event_time"))
+                ticket.true_severity = record.get("true_severity")
+                ticket.expected_action = record.get("expected_action")
+
+    def _apply_ticket_decision(self, record: dict, kafka_ts: float | None) -> None:
+        """A ``remediation_decisions`` record with a ticket_id (lab 5.3): the responder's
+        answer, kept on its ticket and nowhere else. Call under the lock."""
+        ticket = self._ticket(record)
+        if ticket.event_time is None:  # window_end carries the ticket's event_time
+            ticket.event_time = _to_seconds(record.get("window_end"))
+        ticket.action = record.get("action") or "INVALID"
+        ticket.action_reason = record.get("reason")
+        ticket.answered_at = _earliest(ticket.answered_at, _written(kafka_ts, ticket))
+
+    def _ticket(self, record: dict) -> Ticket | None:
+        """The ticket a record is about, made on its first record. Call under the lock."""
+        tid = record.get("ticket_id")
+        if not tid:
+            return None
+        return self._tickets.setdefault(tid, Ticket(tid))
+
     def record_error(self, topic: str, code: str, detail: str) -> None:
         with self._lock:
             self._connection_errors[topic] = {"code": code, "detail": detail, "ts": time.time()}
@@ -361,6 +460,8 @@ class OpsWallState:
                 s.decisions = [d for d in s.decisions if d.at >= cutoff]
                 s.incidents = [i for i in s.incidents
                                if (i.ended_at or i.started_at) >= cutoff]
+            # A ticket goes once the last thing that happened to it is that old.
+            self._tickets = {tid: t for tid, t in self._tickets.items() if _ticket_last(t) >= cutoff}
 
     # ---- snapshot -------------------------------------------------------------
 
@@ -372,7 +473,13 @@ class OpsWallState:
             return max(0.0, min(self.axis_seconds, t - left))
 
         with self._lock:
-            services = [_snapshot_service(s, now, left, rel) for s in self._services.values()]
+            services = []
+            for s in self._services.values():
+                svc = _snapshot_service(s, now, left, rel)
+                if s.name in TICKET_SERVICES:  # its status, Issues numbers, list and timeline
+                    svc.update(_ticket_row([t for t in self._tickets.values()
+                                            if t.service_name in (None, s.name)], now))
+                services.append(svc)
             return {
                 "axisSeconds": self.axis_seconds,
                 "errorThresholdPct": ERROR_RATE_THRESHOLD_PCT,
@@ -395,16 +502,17 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
         b.incident = _owner(b, incidents, now)
 
     status, status_text = _status(blocks, now)
-    # The page draws svc.issues whatever it was counted from (D-068).
-    issues = _ticket_issues(s, now) if s.name in TICKET_SERVICES else _incident_issues(incidents, blocks, left, now)
     return {
         "name": s.name,
+        # Which kind of row the page builds (D-068); a ticket row's own fields come from
+        # _ticket_row, which also replaces its status and its issues.
+        "row": "tickets" if s.name in TICKET_SERVICES else "metrics",
         "previousVersion": s.previous_version,
         "lastChange": s.last_change,
         "secondsSinceDeploy": (now - s.deployed_at) if s.deployed_at else None,
         "status": status,
         "statusText": status_text,
-        "issues": issues,
+        "issues": _incident_issues(incidents, blocks, left, now),  # the page draws it whatever it counts
         "groundTruth": [_incident_json(i, [b for b in blocks if b.incident is i], now, rel)
                         for i in incidents],
         "blocks": [_block_json(b, now, rel) for b in blocks],
@@ -550,9 +658,154 @@ def _incident_issues(incidents: list[IncidentEvent], blocks: list[_Block], left:
     return _issues_json(len(recent), detected, missed, to_detect, to_remediate)
 
 
-def _ticket_issues(s: ServiceState, now: float) -> dict:
-    """The Issues panel of a ticket service: zeros until the wall reads tickets (issue 09)."""
-    return _issues_json(0, 0, 0, [], [])
+# ---- a ticket row (D-068) ---------------------------------------------------------
+
+LIST_LENGTH = 5           # the newest tickets the list shows
+RECEIVED_SECONDS = 600.0  # "N received" counts the tickets created this long ago or since
+TIMELINE_SECONDS = 120    # "Tickets and agent runs" covers the last 2 minutes
+
+
+def _ticket_row(tickets: list[Ticket], now: float) -> dict:
+    """What a ticket service's row shows beyond the shared fields: the list, the timeline,
+    and its status and Issues numbers in place of the metric ones. Timeline positions are
+    seconds from its left edge, ``now - TIMELINE_SECONDS``."""
+    left = now - TIMELINE_SECONDS
+    listed = sorted((t for t in tickets if t.event_time is not None and t.priority is not None),
+                    key=lambda t: t.event_time, reverse=True)
+    runs = sorted((r for t in tickets for r in _agent_runs(t, now) if r.end >= left), key=lambda r: r.start)
+    working = [r for r in runs if r.open]
+    return {
+        "status": "working" if working else "healthy",
+        "statusText": "Agent resolving P1" if working else "Healthy",
+        "openP1": len({r.ticket.ticket_id for r in working}),
+        "agentsWorking": len({r.lane for r in working}),
+        "timelineSeconds": TIMELINE_SECONDS,
+        "runs": [_run_json(r, left) for r in runs],
+        "marks": [{"id": t.ticket_id, "priority": t.priority, "t": t.event_time - left}
+                  for t in reversed(listed) if left <= t.event_time <= now],
+        "issues": _ticket_issues(tickets, now),
+        "tickets": {
+            "received": sum(1 for t in listed if now - RECEIVED_SECONDS <= t.event_time <= now),
+            "newest": [{"id": t.ticket_id, "source": t.source, "priority": t.priority, "subject": t.subject,
+                        "eventTime": t.event_time} for t in listed[:LIST_LENGTH]],
+        },
+    }
+
+
+def _ticket_issues(tickets: list[Ticket], now: float) -> dict:
+    """A ticket service's Issues panel (spec decision 36), over the tickets created in the
+    last 10 minutes: injected, the P1s whose answer key says HIGH; detected, those the
+    classifier called HIGH; missed, those it called LOW or INVALID, or hasn't called 30 s
+    after the ticket; the median ticket -> HIGH verdict, and ticket -> the responder's
+    action, whatever it is. A LOW ticket called HIGH, and a wrong action, are evaluate's."""
+    injected = [t for t in tickets if t.priority == "P1" and t.true_severity == "HIGH"
+                and t.event_time is not None and now - RECEIVED_SECONDS <= t.event_time <= now]
+    detected = [t for t in injected if t.verdict == "HIGH"]
+    missed = [t for t in injected if t.verdict in ("LOW", "INVALID")
+              or (t.verdict is None and now - t.event_time > RUN_WAIT_SECONDS)]
+    return _issues_json(
+        len(injected), len(detected), len(missed),
+        [t.classified_at - t.event_time for t in detected if t.classified_at is not None],
+        [t.answered_at - t.event_time for t in injected if t.answered_at is not None],
+    )
+
+
+@dataclass
+class _Run:
+    """One agent's work on one ticket, as the timeline draws it (spec decision 34)."""
+    lane: str             # "classifier" or "responder"
+    ticket: Ticket
+    start: float
+    end: float            # the answer; now while open; RUN_WAIT_SECONDS after the start with no answer
+    open: bool
+    label: str
+    outcome: str | None   # the verdict or the action, in words; None with no answer
+    reason: str | None
+
+
+RUN_WAIT_SECONDS = 30.0  # a run nobody answered ends this long after it started
+
+
+def _agent_runs(ticket: Ticket, now: float) -> list[_Run]:
+    """The classifier's run, from the p1_tickets record to the verdict, and for a HIGH
+    verdict the responder's, from the verdict to the decision."""
+    runs = []
+    if ticket.p1_at is not None:
+        runs.append(_run("classifier", ticket, ticket.p1_at, ticket.classified_at,
+                         _words(ticket.verdict, VERDICT_WORDS), ticket.verdict_reason, now))
+    if ticket.verdict == "HIGH" and ticket.classified_at is not None:
+        runs.append(_run("responder", ticket, ticket.classified_at, ticket.answered_at,
+                         _words(ticket.action, ACTION_WORDS), ticket.action_reason, now))
+    return runs
+
+
+def _run(lane: str, ticket: Ticket, start: float, answered: float | None, outcome: str | None,
+         reason: str | None, now: float) -> _Run:
+    """An answered run reads its outcome and how long it took ("High in 4s"); an unanswered
+    one is open and reads "Working 3s", until it gives up and reads "No answer"."""
+    if answered is not None:
+        end = max(start, answered)
+        return _Run(lane, ticket, start, end, False, f"{outcome} in {_dur_words(end - start)}", outcome, reason)
+    if now - start <= RUN_WAIT_SECONDS:
+        return _Run(lane, ticket, start, now, True, f"Working {_dur_words(now - start)}", None, None)
+    return _Run(lane, ticket, start, start + RUN_WAIT_SECONDS, False, "No answer", None, None)
+
+
+VERDICT_WORDS = {"HIGH": "High", "LOW": "Low", "INVALID": "Invalid"}
+ACTION_WORDS = {"ROLLBACK": "Roll back", "SCALE_OUT": "Scale out",
+                "INVESTIGATE_UPSTREAM": "Investigate upstream", "INVALID": "Invalid"}
+
+
+def _words(code: str | None, words: dict[str, str]) -> str | None:
+    if code is None:
+        return None
+    return words.get(code) or code.replace("_", " ").capitalize()
+
+
+def _run_json(run: _Run, left: float) -> dict:
+    def pos(t: float) -> float:
+        return max(0.0, min(TIMELINE_SECONDS, t - left))
+
+    return {
+        "key": f"{run.lane}@{run.ticket.ticket_id}",  # who the bar is from one snapshot to the next (D-062)
+        "lane": run.lane,
+        "ticketId": run.ticket.ticket_id,
+        "priority": run.ticket.priority,
+        "subject": run.ticket.subject,
+        "start": pos(run.start),
+        "end": pos(run.end),
+        "open": run.open,
+        "label": run.label,
+        "outcome": run.outcome,
+        "reason": run.reason,
+    }
+
+
+def _dur_words(sec: float) -> str:
+    """A duration as the design writes it: "6s", "1m 05s"."""
+    sec = max(0, round(sec))
+    return f"{sec}s" if sec < 60 else f"{sec // 60}m {sec % 60:02d}s"
+
+
+def _ticket_last(ticket: Ticket) -> float:
+    """The latest moment known about a ticket, the anchor ``trim()`` drops it by."""
+    times = (ticket.event_time, ticket.p1_at, ticket.classified_at, ticket.answered_at)
+    return max((t for t in times if t is not None), default=0.0)
+
+
+def _written(kafka_ts: float | None, ticket: Ticket) -> float | None:
+    """When a ticket's record was written: its Kafka timestamp, else the ticket's creation."""
+    return kafka_ts if kafka_ts is not None else ticket.event_time
+
+
+def _fill_ticket(ticket: Ticket, record: dict) -> None:
+    """The ticket's own fields from any record that carries them (support_tickets, and
+    p1_tickets and ticket_triage, which copy them); a field already known stays."""
+    if ticket.event_time is None:
+        ticket.event_time = _to_seconds(record.get("event_time"))
+    for name in ("source", "service_name", "priority", "subject"):
+        if getattr(ticket, name) is None and record.get(name):
+            setattr(ticket, name, record[name])
 
 
 def _block_json(b: _Block, now: float, rel) -> dict:

@@ -518,7 +518,7 @@ def test_the_snapshot_has_no_global_summary():
     assert "summary" not in st.snapshot(now=NOW)
 
 
-def test_checkouts_panel_reads_zeros_until_the_wall_reads_its_tickets():
+def test_checkouts_panel_counts_tickets_and_never_incidents():
     st = OpsWallState()
     _incident(st, "checkout", T0, T0 + 40)  # never happens (D-068): checkout's numbers come from tickets
     assert _svc(st, "checkout")["issues"] == {"injected": 0, "detected": 0, "missed": 0,
@@ -711,3 +711,314 @@ def test_the_threshold_line_is_lab_2_2s_rule():
     (share,) = re.findall(r"error_count >= ([\d.]+) \* traffic_count", sql)
     assert ERROR_RATE_THRESHOLD_PCT == pytest.approx(100 * float(share))
     assert OpsWallState().snapshot(now=NOW)["errorThresholdPct"] == ERROR_RATE_THRESHOLD_PCT
+
+
+# --- checkout's row: tickets and agent runs (D-068) ------------------------------------
+
+ZD = "ZENDESK"
+SN = "SERVICENOW"
+
+
+def _ticket(st, tid, t, priority="P1", source=ZD, subject=None):
+    """One support_tickets record, as ops-sim writes it (event_time a TIMESTAMP(3))."""
+    st.apply_ticket({"event_time": _dt(t), "ticket_id": tid, "source": source, "service_name": "checkout",
+                     "priority": priority, "subject": subject or f"Subject of {tid}", "description": "Text."})
+
+
+def _row(st, now=NOW):
+    return _svc(st, "checkout", now)
+
+
+def test_the_snapshot_says_which_kind_of_row_each_service_gets():
+    # From opsgen.services' split (issue 02), so the page holds no service names.
+    rows = {s["name"]: s["row"] for s in OpsWallState().snapshot(now=NOW)["services"]}
+    assert rows == {"web-gateway": "metrics", "checkout": "tickets", "payments": "metrics"}
+
+
+def test_the_list_has_the_newest_5_tickets_and_the_count_of_the_last_10_minutes():
+    st = OpsWallState()
+    _ticket(st, "ZD-48200", NOW - 601)                       # 10 minutes and a second ago: not received
+    _ticket(st, "ZD-48201", NOW - 599, priority="P3")
+    for k, tid in enumerate(["INC0041872", "ZD-48202", "INC0041873", "ZD-48203", "ZD-48204"]):
+        _ticket(st, tid, NOW - 50 + 10 * k, priority=("P1", "P2", "P3")[k % 3], source=SN if tid[0] == "I" else ZD)
+    tickets = _row(st)["tickets"]
+    assert tickets["received"] == 6
+    assert [t["id"] for t in tickets["newest"]] == ["ZD-48204", "ZD-48203", "INC0041873", "ZD-48202", "INC0041872"]
+    assert tickets["newest"][2] == {"id": "INC0041873", "source": SN, "priority": "P3",
+                                    "subject": "Subject of INC0041873", "eventTime": pytest.approx(NOW - 30)}
+
+
+def test_every_ticket_of_the_last_2_minutes_is_a_mark_on_the_timeline():
+    st = OpsWallState()
+    _ticket(st, "ZD-48201", NOW - 121)                      # just off the timeline
+    _ticket(st, "ZD-48202", NOW - 120, priority="P2")
+    _ticket(st, "INC0041872", NOW - 30, priority="P3", source=SN)
+    _ticket(st, "ZD-48203", NOW - 5)
+    row = _row(st)
+    assert row["timelineSeconds"] == 120
+    # t is the position on the timeline: 0 at its left edge, 120 at now
+    assert row["marks"] == [
+        {"id": "ZD-48202", "priority": "P2", "t": pytest.approx(0.0)},
+        {"id": "INC0041872", "priority": "P3", "t": pytest.approx(90.0)},
+        {"id": "ZD-48203", "priority": "P1", "t": pytest.approx(115.0)},
+    ]
+
+
+TK = NOW - 60  # a ticket created a minute ago
+
+
+def _fields(tid, t, priority="P1", source=ZD):
+    """The seven ticket columns, which p1_tickets and ticket_triage copy from support_tickets."""
+    return {"event_time": _dt(t), "ticket_id": tid, "source": source, "service_name": "checkout",
+            "priority": priority, "subject": f"Subject of {tid}", "description": "Text."}
+
+
+def _p1(st, tid, at, t=TK):
+    """Lab 5.1's p1_tickets record; `at` is its Kafka timestamp."""
+    st.apply_p1_ticket(_fields(tid, t), kafka_ts=at)
+
+
+def _triage(st, tid, at, severity="HIGH", reason="Many customers cannot pay.", t=TK):
+    """Lab 5.2's ticket_triage record; `at` is its Kafka timestamp."""
+    st.apply_triage({**_fields(tid, t), "severity": severity, "reason": reason,
+                     "raw_response": f"Severity: {severity}\nReason: {reason}"}, kafka_ts=at)
+
+
+def _truth(st, tid, severity="HIGH", action="SCALE_OUT", t=TK):
+    """The simulator's ticket_answer_key record."""
+    st.apply_answer_key({"event_time": _dt(t), "ticket_id": tid, "true_severity": severity,
+                         "expected_action": action if severity == "HIGH" else None})
+
+
+def _respond(st, tid, at, action="SCALE_OUT", reason="Checkout times out under the sale.", t=TK):
+    """Lab 5.3's decision in remediation_decisions: window_end is the ticket's event_time."""
+    st.apply_decision({"window_end": _dt(t), "service_name": "checkout", "agent_name": "ticket_responder",
+                       "trigger": "HIGH_SEVERITY_TICKET", "action": action, "target": None, "reason": reason,
+                       "raw_response": f"Action: {action}\nReason: {reason}", "ticket_id": tid}, kafka_ts=at)
+
+
+def _tpos(t, now=NOW):
+    """Where absolute time `t` sits on the 2-minute timeline of a snapshot taken at `now`."""
+    return t - (now - 120)
+
+
+def test_a_p1_gets_a_classifier_run_and_a_high_verdict_a_responder_run():
+    st = OpsWallState()
+    _ticket(st, "ZD-48215", TK)
+    _p1(st, "ZD-48215", at=TK + 1)
+    _triage(st, "ZD-48215", at=TK + 5)
+    _respond(st, "ZD-48215", at=TK + 11)
+    classifier, responder = _row(st)["runs"]
+    assert classifier == {
+        "key": "classifier@ZD-48215", "lane": "classifier", "ticketId": "ZD-48215", "priority": "P1",
+        "subject": "Subject of ZD-48215", "start": pytest.approx(_tpos(TK + 1)), "end": pytest.approx(_tpos(TK + 5)),
+        "open": False, "label": "High in 4s", "outcome": "High", "reason": "Many customers cannot pay.",
+    }
+    assert responder == {
+        "key": "responder@ZD-48215", "lane": "responder", "ticketId": "ZD-48215", "priority": "P1",
+        "subject": "Subject of ZD-48215", "start": pytest.approx(_tpos(TK + 5)), "end": pytest.approx(_tpos(TK + 11)),
+        "open": False, "label": "Scale out in 6s", "outcome": "Scale out",
+        "reason": "Checkout times out under the sale.",
+    }
+
+
+@pytest.mark.parametrize("severity", ["LOW", "INVALID"])
+def test_a_low_or_invalid_verdict_stops_after_the_classifier(severity):
+    st = OpsWallState()
+    _ticket(st, "ZD-48215", TK)
+    _p1(st, "ZD-48215", at=TK + 1)
+    _triage(st, "ZD-48215", at=TK + 4, severity=severity)
+    [run] = _row(st)["runs"]
+    assert (run["lane"], run["label"]) == ("classifier", f"{severity.capitalize()} in 3s")
+
+
+@pytest.mark.parametrize(("action", "label"), [
+    ("ROLLBACK", "Roll back in 5s"),
+    ("SCALE_OUT", "Scale out in 5s"),
+    ("INVESTIGATE_UPSTREAM", "Investigate upstream in 5s"),
+    ("INVALID", "Invalid in 5s"),
+])
+def test_a_responder_bar_reads_its_action_in_words(action, label):
+    st = OpsWallState()
+    _p1(st, "ZD-48215", at=TK + 1)
+    _triage(st, "ZD-48215", at=TK + 4)
+    _respond(st, "ZD-48215", at=TK + 9.4, action=action)
+    assert _row(st)["runs"][1]["label"] == label
+
+
+def test_an_open_run_reads_working_and_after_30_s_no_answer_and_is_no_longer_open():
+    st = OpsWallState()
+    _ticket(st, "ZD-48215", TK)
+    _p1(st, "ZD-48215", at=TK + 1)
+    [run] = _row(st, now=TK + 4.2)["runs"]
+    assert (run["open"], run["label"], run["outcome"]) == (True, "Working 3s", None)
+    assert run["end"] == 120  # at now, the right edge
+    [run] = _row(st, now=TK + 31)["runs"]
+    assert (run["open"], run["label"]) == (True, "Working 30s")
+    [run] = _row(st, now=TK + 31.5)["runs"]
+    assert (run["open"], run["label"], run["outcome"]) == (False, "No answer", None)
+    assert run["end"] == pytest.approx(_tpos(TK + 31, now=TK + 31.5))  # it ends 30 s after it started
+
+    # The verdict comes, then the responder works on it, and gives up the same way.
+    _triage(st, "ZD-48215", at=TK + 40)
+    classifier, responder = _row(st, now=TK + 45)["runs"]
+    assert (classifier["open"], classifier["label"]) == (False, "High in 39s")
+    assert (responder["open"], responder["label"]) == (True, "Working 5s")
+    assert _row(st, now=TK + 71)["runs"][1]["label"] == "No answer"
+
+
+def test_two_runs_overlapping_in_one_lane_are_both_drawn():
+    # Flink calls the agent per row, with no queue: the second ticket's run starts while the
+    # first one's is still going, and the two bars draw over each other.
+    st = OpsWallState()
+    _p1(st, "ZD-48215", at=TK + 1)
+    _p1(st, "INC0041872", at=TK + 3, t=TK + 2)
+    _triage(st, "ZD-48215", at=TK + 7, severity="LOW")
+    _triage(st, "INC0041872", at=TK + 6, severity="LOW", t=TK + 2)
+    runs = _row(st)["runs"]
+    assert [(r["key"], r["lane"], r["label"]) for r in runs] == [
+        ("classifier@ZD-48215", "classifier", "Low in 6s"),
+        ("classifier@INC0041872", "classifier", "Low in 3s"),
+    ]
+    assert runs[1]["start"] < runs[0]["end"]
+
+
+def test_a_run_that_ended_before_the_timeline_is_left_out():
+    st = OpsWallState()
+    _p1(st, "ZD-48215", at=NOW - 130, t=NOW - 131)
+    _triage(st, "ZD-48215", at=NOW - 121, t=NOW - 131)
+    _respond(st, "ZD-48215", at=NOW - 110, t=NOW - 131)
+    [responder] = _row(st)["runs"]
+    assert (responder["lane"], responder["start"], responder["end"]) == ("responder", 0.0, pytest.approx(10.0))
+
+
+def test_the_status_and_the_counters_follow_the_open_runs():
+    st = OpsWallState()
+    row = _row(st)
+    assert (row["status"], row["statusText"], row["openP1"], row["agentsWorking"]) == ("healthy", "Healthy", 0, 0)
+
+    _p1(st, "ZD-48215", at=NOW - 20)                 # the classifier works on it
+    _p1(st, "INC0041872", at=NOW - 10, t=NOW - 11)   # and on this one
+    row = _row(st)
+    assert (row["status"], row["statusText"]) == ("working", "Agent resolving P1")
+    assert (row["openP1"], row["agentsWorking"]) == (2, 1)
+
+    _triage(st, "ZD-48215", at=NOW - 5)              # HIGH: the responder takes it over
+    row = _row(st)
+    assert (row["openP1"], row["agentsWorking"]) == (2, 2)
+
+    _triage(st, "INC0041872", at=NOW - 4, severity="LOW", t=NOW - 11)
+    _respond(st, "ZD-48215", at=NOW - 1)
+    row = _row(st)
+    assert (row["status"], row["statusText"], row["openP1"], row["agentsWorking"]) == ("healthy", "Healthy", 0, 0)
+
+
+def test_a_run_that_got_no_answer_no_longer_counts_as_open():
+    st = OpsWallState()
+    _p1(st, "ZD-48215", at=NOW - 31)
+    row = _row(st)
+    assert (row["status"], row["openP1"], row["agentsWorking"]) == ("healthy", 0, 0)
+
+
+def _story(st, tid, t, truth="HIGH", priority="P1", verdict=None, verdict_after=None, answer_after=None):
+    """A ticket created at `t`: its answer key, and the agents' answers that many seconds after."""
+    _ticket(st, tid, t, priority=priority)
+    _truth(st, tid, severity=truth, t=t)
+    if priority == "P1":
+        _p1(st, tid, at=t + 1, t=t)
+    if verdict is not None:
+        _triage(st, tid, at=t + verdict_after, severity=verdict, t=t)
+    if answer_after is not None:
+        _respond(st, tid, at=t + answer_after, t=t)
+
+
+def test_checkouts_issues_count_the_really_high_p1_tickets_of_the_last_10_minutes():
+    st = OpsWallState()
+    _story(st, "A", NOW - 300, verdict="HIGH", verdict_after=4, answer_after=10)
+    _story(st, "B", NOW - 250, verdict="HIGH", verdict_after=6, answer_after=20)
+    _story(st, "J", NOW - 200, verdict="HIGH", verdict_after=8)                 # detected, not answered yet
+    _story(st, "K", NOW - 50, verdict="HIGH", verdict_after=40)                 # detected late: still detected
+    _story(st, "C", NOW - 150, verdict="LOW", verdict_after=3)                  # missed
+    _story(st, "D", NOW - 140, verdict="INVALID", verdict_after=3)              # missed
+    _story(st, "E", NOW - 31)                                                   # no verdict after 30 s: missed
+    _story(st, "F", NOW - 29)                                                   # no verdict yet: injected only
+    _story(st, "G", NOW - 100, truth="LOW", verdict="HIGH", verdict_after=3, answer_after=9)  # left to evaluate
+    _story(st, "H", NOW - 90, truth="LOW", priority="P2")
+    _story(st, "I", NOW - 601, verdict="HIGH", verdict_after=4, answer_after=10)  # created before the window
+    assert _row(st)["issues"] == {
+        "injected": 8, "detected": 4, "missed": 3,
+        "medianTimeToDetect": pytest.approx(7.0),       # 4, 6, 8, 40: ticket -> HIGH verdict
+        "medianTimeToRemediate": pytest.approx(15.0),   # 10, 20: ticket -> the responder's action
+    }
+
+
+def test_a_ticket_fills_in_from_its_five_records_in_any_order():
+    import itertools
+
+    records = [
+        lambda st: _ticket(st, "ZD-48215", TK),
+        lambda st: _p1(st, "ZD-48215", at=TK + 1),
+        lambda st: _triage(st, "ZD-48215", at=TK + 5),
+        lambda st: _truth(st, "ZD-48215"),
+        lambda st: _respond(st, "ZD-48215", at=TK + 11),
+    ]
+    for order in itertools.permutations(records):
+        st = OpsWallState()
+        for apply in order:
+            apply(st)
+        row = _row(st)
+        assert row["tickets"]["newest"] == [{"id": "ZD-48215", "source": ZD, "priority": "P1",
+                                             "subject": "Subject of ZD-48215", "eventTime": pytest.approx(TK)}]
+        assert [(r["label"], r["reason"]) for r in row["runs"]] == [
+            ("High in 4s", "Many customers cannot pay."), ("Scale out in 6s", "Checkout times out under the sale.")]
+        assert row["issues"] == {"injected": 1, "detected": 1, "missed": 0,
+                                 "medianTimeToDetect": pytest.approx(5.0), "medianTimeToRemediate": pytest.approx(11.0)}
+
+
+def test_p2_and_p3_tickets_are_listed_and_marked_but_get_no_runs():
+    st = OpsWallState()
+    _ticket(st, "ZD-48215", TK, priority="P2")
+    _truth(st, "ZD-48215", severity="LOW")
+    _ticket(st, "INC0041872", TK + 1, priority="P3", source=SN)
+    row = _row(st)
+    assert [t["priority"] for t in row["tickets"]["newest"]] == ["P3", "P2"]
+    assert [m["priority"] for m in row["marks"]] == ["P2", "P3"]
+    assert row["runs"] == [] and row["issues"]["injected"] == 0
+
+
+def test_a_ticket_decision_stays_out_of_the_metric_rows():
+    st = OpsWallState()
+    # payments waits for an agent on a latency breach
+    _incident(st, "payments", T0, T0 + 40)
+    _health(st, "payments", T0 + 10, lat="HIGH")
+    before = _svc(st, "payments", T0 + 20)
+    # A decision carrying a ticket_id is the responder's, whatever else it says: it must not
+    # close the block, count anywhere, or turn the tile to "Rolled back".
+    st.apply_decision({"window_end": _dt(T0 + 10), "service_name": "payments", "agent_name": "ticket_responder",
+                       "trigger": "LATENCY_HIGH", "action": "ROLLBACK", "target": None, "reason": "r",
+                       "ticket_id": "ZD-48215"}, kafka_ts=T0 + 18)
+    _respond(st, "INC0041872", at=T0 + 19, action="SCALE_OUT", t=T0 + 10)  # an ordinary one, on checkout
+    after = _svc(st, "payments", T0 + 20)
+    assert after["blocks"] == before["blocks"] and after["blocks"][0]["open"] is True
+    assert (after["status"], after["issues"]) == ("anomaly", before["issues"])
+    assert _svc(st, "payments", T0 + 140)["status"] == "healthy"  # no fix shown, even once the block is gone
+    checkout = _svc(st, "checkout", T0 + 20)
+    assert checkout["blocks"] == [] and checkout["groundTruth"] == []  # no false alarm either
+
+
+def test_trim_drops_the_tickets_older_than_the_axis_plus_the_margin():
+    st = OpsWallState()
+    _story(st, "OLD", NOW - 680, verdict="HIGH", verdict_after=4, answer_after=19)  # last record at NOW - 661
+    _story(st, "KEPT", NOW - 650)
+    st.trim(NOW)  # keeps the last 600 + 60 s
+    # A snapshot whose window still reaches back 700 s would count the dropped one.
+    row = _row(st, now=NOW - 100)
+    assert [t["id"] for t in row["tickets"]["newest"]] == ["KEPT"]
+    assert row["tickets"]["received"] == 1
+
+
+def test_time_to_remediate_counts_any_action():
+    st = OpsWallState()
+    _story(st, "A", NOW - 100, verdict="HIGH", verdict_after=4)
+    _respond(st, "A", at=NOW - 100 + 9, action="INVALID", t=NOW - 100)
+    assert _row(st)["issues"]["medianTimeToRemediate"] == pytest.approx(9.0)
