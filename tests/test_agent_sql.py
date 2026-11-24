@@ -23,7 +23,11 @@ from scripts.evaluation.decisions import (
     ACTIONS,
     ALLOWED_ACTIONS,
     CAPACITY_AGENT,
+    INVESTIGATE_UPSTREAM,
     RELEASE_AGENT,
+    ROLLBACK,
+    SCALE_OUT,
+    TICKET_RESPONDER,
 )
 from scripts.evaluation.tickets import HIGH, LOW
 
@@ -35,6 +39,7 @@ AGENT_FILES = {
     RELEASE_AGENT: "4.2_release_agent.sql",
     CAPACITY_AGENT: "4.2_capacity_agent.sql",
     TICKET_CLASSIFIER: "5.2_ticket_classifier.sql",
+    TICKET_RESPONDER: "5.3_ticket_responder.sql",
 }
 # Each INSERT: the agent it calls and the table it reads. The release agent has two legs:
 # error-rate breaches (lab 2.2's table, D-067) and latency anomalies. The classifier reads
@@ -51,11 +56,13 @@ METRIC_INSERTS = (ERRORS_INSERT, LATENCY_INSERT, CAPACITY_INSERT)
 TABLE_FILE = "sink_remediation_decisions.sql"
 
 # Each agent's answer, line by line: brief section 5.5, cut down in D-034, for the metric
-# agents; a severity and a reason for the classifier (D-068).
+# agents; a severity and a reason for the classifier, and an action and a reason for the
+# responder, which never has a target (D-068).
 OUTPUT_LINES = {
     RELEASE_AGENT: ("Action:", "Target:", "Reason:"),
     CAPACITY_AGENT: ("Action:", "Target:", "Reason:"),
     TICKET_CLASSIFIER: ("Severity:", "Reason:"),
+    TICKET_RESPONDER: ("Action:", "Reason:"),
 }
 # What the first line may say: a metric agent's action, or the classifier's verdict.
 ALLOWED_ANSWERS = {**ALLOWED_ACTIONS, TICKET_CLASSIFIER: (HIGH, LOW)}
@@ -200,10 +207,12 @@ def test_the_classifier_calls_high_only_when_many_customers_cannot_buy_right_now
     assert "marked P1 by whoever filed it" in prompt and "over-prioritise" in prompt
 
 
-# An example shows its ticket as the INSERT shows one, then the answer.
+# An example shows its ticket as the INSERT shows one, then the answer. A responder example
+# also shows the classifier's reason, as 5.3's INSERT passes it on.
 _EXAMPLE_TICKET = re.compile(
     r"\nTICKET (?:ZD-\d{5}|INC\d{7}) from (?:ZENDESK|SERVICENOW)\nPriority: P1\n"
-    r"Subject: (?P<subject>[^\n]+)\nDescription: (?P<description>[^\n]+)\nAnswer:\n"
+    r"Subject: (?P<subject>[^\n]+)\nDescription: (?P<description>[^\n]+)\n"
+    r"(?:Triage Reason: (?P<triage>[^\n]+)\n)?Answer:\n"
 )
 
 
@@ -217,10 +226,11 @@ def _filled(text: str) -> re.Pattern:
     return re.compile(pattern)
 
 
-def _classifier_examples() -> list[tuple[str, Template, str]]:
-    """(severity, the approved template its ticket fills in, Reason) for each example."""
+def _ticket_examples(agent: str) -> list[tuple[str, Template, str | None, str]]:
+    """(answer, the approved template its ticket fills in, Triage Reason or None, the answer's
+    Reason) for each example of a ticket agent."""
     found = []
-    for severity, text in _examples(read(AGENT_FILES[TICKET_CLASSIFIER])):
+    for answer, text in _examples(read(AGENT_FILES[agent])):
         ticket = _EXAMPLE_TICKET.match(text)
         assert ticket, text
         [template] = [
@@ -229,7 +239,16 @@ def _classifier_examples() -> list[tuple[str, Template, str]]:
             if _filled(t.subject).fullmatch(ticket["subject"])
             and _filled(t.description).fullmatch(ticket["description"])
         ]
-        found.append((severity, template, _reason(text).strip()))
+        found.append((answer, template, ticket["triage"], _reason(text[ticket.end() :]).strip()))
+    return found
+
+
+def _classifier_examples() -> list[tuple[str, Template, str]]:
+    """(severity, the approved template its ticket fills in, Reason) for each example."""
+    found = []
+    for severity, template, triage, reason in _ticket_examples(TICKET_CLASSIFIER):
+        assert triage is None, "the classifier is the first agent: nothing has triaged the ticket"
+        found.append((severity, template, reason))
     return found
 
 
@@ -314,6 +333,66 @@ def test_the_classifier_input_names_the_ticket_and_survives_a_null_text():
                  "'Subject: ', COALESCE(t.`subject`, 'N/A'), '\\n',",
                  "'Description: ', COALESCE(t.`description`, 'N/A')\n"):  # fmt: skip
         assert line in concat, line
+
+
+# --- lab 5.3: the ticket responder (D-068) -------------------------------------------------
+
+
+def test_the_responder_answers_an_action_and_a_reason_and_never_a_target():
+    """Spec decision 22: two labelled lines. A ticket has no version to roll back to and no
+    replica count, so there is no Target line (checked with the other agents' lines)."""
+    prompt = read(AGENT_FILES[TICKET_RESPONDER])
+    assert "Action: [ROLLBACK | SCALE_OUT | INVESTIGATE_UPSTREAM]\nReason: [one or two sentences]\n" in prompt
+    assert "There is no Target line: there is never a version or a replica count to give." in prompt
+
+
+def test_the_responder_rolls_back_a_release_then_scales_out_a_load_then_looks_upstream():
+    """Spec decision 22: the rules in order, each on its cue. Every ticket it reads was already
+    classified HIGH, and the classifier's reason comes with it."""
+    prompt = read(AGENT_FILES[TICKET_RESPONDER])
+    rules = ("1. ROLLBACK — ", "2. SCALE_OUT — ", "3. INVESTIGATE_UPSTREAM — ", "STRICT VALUES")
+    rollback, scale_out, upstream, strict = (prompt.index(s) for s in rules)
+    assert rollback < scale_out < upstream < strict
+    for cue in ("tied to a release", "an update", "a new version"):
+        assert cue in prompt[rollback:scale_out], cue
+    for cue in ("slow or timing out under heavy load", "a sale", "a campaign", "a peak"):
+        assert cue in prompt[scale_out:upstream], cue
+    assert "payments fail at a payment provider or a payment gateway" in prompt[upstream:strict]
+    assert "stop at the first one that matches" in prompt
+    assert "already been classified high severity by the triage agent" in prompt
+    assert "Recommend the one action that fixes it fastest." in prompt
+    assert "Use only what the ticket and the triage reason say" in prompt[strict:]
+
+
+def test_the_responder_examples_are_approved_high_tickets_filled_in():
+    """One per action, each a really-HIGH P1 template the user approved (issue 03) that expects
+    that action, with its placeholders filled from their pools."""
+    examples = _ticket_examples(TICKET_RESPONDER)
+    assert sorted(action for action, *_ in examples) == sorted(ALLOWED_ACTIONS[TICKET_RESPONDER])
+    for action, template, _, _ in examples:
+        assert (template.priority, template.true_severity, template.expected_action) == ("P1", HIGH, action)
+
+
+def test_each_responder_example_carries_a_triage_reason_the_classifier_would_give():
+    """The input ends with the classifier's reason, so each example does too: many customers,
+    who cannot buy or pay."""
+    examples = _ticket_examples(TICKET_RESPONDER)
+    assert examples
+    for action, _, triage, _ in examples:
+        assert triage, f"the {action} example has no Triage Reason line"
+        assert "customers" in triage and re.search(r"\b(buy|pay)\b", triage), (action, triage)
+
+
+# The cue each action's example names in its Reason (spec decision 10): the release, the load,
+# the provider.
+RESPONDER_CUES = {ROLLBACK: "release", SCALE_OUT: "load", INVESTIGATE_UPSTREAM: "provider"}
+
+
+def test_each_responder_example_reason_names_its_cue():
+    examples = _ticket_examples(TICKET_RESPONDER)
+    assert examples
+    for action, _, _, reason in examples:
+        assert RESPONDER_CUES[action] in reason, (action, reason)
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
