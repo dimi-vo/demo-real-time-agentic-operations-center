@@ -516,7 +516,7 @@ def test_incident_numbering_continues_after_a_restart(tmp_path):
     first = Simulation(1, start=0.0, config=config)
     started = []
     for now in range(0, 400):
-        _, _, events, _ = first.tick(float(now))
+        events = first.tick(float(now)).events
         started += [ev.incident.incident_id for ev in events if ev.kind == "incident_start"]
     assert len(started) >= 2
     save_state(path, first.state_snapshot())
@@ -531,7 +531,7 @@ def test_incident_numbering_continues_after_a_restart(tmp_path):
     }
     ids = []
     for now in range(1000, 1300):
-        _, _, events, _ = second.tick(float(now))
+        events = second.tick(float(now)).events
         ids += [ev.incident.incident_id for ev in events if ev.kind == "incident_start"]
     assert ids and ids[0] == f"INC{len(started) + 1:04d}"
 

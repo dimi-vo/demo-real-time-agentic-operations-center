@@ -13,7 +13,7 @@ import sys
 from datetime import datetime, timezone
 
 from opsgen.engine import BAD_DEPLOY_TYPES, Event, Incident
-from opsgen.tickets import SOURCE_NAMES, NewTicket
+from opsgen.tickets import SOURCES_BY_CODE, NewTicket
 
 
 def _hms(epoch_seconds: float) -> str:
@@ -63,7 +63,7 @@ def format_ticket(t: NewTicket, clock: str | None = None) -> str:
     truth = ", ".join(v for v in (key["true_severity"], key["expected_action"]) if v)
     return (
         f"[{when}] TICKET          {ticket['priority']}  {ticket['ticket_id']:<10}  "
-        f'{SOURCE_NAMES[ticket["source"]]:<10}  "{ticket["subject"]}"  [truth: {truth}]'
+        f'{SOURCES_BY_CODE[ticket["source"]].name:<10}  "{ticket["subject"]}"  [truth: {truth}]'
     )
 
 

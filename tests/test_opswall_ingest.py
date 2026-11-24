@@ -274,7 +274,7 @@ def test_a_record_from_each_ticket_topic_reaches_checkouts_row(registry):
     # The first P1 the real ticket clock produces that is really HIGH (seed 1).
     start = 1_800_000_000.0
     sim = Simulation(1, start=start)
-    new = next(n for k in range(3600) for n in sim.tick(start + k)[3]
+    new = next(n for k in range(3600) for n in sim.tick(start + k).tickets
                if n.ticket["priority"] == "P1" and n.answer_key["true_severity"] == "HIGH")
     created = new.ticket["event_time"] / 1000
 

@@ -37,17 +37,25 @@ PRIORITIES = ("P1", "P2", "P3")
 PRIORITY_WEIGHTS = (0.30, 0.30, 0.40)
 P1_HIGH_SHARE = 0.5
 
-ZENDESK = "ZENDESK"
-SERVICENOW = "SERVICENOW"
-SOURCES = (ZENDESK, SERVICENOW)
-SOURCE_NAMES = {ZENDESK: "Zendesk", SERVICENOW: "ServiceNow"}
-# The next number each source gives out on a fresh start: the design's next ids.
-FIRST_NUMBERS = {ZENDESK: 48215, SERVICENOW: 41872}
+
+@dataclass(frozen=True)
+class Source:
+    """Where a ticket was filed: everything the simulator, its console and the wall say about it."""
+
+    code: str  # support_tickets.source
+    name: str  # how a person reads it
+    first_number: int  # the number of its first ticket on a fresh start: the design's next id
+    id_format: str  # its ids, from the number
+
+    def ticket_id(self, number: int) -> str:
+        return self.id_format.format(number)
 
 
-def ticket_id(source: str, number: int) -> str:
-    """`ZD-48215` for Zendesk, `INC0041872` (seven digits) for ServiceNow."""
-    return f"ZD-{number}" if source == ZENDESK else f"INC{number:07d}"
+SOURCES = (
+    Source("ZENDESK", "Zendesk", 48215, "ZD-{}"),  # ZD-48215
+    Source("SERVICENOW", "ServiceNow", 41872, "INC{:07d}"),  # INC0041872, seven digits
+)
+SOURCES_BY_CODE = {s.code: s for s in SOURCES}
 
 
 class NewTicket(NamedTuple):
@@ -75,7 +83,7 @@ class TicketClock:
     `--no-incidents`, and the clock then produces nothing and draws nothing."""
 
     rng: random.Random
-    next_numbers: dict[str, int] = field(default_factory=lambda: dict(FIRST_NUMBERS))
+    next_numbers: dict[str, int] = field(default_factory=lambda: {s.code: s.first_number for s in SOURCES})
     on: bool = True
 
     def tick(self, event_time_ms: int) -> list[NewTicket]:
@@ -91,12 +99,12 @@ class TicketClock:
         source = rng.choice(SOURCES)
         template = rng.choice(TEMPLATES_BY_CATEGORY[(priority, severity, action)])
         subject, description = fill(template, rng)
-        tid = ticket_id(source, self.next_numbers[source])
-        self.next_numbers[source] += 1
+        tid = source.ticket_id(self.next_numbers[source.code])
+        self.next_numbers[source.code] += 1
         ticket = {
             "event_time": event_time_ms,
             "ticket_id": tid,
-            "source": source,
+            "source": source.code,
             "service_name": SERVICE,
             "priority": priority,
             "subject": subject,

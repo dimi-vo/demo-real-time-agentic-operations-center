@@ -137,7 +137,7 @@ ANSWER_KEY_FIELDS = {"event_time", "ticket_id", "true_severity", "expected_actio
 
 def _sim_tickets(sim, seconds, start=0):
     """Tick `sim` from `start` for `seconds`. Returns (tick time, ticket) pairs."""
-    return [(now, t) for k in range(seconds) for now in [sim.start + start + k] for t in sim.tick(now)[3]]
+    return [(now, t) for k in range(seconds) for now in [sim.start + start + k] for t in sim.tick(now).tickets]
 
 
 def test_every_ticket_has_its_answer_key_on_the_same_tick():
@@ -232,7 +232,7 @@ def test_tickets_start_on_the_first_tick_with_no_quiet_period():
     # 200 runs' first minutes hold as many tickets as any minute: about 4 each.
     first_minutes = [len(_sim_tickets(Simulation(seed, start=0.0), 60)) for seed in range(200)]
     assert sum(first_minutes) / 200 == pytest.approx(4, abs=0.4)
-    assert sum(1 for seed in range(200) if Simulation(seed, start=0.0).tick(0.0)[3]) > 0
+    assert sum(1 for seed in range(200) if Simulation(seed, start=0.0).tick(0.0).tickets) > 0
 
 
 def test_no_incidents_means_no_tickets():

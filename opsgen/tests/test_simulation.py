@@ -83,7 +83,7 @@ def test_checkout_writes_no_metrics_and_no_deployment_records():
 
 def test_metrics_record_fields_match_schema():
     sim = _sim(seed=1)
-    metrics, _, _, _ = sim.tick(0.0)
+    metrics = sim.tick(0.0).metrics
     for r in metrics:
         assert set(r) == METRICS_FIELDS
         assert isinstance(r["traffic_count"], int) and isinstance(r["error_count"], int)
@@ -107,11 +107,11 @@ def test_deployment_record_fields_match_schema():
 def test_reemit_every_five_seconds():
     sim = _sim(seed=3, config=Config(no_incidents=True))  # no deploys to interfere
     # No re-emit at tick 0 (bootstrap covers it); full re-emit at the 5s boundary.
-    _, deps0, _, _ = sim.tick(0.0)
+    deps0 = sim.tick(0.0).deployments
     assert deps0 == []
-    _, deps5, _, _ = sim.tick(float(REEMIT_INTERVAL))
+    deps5 = sim.tick(float(REEMIT_INTERVAL)).deployments
     assert {r["service_name"] for r in deps5} == {"web-gateway", "payments"}
-    _, deps6, _, _ = sim.tick(6.0)
+    deps6 = sim.tick(6.0).deployments
     assert deps6 == []
 
 
@@ -145,7 +145,7 @@ def _run(sim: Simulation, ticks: range) -> dict[str, list[dict]]:
     per tick (D-058)."""
     by_service: dict[str, list[dict]] = defaultdict(list)
     for k in ticks:
-        metrics, _, _, _ = sim.tick(float(k))
+        metrics = sim.tick(float(k)).metrics
         assert sorted(r["service_name"] for r in metrics) == ["payments", "web-gateway"], k
         for r in metrics:
             by_service[r["service_name"]].append(r)
@@ -218,7 +218,7 @@ def test_bad_deploy_degrades_from_its_own_tick():
     assert any(e.kind == "incident_start" and e.now == bad.now for e in events)
     window = [r for r in metrics if r["service_name"] == bad.service_name]
     for j in range(1, 10):
-        window += [r for r in sim.tick(float(k + j))[0] if r["service_name"] == bad.service_name]
+        window += [r for r in sim.tick(float(k + j)).metrics if r["service_name"] == bad.service_name]
     baseline = METRIC_SERVICES_BY_NAME[bad.service_name].median_latency_ms
     assert statistics.mean(r["latency_ms"] for r in window) > 2.5 * baseline  # x4 under a bad deploy
 
@@ -273,7 +273,7 @@ def test_windows_of_samples_match_the_old_per_request_windows():
     sim = _sim(seed=8, config=Config(no_incidents=True))
     new: dict[str, dict[int, list[dict]]] = defaultdict(lambda: defaultdict(list))
     for k in range(10 * windows):
-        for r in sim.tick(float(k))[0]:
+        for r in sim.tick(float(k)).metrics:
             new[r["service_name"]][r["event_time"] // 10_000].append(r)
     rng = random.Random(9)
     for svc in METRIC_SERVICES:
@@ -295,7 +295,7 @@ def test_incident_ends_on_a_tick_at_the_logged_ended_at():
     sim = Simulation(42, start=1_794_390_513.319599, config=Config())
     ends = []
     for k in range(3600):
-        _, _, events, _ = sim.tick(sim.start + k)
+        events = sim.tick(sim.start + k).events
         ends += [(ev.now, ev.incident) for ev in events if ev.kind == "incident_end"]
     assert ends
     for now, inc in ends:
@@ -320,10 +320,10 @@ def _resolved_on_tick_17(itype, svc):
     and ticks 16 and 17."""
     sim = _sim(seed=4, config=Config(quiet_period=0))
     _force(sim, itype, svc)
-    _, _, started, _ = sim.tick(0.0)
+    started = sim.tick(0.0).events
     inc = started[-1].incident
     for k in range(1, 16):
-        assert sim.tick(float(k))[2] == []
+        assert sim.tick(float(k)).events == []
     tick_16 = sim.tick(16.0)
     answer = Decision(svc, 10.0, AGENT_FOR_TRIGGER[inc.expected_trigger], inc.expected_trigger, inc.expected_action)
     tick_17 = sim.tick(17.0, decisions=[answer])
@@ -342,7 +342,7 @@ def test_a_resolved_incident_and_its_records_end_on_the_tick_that_read_the_decis
         assert dep["version"] == started[0].old_version
     else:
         assert deps == []
-    assert all(sim.tick(float(k))[2] == [] for k in range(18, 40))  # it doesn't end again at 35
+    assert all(sim.tick(float(k)).events == [] for k in range(18, 40))  # it doesn't end again at 35
 
 
 def _times_normal(record, itype):
@@ -367,5 +367,5 @@ def test_aligned_start_is_the_next_ten_second_boundary():
     assert aligned_start(1_800_000_010.0) == 1_800_000_010.0
     # starting there, the first window is full: every tick of window 0 is produced
     sim = Simulation(3, start=aligned_start(1_800_000_003.4), config=Config())
-    first_window = {r["event_time"] // 10_000 for k in range(10) for r in sim.tick(sim.start + k)[0]}
+    first_window = {r["event_time"] // 10_000 for k in range(10) for r in sim.tick(sim.start + k).metrics}
     assert first_window == {180_000_001}

@@ -21,7 +21,7 @@ def test_dry_run_sink_emits_tagged_json_lines():
     sink = DryRunSink(out=out, log=log)
     sim = Simulation(1, start=0.0, config=Config(no_incidents=True))
     sink.emit_deployments(sim.bootstrap())
-    metrics, _, _, _ = sim.tick(0.0)
+    metrics = sim.tick(0.0).metrics
     sink.emit_metrics(metrics)
     lines = [json.loads(line) for line in out.getvalue().splitlines()]
     deployments = [x for x in lines if x.get("_stream") == "service_deployments"]
@@ -53,7 +53,7 @@ def test_simulate_summary_sums_the_window_records():
     sim = Simulation(5, start=0.0, config=Config(no_incidents=True))
     expect = {}
     shadow = Simulation(5, start=0.0, config=Config(no_incidents=True))
-    window = [r for k in range(10) for r in shadow.tick(float(k))[0] if r["service_name"] == "payments"]
+    window = [r for k in range(10) for r in shadow.tick(float(k)).metrics if r["service_name"] == "payments"]
     traffic = sum(r["traffic_count"] for r in window)
     expect["traffic"] = f"traffic={traffic:>4}"
     expect["lat"] = f"lat={sum(r['latency_ms'] for r in window) / 10:6.1f}ms"
@@ -193,7 +193,7 @@ def test_an_incident_end_line_says_who_resolved_it_and_when():
     for k in range(1, 17):
         sim.tick(float(k))
     answer = Decision("payments", 10.0, "release_agent", "LATENCY_HIGH", "ROLLBACK")
-    [end] = sim.tick(17.0, decisions=[answer])[2]
+    [end] = sim.tick(17.0, decisions=[answer]).events
     assert format_event(end, clock="00:17") == (
         "[00:17] INCIDENT END    BAD_DEPLOY     payments     rollback 2.9.5 -> 2.9.4, "
         "resolved by release_agent ROLLBACK after 17 s"

@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import random
 from collections.abc import Iterable
+from typing import NamedTuple
 
 from opsgen.deployments import DeploymentState, highest
 from opsgen.distributions import binomial, mean_latency_ms, poisson
 from opsgen.engine import Config, Decision, Engine, Event
 from opsgen.services import METRIC_SERVICES
-from opsgen.tickets import FIRST_NUMBERS, NewTicket, TicketClock
+from opsgen.tickets import SOURCES, NewTicket, TicketClock
 
 REEMIT_INTERVAL = 5  # seconds; the controller reconciliation loop re-emits every metric service
 # A metrics record covers one tick and is stamped at its end: tick + 999 ms (D-058).
@@ -26,6 +27,15 @@ SAMPLE_OFFSET_MS = 999
 
 def to_millis(epoch_seconds: float) -> int:
     return int(epoch_seconds * 1000)
+
+
+class Tick(NamedTuple):
+    """What one tick produced."""
+
+    metrics: list[dict]  # service_metrics records, one per metric service
+    deployments: list[dict]  # service_deployments records: version changes and the 5 s re-emit
+    events: list[Event]  # incident starts and ends, and deploys
+    tickets: list[NewTicket]  # each a support_tickets record and its ticket_answer_key record
 
 
 class Simulation:
@@ -76,7 +86,7 @@ class Simulation:
         saved_numbers = (initial_state or {}).get("next_ticket_numbers", {})
         self.ticket_clock = TicketClock(
             rng=self.ticket_rng,
-            next_numbers={src: int(saved_numbers.get(src, first)) for src, first in FIRST_NUMBERS.items()},
+            next_numbers={s.code: int(saved_numbers.get(s.code, s.first_number)) for s in SOURCES},
             on=not self.config.no_incidents,
         )
         # Continue incident numbering across restarts: ops-wall pairs each incident's start
@@ -141,12 +151,9 @@ class Simulation:
 
     # --- tick ------------------------------------------------------------------
 
-    def tick(
-        self, now: float, decisions: Iterable[Decision] = ()
-    ) -> tuple[list[dict], list[dict], list[Event], list[NewTicket]]:
-        """Advance one tick. Returns (metrics_records, deployment_records, events, tickets):
-        each ticket is its `support_tickets` record and its `ticket_answer_key` record, both
-        stamped with the tick.
+    def tick(self, now: float, decisions: Iterable[Decision] = ()) -> Tick:
+        """Advance one tick. Each of the `Tick`'s tickets is its `support_tickets` record and
+        its `ticket_answer_key` record, both stamped with the tick.
 
         `decisions` are the agent decisions read since the last tick. They are applied first
         (D-065), so a decision that resolves an incident ends it on this tick: this tick's
@@ -168,7 +175,7 @@ class Simulation:
                     dep_records.append(self._dep_record(name, now))
         metrics = self._gen_metrics(now)
         tickets = self.ticket_clock.tick(self.tick_ms(now))
-        return metrics, dep_records, events, tickets
+        return Tick(metrics, dep_records, events, tickets)
 
     def state_snapshot(self) -> dict:
         """The persistable state: each metric service's deployment (versions, the highest
