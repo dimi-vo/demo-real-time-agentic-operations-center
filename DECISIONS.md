@@ -2962,5 +2962,56 @@ missed" (its stand-in agents sat out one incident on purpose) and checkout at ze
 hover tooltip and a mark's keyboard focus work, and the focused node and the boxes survive the
 next snapshots.
 
+Issue 09 (checkout's row: its tickets and agent runs): `scripts/opswall/state.py` (a `Ticket`
+per `ticket_id`, filled in from five topics in any order by `apply_ticket`, `apply_p1_ticket`,
+`apply_triage`, `apply_answer_key` and `apply_decision`; a record written twice keeps its first
+Kafka timestamp, and one without falls back to the ticket's `event_time`; a decision with a
+`ticket_id` goes to its ticket and nowhere else, so it never closes a metric block, counts as a
+false alarm or sets a metric row's status; each service gets `row`, `"tickets"` for
+`TICKET_SERVICES` and `"metrics"` for the others, so the page still holds no service names; a
+ticket row gets `tickets` (the newest 5, and `received` over the last 10 minutes), `marks` (the
+tickets of the last 2 minutes, `timelineSeconds` 120), `runs` (the classifier's, from the
+`p1_tickets` record to the verdict, "High in 4s", and for a HIGH verdict the responder's, from
+the verdict to the decision, "Scale out in 6s"; open and "Working 3s" until 30 s after its
+start, then ending there as "No answer"; each keyed by lane and ticket, with the subject, the
+verdict or action in words and the agent's reason), `openP1` (the open runs' tickets),
+`agentsWorking` (their lanes), the status "Agent resolving P1" (`working`) or "Healthy", and
+its `issues` from `_ticket_issues`: the really-HIGH P1s created in the last 10 minutes,
+detected on a HIGH verdict, missed on LOW, INVALID or no verdict 30 s after the ticket, the
+median ticket → HIGH verdict and ticket → the responder's action, whatever it is; `trim()`
+drops a ticket 11 minutes after the last thing that happened to it; the docstring),
+`scripts/opswall/consumer.py` (ten topics: `support_tickets`, `p1_tickets`, `ticket_triage` and
+`ticket_answer_key` from 10 minutes back, the two the labs write with their Kafka timestamps),
+`scripts/opswall/app.py` (docstring), `static/opswall.js` (a ticket row from `svc.row`: the
+sources, Zendesk and ServiceNow with the design's icons, paths, node, line and ambient dots; the
+list, "Tickets" and "N received", the newest 5 styled by priority, each with "ZD-48214 from
+Zendesk at 24.11.2026 09:26" in local time; the timeline, with the marks, the Classifier and
+Responder lanes and their chips, the bars by key with their labels just left of their start,
+each a hover and keyboard stop whose tooltip gives the subject, the verdict or action and the
+reason, and "Both agents idle" or "N of 2 agents working"; "Open P1 N" in the header; a ticket
+id the previous snapshot didn't have, created in the last 10 s, colours its source by priority,
+sends a dot down the path and the line, and fades its row in as the rows slide down, and none
+on the first snapshot; the remediate block's title names the ticket), `static/opswall.css` (the
+ticket row's layout, colours and animations, the design's; the timeline moves below the sources
+and the list under the design's 1320 px; an amber dot for `working`; no animation under
+`prefers-reduced-motion`). Tests: `tests/test_opswall_state.py` (the row kind; the list and
+`received`; the marks; the classifier and responder runs and their labels, LOW and INVALID
+stopping after the classifier; Working, then No answer after 30 s; two runs overlapping in a
+lane; a run that ended before the timeline left out; `openP1`, `agentsWorking` and the status;
+the Issues numbers; a ticket filling in from its five records in all 120 orders; P2 and P3
+listed and marked with no runs; a ticket decision kept out of the metric rows; trimming),
+`tests/test_opswall_ingest.py` (ten topics, the lab tables with Kafka timestamps; a record from
+each ticket topic through the real Avro path reaches checkout's row), `tests/test_opswall_server.py`
+(the ticket row's shape). Offline render in headless Chrome at 1440 and 820 px
+(`.scratch/checkout-tickets/research/issue09_wall_render.py`, extending issue 08's, with the
+real `Simulation`'s tickets and answer keys, a stand-in classifier wrong on one P1 in twenty
+2–6 s after `p1_tickets`, and a stand-in responder answering the expected action 3–8 s after a
+HIGH verdict): at a moment with an open run, checkout's columns land on the design's
+coordinates, a LOW P1 shows one bar and a HIGH P1 two, the labels, chips, "1 of 2 agents
+working" and "Open P1 1" read right, and web-gateway's and payments' rows keep issue 08's boxes;
+a bar's hover tooltip and keyboard focus work, and the focused bar survives the next
+snapshots. With `--dump` the harness also writes the four ticket tables and the ticket
+decisions as JSONL.
+
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.
