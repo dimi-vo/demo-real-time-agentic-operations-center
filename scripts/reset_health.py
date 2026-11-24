@@ -1,8 +1,11 @@
 """`uv run reset-health` — a clean slate for your detection and your agents.
 
-Deletes the Flink statements that write `service_error_rate`, `service_health` and
-`remediation_decisions`, waits until they are gone, then empties those three topics. Nothing
-else is touched.
+Deletes the Flink statements that write the five lab output tables, `service_error_rate`,
+`service_health`, `remediation_decisions`, and section 5's `p1_tickets` and `ticket_triage`
+(D-068), waits until they are gone, then empties those five topics. Section 5's three INSERTs
+go with them: lab 5.1's P1 filter, lab 5.2's classifier and lab 5.3's responder, which writes
+`remediation_decisions` like the agents of 4.3. Nothing else is touched: the source topics
+keep their records, and the agents stay.
 
 Use it to change your `service_error_rate` or `service_health` INSERT and run it again without
 duplicate history: the SQL stays in your workspace, so click Run to start a statement again
@@ -24,6 +27,7 @@ from scripts.common.topics import OUTPUT_TOPICS, empty_topics
 
 WAIT_TIMEOUT_SECONDS = 60
 POLL_SECONDS = 2
+_ANY_OUTPUT_TABLE = f"{', '.join(OUTPUT_TOPICS[:-1])} or {OUTPUT_TOPICS[-1]}"
 
 _IDENT = r"(?:`[^`]+`|\w+)"
 _INSERT_INTO = re.compile(rf"INSERT\s+INTO\s+({_IDENT}(?:\s*\.\s*{_IDENT})*)(?![\w`])", re.IGNORECASE)
@@ -68,18 +72,23 @@ def _print_next_steps() -> None:
     print("\nNext, start your statements again with Run in the Flink workspace, in this order:")
     print("  1. Your `INSERT INTO service_error_rate` and `INSERT INTO service_health` first. Each")
     print("     replays up to 24 hours of history.")
-    print("  2. The agent INSERTs (`INSERT INTO remediation_decisions`), the release agent's error-rate")
-    print("     one (4.3_insert_release_agent_errors.sql) first, only once the ops wall's")
+    print("  2. The agent INSERTs of 4.3 (`INSERT INTO remediation_decisions`), the release agent's")
+    print("     error-rate one (4.3_insert_release_agent_errors.sql) first, only once the ops wall's")
     print("     charts reach the right-hand edge again. Agents started during the replay would call")
     print("     the model for every replayed anomaly.")
+    print("  3. Section 5, in lab order: 5.1 (5.1_p1_tickets.sql), which replays the last 24 hours")
+    print("     of P1 tickets; then 5.2's INSERT (5.2_insert_ticket_classifier.sql) only")
+    print("     once 5.1 has caught up, so the classifier gets new tickets only; then 5.3's INSERT")
+    print("     (5.3_insert_ticket_responder.sql).")
     print("\nRestart the ops wall (Ctrl-C, then `uv run ops-wall`) for a clean view.")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Delete the statements that write service_error_rate, service_health and "
-            "remediation_decisions, wait until they are gone, and empty those topics."
+            "Delete the statements that write service_error_rate, service_health, "
+            "remediation_decisions, p1_tickets and ticket_triage, wait until they are gone, "
+            "and empty those topics."
         ),
         epilog="Your SQL stays in your workspace: click Run to start a statement again.",
     )
@@ -94,7 +103,7 @@ def main(argv: list[str] | None = None) -> None:
     session = FlinkSession(card)
     targets = _targets(session)
     if targets:
-        print(f"\nDeleting {len(targets)} statement(s) that write {' or '.join(OUTPUT_TOPICS)}:")
+        print(f"\nDeleting {len(targets)} statement(s) that write {_ANY_OUTPUT_TABLE}:")
         for name, sql in targets:
             # Printed before anything is deleted: the SQL is the way back if the workspace cell is gone.
             print(f"\n--- {name} ---\n{sql.strip()}\n---")
@@ -107,7 +116,7 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(1)
         print("\nThey are gone.")
     else:
-        print(f"\nNo running statement writes {' or '.join(OUTPUT_TOPICS)}.")
+        print(f"\nNo running statement writes {_ANY_OUTPUT_TABLE}.")
 
     problems = empty_topics(card, OUTPUT_TOPICS, "Emptying the output topics...")
     if problems:

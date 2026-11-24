@@ -15,10 +15,20 @@ def statement(name: str, sql: str, phase: str = "RUNNING") -> dict:
 HEALTH = "INSERT INTO `service_health`\nWITH enriched AS (SELECT 1) SELECT * FROM enriched;"
 ERRORS = "INSERT INTO `service_error_rate`\nWITH enriched AS (SELECT 1) SELECT * FROM enriched;"  # lab 2.2, D-067
 AGENT = "INSERT INTO `remediation_decisions` SELECT 1;"
+# Section 5 (D-068): the P1 filter, the classifier, and the responder, which writes decisions.
+P1_FILTER = "INSERT INTO `p1_tickets`\nSELECT * FROM `support_tickets` WHERE `priority` = 'P1';"
+CLASSIFIER = "-- 5.2\nINSERT INTO `ticket_triage` SELECT 1;"
+RESPONDER = "-- 5.3\nINSERT INTO `remediation_decisions` SELECT 1;"
 
 
-def test_the_output_topics_are_the_three_the_labs_write():
-    assert OUTPUT_TOPICS == ("service_error_rate", "service_health", "remediation_decisions")
+def test_the_output_topics_are_the_five_the_labs_write():
+    assert OUTPUT_TOPICS == (
+        "service_error_rate",
+        "service_health",
+        "remediation_decisions",
+        "p1_tickets",
+        "ticket_triage",
+    )
 
 
 # --- the matcher: what counts as "writes an output table" --------------------------
@@ -43,6 +53,8 @@ def test_the_output_topics_are_the_three_the_labs_write():
         "  \n INSERT INTO service_health SELECT 1",
         "INSERT INTO `service_error_rate` SELECT 1",
         "INSERT INTO remediation_decisions SELECT 1",
+        "INSERT INTO `p1_tickets` SELECT * FROM `support_tickets`",
+        "-- 5.2\nINSERT INTO my_env.my_cluster.ticket_triage SELECT 1",
     ],
 )
 def test_matches_every_way_of_writing_an_insert_into_an_output_table(sql):
@@ -64,6 +76,9 @@ def test_matches_every_way_of_writing_an_insert_into_an_output_table(sql):
         "-- INSERT INTO service_health\nSELECT 1",
         "/* INSERT INTO service_health */ SELECT 1",
         "",
+        "SELECT * FROM `p1_tickets`",
+        "INSERT INTO support_tickets SELECT 1",  # a source table: the generator's, not a lab's
+        "INSERT INTO ticket_answer_key SELECT 1",
     ],
 )
 def test_ignores_everything_else(sql):
@@ -103,6 +118,24 @@ def test_deletes_the_agents_and_both_detection_inserts_but_not_other_statements(
     assert set(h.session.statements) == {"my-exploration", "other-insert", "incidents-watch"}
 
 
+def test_deletes_the_three_section_5_inserts_too(run):
+    # D-068: the P1 filter and the classifier write their own tables; the responder's INSERT
+    # goes with the other remediation_decisions writers.
+    h = run(
+        statements=[
+            statement("p1-filter", P1_FILTER),
+            statement("classifier", CLASSIFIER),
+            statement("responder", RESPONDER),
+            statement("tickets-watch", "SELECT * FROM `support_tickets` WHERE `priority` = 'P1'"),
+        ],
+    )
+    deleted = {name for kind, name in h.events if kind == "deleted"}
+    assert deleted == {"p1-filter", "classifier", "responder"}
+    assert set(h.session.statements) == {"tickets-watch"}
+    assert sorted(h.admin.emptied) == sorted(OUTPUT_TOPICS)
+    assert {"p1_tickets", "ticket_triage"} <= set(h.admin.emptied)
+
+
 def test_ignores_statements_that_have_already_finished(run):
     h = run(
         statements=[
@@ -121,7 +154,7 @@ def test_empties_exactly_the_output_topics_after_the_statements_are_gone(run):
         topics=(*OUTPUT_TOPICS, "service_metrics", "service_deployments", "service_incidents"),
     )
     assert sorted(h.admin.emptied) == sorted(OUTPUT_TOPICS)  # never the source topics
-    assert [kind for kind, _ in h.events] == ["deleted", "deleted", "emptied", "emptied", "emptied"]
+    assert [kind for kind, _ in h.events] == ["deleted", "deleted", *["emptied"] * len(OUTPUT_TOPICS)]
 
 
 def test_a_statement_that_never_goes_away_means_nothing_is_emptied(install_fakes, monkeypatch, capsys):
@@ -153,8 +186,13 @@ def test_the_next_steps_name_every_insert_in_lab_order(run, capsys):
     run(statements=[])
     out = capsys.readouterr().out
     steps = [out.index(s) for s in ("INSERT INTO service_error_rate", "INSERT INTO service_health",
-                                      "4.3_insert_release_agent_errors.sql")]  # fmt: skip
+                                      "4.3_insert_release_agent_errors.sql",
+                                      "5.1_p1_tickets.sql", "5.2_insert_ticket_classifier.sql",
+                                      "5.3_insert_ticket_responder.sql")]  # fmt: skip
     assert steps == sorted(steps)
+    # 5.2 and 5.3 read from the latest offset: started during 5.1's replay, the classifier
+    # would call the model for every replayed P1.
+    assert "once 5.1 has caught up" in out
 
 
 def test_a_missing_topic_is_reported_and_exits_nonzero(run, capsys):

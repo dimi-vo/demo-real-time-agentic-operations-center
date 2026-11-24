@@ -33,8 +33,15 @@ def test_source_topics_are_exactly_the_generator_streams():
     }
 
 
-def test_output_topics_are_exactly_the_three_lab_tables():
-    assert set(OUTPUT_TOPICS) == {"service_error_rate", "service_health", "remediation_decisions"}  # D-067
+def test_output_topics_are_exactly_the_five_lab_tables():
+    # D-067's error rate; D-068's P1 tickets (lab 5.1) and the classifier's verdicts (lab 5.2).
+    assert set(OUTPUT_TOPICS) == {
+        "service_error_rate",
+        "service_health",
+        "remediation_decisions",
+        "p1_tickets",
+        "ticket_triage",
+    }
 
 
 @pytest.fixture
@@ -47,7 +54,7 @@ def run_reset(install_fakes):
     return run
 
 
-def test_empties_all_eight_topics(run_reset):
+def test_empties_all_ten_topics(run_reset):
     h = run_reset()
     assert sorted(h.admin.emptied) == sorted(ALL_TOPICS)
 
@@ -58,12 +65,24 @@ def test_keep_source_empties_only_the_output_topics(run_reset):
 
 
 def test_drops_the_agents_and_never_a_table(run_reset):
+    # CREATE AGENT has no IF NOT EXISTS: labs 4.2, 5.2 and 5.3 could not run again otherwise.
     h = run_reset()
     assert h.session.submitted == [
         "DROP AGENT IF EXISTS `release_agent`;",
         "DROP AGENT IF EXISTS `capacity_agent`;",
+        "DROP AGENT IF EXISTS `ticket_classifier`;",
+        "DROP AGENT IF EXISTS `ticket_responder`;",
     ]
     assert not any("TABLE" in sql for sql in h.session.submitted)
+
+
+def test_the_next_steps_name_every_insert_and_agent_lab_in_order(run_reset, capsys):
+    run_reset()
+    out = capsys.readouterr().out
+    tail = out[out.index("Reset complete.") :]
+    assert "Dropping the four agents..." in out
+    assert "INSERTs (2.2, 2.5, 4.3, 5.1, 5.2 and 5.3)" in tail
+    assert "create the agents again in labs 4.2, 5.2 and 5.3" in tail
 
 
 def test_stops_running_statements_before_emptying_any_topic(run_reset):

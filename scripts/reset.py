@@ -4,11 +4,13 @@ Troubleshooting only; the continuous workshop never needs it in the normal flow.
 
 1. refuses to run while a local `uv run ops-sim` is still producing (`--force` overrides);
 2. stops the developer's running Flink statements and waits until they are gone;
-3. drops the two agents (`CREATE AGENT` has no `IF NOT EXISTS`, so lab 4.2 could not be
-   run again otherwise);
-4. empties eight topics, all with delete cleanup: the five source topics (checkout's
-   `support_tickets` and `ticket_answer_key` among them, D-068) and the three lab output
-   topics (`service_error_rate`, `service_health`, `remediation_decisions`);
+3. drops the four agents, section 4's `release_agent` and `capacity_agent` and section 5's
+   `ticket_classifier` and `ticket_responder` (`CREATE AGENT` has no `IF NOT EXISTS`, so
+   labs 4.2, 5.2 and 5.3 could not be run again otherwise);
+4. empties ten topics, all with delete cleanup: the five source topics (checkout's
+   `support_tickets` and `ticket_answer_key` among them, D-068) and the five lab output
+   topics (`service_error_rate`, `service_health`, `remediation_decisions`, and section 5's
+   `p1_tickets` and `ticket_triage`);
 5. deletes the generator's persisted state (versions, incident counter and ticket
    numbers). Step 4 already emptied the ground truth: it lives in the `service_incidents`
    and `ticket_answer_key` topics (D-046).
@@ -37,7 +39,8 @@ from scripts.common.flink import TERMINAL_PHASES, FlinkSession, wait_until_gone
 from scripts.common.paths import get_project_root
 from scripts.common.topics import OUTPUT_TOPICS, SOURCE_TOPICS, empty_topics
 
-LAB_AGENTS = ("release_agent", "capacity_agent")
+# Labs 4.2, 5.2 and 5.3 create them (D-068 added the two ticket agents).
+LAB_AGENTS = ("release_agent", "capacity_agent", "ticket_classifier", "ticket_responder")
 OPS_SIM_TOKENS = ("ops-sim", "opsgen.cli", "opsgen")
 STATEMENTS_GONE_TIMEOUT = 60  # seconds
 
@@ -79,7 +82,7 @@ def _stop_running_statements(session: FlinkSession) -> list[str]:
 
 def _drop_agents(session: FlinkSession) -> list[str]:
     problems: list[str] = []
-    print("\nDropping the two agents...")
+    print("\nDropping the four agents...")
     for agent in LAB_AGENTS:
         try:
             name = session.submit(f"DROP AGENT IF EXISTS `{agent}`;", label="aiops-reset")
@@ -129,7 +132,8 @@ def main(argv: list[str] | None = None) -> None:
         problems += empty_topics(card, SOURCE_TOPICS, "Emptying the source topics...")
     problems += empty_topics(card, OUTPUT_TOPICS, "Emptying the output topics (the tables stay)...")
 
-    # Local generator state (the ground truth lives in service_incidents, emptied above).
+    # Local generator state (the ground truth lives in service_incidents and ticket_answer_key,
+    # emptied above).
     state_path(root).unlink(missing_ok=True)
     print("\nDeleted the generator's persisted state.")
 
@@ -137,7 +141,8 @@ def main(argv: list[str] | None = None) -> None:
         print("\nReset finished with problems: " + "; ".join(problems))
         sys.exit(1)
     print("\nReset complete. The output tables are still there, and nothing was rebuilt: start `uv run ops-sim`,")
-    print("then run the lab INSERTs (2.2, 2.5 and 4.3) again, and create the agents again in lab 4.2.")
+    print("then run the lab INSERTs (2.2, 2.5, 4.3, 5.1, 5.2 and 5.3) again,")
+    print("and create the agents again in labs 4.2, 5.2 and 5.3.")
 
 
 if __name__ == "__main__":
