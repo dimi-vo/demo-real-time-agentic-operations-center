@@ -2784,5 +2784,42 @@ no checkout rate). `uv run ops-sim --dry-run --simulate 30 --seed 42`: no surge;
 bad deploys and 5 drops, checkout none; web-gateway's 49 deploy and incident lines are the
 same as before the change.
 
+Issue 02 (checkout writes no metrics and no deploys): `opsgen/services.py` (two tuples:
+`METRIC_SERVICES`, web-gateway and payments at 50/30 requests a second, and `TICKET_SERVICES`,
+checkout by name alone, with no latency, rate, replicas or version; `SERVICES` lists the three
+names in the wall's order; `METRIC_SERVICES_BY_NAME` and `metric_service_names()` replace
+`SERVICES_BY_NAME` and `service_names()`; the module docstring), `opsgen/simulation.py`
+(metrics, the bootstrap, the 5 s re-emit, deploys and rollbacks for the metric services only,
+so two metric records a second; the state file saves those two, and a pre-D-068 file loads
+with checkout's entry ignored), `opsgen/driver.py` (the `--simulate` summary lists the two;
+the banner names no service, so it is unchanged), `opsgen/cli.py` (`--show-records` takes
+web-gateway or payments, with a payments example), docstrings in
+`opsgen/{__init__,deployments,state}.py`. The wall: `scripts/opswall/state.py` (seeds its
+cards from the names; a ticket service gets `charts: []`, and checkout's card keeps its header
+and status and stays healthy), `static/opswall.js` (a card with no charts hides its time axis
+too; checked in headless Chrome at 1440 and 820 px), `scripts/opswall/feed.py` (two samples a
+second). `scripts/tuning/sweep.py` patches `METRIC_SERVICES`. Stale comments:
+`scripts/common/topic_reader.py` (`service_health` is one row per 10 s), the headers of
+`sql/source_service_metrics.sql` (two rows a second) and `source_service_deployments.sql`,
+which `statements.tf` doesn't copy; and the column comments of `sql/source_service_incidents.sql`
+and its byte-identical copy in `platform-team/modules/developer/statements.tf`, which named
+`TRAFFIC_SURGE`, `TRAFFIC_HIGH` and `SCALE_OUT` and missed D-067's types: `incident_type` is
+`BAD_DEPLOY` or `UPSTREAM_DROP` on payments and `BAD_DEPLOY_ERRORS` on web-gateway,
+`expected_trigger` `LATENCY_HIGH` or `TRAFFIC_LOW` in `service_health` and `ERROR_RATE_HIGH` in
+`service_error_rate`, `expected_action` `ROLLBACK` or `INVESTIGATE_UPSTREAM`. IF NOT EXISTS
+leaves an existing table as it is, so the new comments reach a live table only when it is
+recreated. Lab 2.1's four files name no service, so they are unchanged. Tests:
+`opsgen/tests/test_simulation.py` (the split; metrics and deployment records for web-gateway
+and payments only, two a tick, over an hour of deploys and rollbacks), `test_engine.py` (the
+state file round trip and a pre-D-068 file with checkout; two heartbeats every 5 s),
+`test_output.py` (the summary; the `--show-records` choices and help), `test_deployments.py`
+(its fixtures on payments), `test_deploy_clock.py`, `test_decisions.py`, `tests/test_tuning.py`
+(two services, about 80 requests a second, 2 × 13 warm-up rows), `tests/test_opswall_state.py`
+(checkout has no charts and stays healthy; the cards in the wall's order; the tests that used
+checkout as a latency service alone now use payments), `tests/test_opswall_ingest.py` (on
+payments). `uv run ops-sim --dry-run --simulate 15 --seed 1`: no checkout line; the incident
+and deploy lines are the same as issue 01's run for that seed, and only the traffic values
+differ.
+
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.
