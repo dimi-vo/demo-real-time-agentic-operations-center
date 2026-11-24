@@ -1,8 +1,8 @@
 -- 2.5 The service_health INSERT: the 2.4 part 2 query, written continuously to the table.
 -- `service_health` already exists: the platform team's Terraform created it with its 19
 -- columns (sql/sink_service_health.sql), so this one statement is all you write. One row
--- per service (checkout, payments) per 10-second window, in the 2.4 column order (the
--- INSERT is positional).
+-- per service (payments, D-068) per 10-second window, in the 2.4 column order (the INSERT is
+-- positional).
 -- Reads both sources from the earliest offset, so it replays the history ops-sim has built
 -- (up to 24 hours) and trains on it: no reset needed.
 -- Running it twice writes every window twice. To change the query and start clean, run
@@ -24,7 +24,7 @@ WITH enriched AS (
   JOIN `service_deployments` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
     FOR SYSTEM_TIME AS OF m.event_time AS d
     ON m.service_name = d.service_name
-  WHERE m.service_name IN ('checkout', 'payments')
+  WHERE m.service_name = 'payments'
 ),
 windowed AS (
   SELECT

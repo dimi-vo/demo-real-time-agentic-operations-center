@@ -1,9 +1,9 @@
 -- Agent calls track anomalies, not windows (brief section 3, improvement 4).
 --
 -- Running totals over everything the three tables hold. Expect `agent decisions` to track
--- the two flagged counts added up, not the row counts: checkout and payments produce 120
--- service_health rows and web-gateway 60 service_error_rate rows per 10 quiet minutes, and
--- quiet windows should cost no agent calls at all (D-067).
+-- the two flagged counts added up, not the row counts: payments produces 60 service_health
+-- rows and web-gateway 60 service_error_rate rows per 10 quiet minutes, and quiet windows
+-- should cost no agent calls at all (D-067, D-068).
 --
 -- Plain aggregates on purpose: `remediation_decisions` declares no watermark, so a
 -- window TVF over it has no time attribute to use. The three totals keep updating while

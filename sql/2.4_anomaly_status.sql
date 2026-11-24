@@ -17,7 +17,7 @@ WITH enriched AS (
   JOIN `service_deployments` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
     FOR SYSTEM_TIME AS OF m.event_time AS d
     ON m.service_name = d.service_name
-  WHERE m.service_name IN ('checkout', 'payments')
+  WHERE m.service_name = 'payments'
 ),
 windowed AS (
   SELECT

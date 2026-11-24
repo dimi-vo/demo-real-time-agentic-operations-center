@@ -1,8 +1,8 @@
 """The 2.x pipeline files build on each other, so their shared pieces must stay identical.
 
 The walkthrough has attendees grow statements step by step: the temporal join (2.1), a fixed
-error-rate threshold on web-gateway (2.2, D-067), then ARIMA on checkout and payments (2.3
-window, 2.4 detect, 2.5 INSERT). These tests keep the canonical files in sql/ in step with
+error-rate threshold on web-gateway (2.2, D-067), then ARIMA on payments (2.3 window, 2.4
+detect, 2.5 INSERT; D-068). These tests keep the canonical files in sql/ in step with
 each other and with the brief: the same `enriched` and `windowed` CTEs across the ARIMA
 files, each INSERT body equal to its query, the same detector config for both metrics, the
 fixed 10-second window, source watermarks that let a window close on the tick at its end,
@@ -21,7 +21,7 @@ from opsgen.simulation import REEMIT_INTERVAL, SAMPLE_OFFSET_MS
 ROOT = Path(__file__).resolve().parents[1]
 SQL = ROOT / "sql"
 
-# ARIMA on checkout and payments (D-067).
+# ARIMA on payments alone (D-068).
 PIPELINE_FILES = (
     "2.3_window_aggregation.sql",
     "2.4_anomaly_detection.sql",
@@ -29,7 +29,7 @@ PIPELINE_FILES = (
     "2.5_service_health.sql",
 )
 DETECTION_FILES = ("2.4_anomaly_detection.sql", "2.4_anomaly_status.sql", "2.5_service_health.sql")
-ARIMA_FILTER = "WHERE m.service_name IN ('checkout', 'payments')"
+ARIMA_FILTER = "WHERE m.service_name = 'payments'"
 # The error-rate threshold on web-gateway (D-067): the query, then the INSERT.
 ERROR_RATE_FILES = ("2.2_error_rate.sql", "2.2_service_error_rate.sql")
 
@@ -299,26 +299,35 @@ def test_unread_columns_are_not_carried_through_the_pipeline():
     assert "`desired_replicas`" in (ROOT / "sql/source_service_deployments.sql").read_text()
 
 
-# --- which lab covers which service (D-067) ---------------------------------------------
+# --- which lab covers which service (D-067, D-068) --------------------------------------
 
 
 @pytest.mark.parametrize("name", PIPELINE_FILES)
-def test_arima_covers_checkout_and_payments_only(name):
+def test_arima_covers_payments_only(name):
+    # D-068: payments alone. PARTITION BY service_name stays (DETECTOR_OVER), so the lab still
+    # shows one model per service.
     body = _norm(_body(name))
     assert _norm(ARIMA_FILTER) in body
-    assert "web-gateway" not in body
+    assert "web-gateway" not in body and "checkout" not in body
 
 
-def test_the_windowing_step_covers_the_same_two_services():
+def test_the_windowing_step_covers_payments_only():
     body = _norm(_body("2.3_window_metrics.sql"))
-    assert "WHERE service_name IN ('checkout', 'payments') GROUP BY" in body
+    assert "WHERE service_name = 'payments' GROUP BY" in body
+    assert "checkout" not in body
 
 
-def test_no_lab_runs_ml_detect_anomalies_on_web_gateway():
+def test_no_lab_runs_ml_detect_anomalies_on_web_gateway_or_checkout():
     for path in sorted(SQL.glob("2.*.sql")):
         body = _body(path.name)
         if "ML_DETECT_ANOMALIES" in body:
-            assert ARIMA_FILTER in body and "web-gateway" not in body, path.name
+            assert ARIMA_FILTER in body and "web-gateway" not in body and "checkout" not in body, path.name
+
+
+@pytest.mark.parametrize("name", ("2.3_window_metrics.sql", *PIPELINE_FILES))
+def test_no_arima_header_names_checkout(name):
+    header = "".join(line for line in (SQL / name).read_text().splitlines(keepends=True) if line.startswith("--"))
+    assert "checkout" not in header, name
 
 
 # --- lab 2.2: the error-rate threshold on web-gateway (D-067) ----------------------------
