@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 from opsgen.driver import run_realtime
-from opsgen.engine import BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP, Incident
+from opsgen.engine import BAD_DEPLOY, UPSTREAM_DROP, Incident
 from opsgen.groundtruth import end_record, start_record
 from opsgen.simulation import Simulation
 
-_TRIGGER = {BAD_DEPLOY: "LATENCY_HIGH", TRAFFIC_SURGE: "TRAFFIC_HIGH", UPSTREAM_DROP: "TRAFFIC_LOW"}
-_ACTION = {BAD_DEPLOY: "ROLLBACK", TRAFFIC_SURGE: "SCALE_OUT", UPSTREAM_DROP: "INVESTIGATE_UPSTREAM"}
+_TRIGGER = {BAD_DEPLOY: "LATENCY_HIGH", UPSTREAM_DROP: "TRAFFIC_LOW"}
+_ACTION = {BAD_DEPLOY: "ROLLBACK", UPSTREAM_DROP: "INVESTIGATE_UPSTREAM"}
 
 
 def _inc(itype=BAD_DEPLOY):
     return Incident(
         incident_id="INC0007",
         type=itype,
-        service_name="checkout",
+        service_name="payments",
         degradation_start=1010.0,
         degradation_end=1070.0,
         expected_trigger=_TRIGGER[itype],
@@ -28,7 +28,7 @@ def test_start_record_has_null_end_and_both_ids():
     inc = _inc()
     r = start_record(inc, now=1010.5)
     assert r["incident_id"] == "INC0007"
-    assert r["service_name"] == "checkout"
+    assert r["service_name"] == "payments"
     assert r["incident_type"] == "BAD_DEPLOY"
     assert r["started_at"] == 1_010_000  # inc.degradation_start in ms
     assert r["ended_at"] is None
@@ -47,7 +47,7 @@ def test_end_record_carries_both_timestamps():
 def test_ground_truth_carries_no_versions():
     # D-045: a ROLLBACK target is judged against service_health, so the answer key
     # holds only what happened and what the right action is.
-    for itype in (BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP):
+    for itype in (BAD_DEPLOY, UPSTREAM_DROP):
         for rec in (start_record(_inc(itype), now=1010.0), end_record(_inc(itype), now=1070.0)):
             assert not any("version" in key for key in rec)
 

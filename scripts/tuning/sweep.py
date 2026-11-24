@@ -11,8 +11,8 @@ replica, and scores the result with
 a fresh start, so fresh-start noise is measured too.
 
 The replica matches Confluent within a few percent on series without big jumps, and is
-conservative (bounds up to ~1.5x wider) for a while after a bad deploy or surge on the
-same series (see `scripts.tuning.calibrate`, D-031). Confirm the winner once live.
+conservative (bounds up to ~1.5x wider) for a while after a bad deploy or traffic spike on
+the same series (see `scripts.tuning.calibrate`, D-031). Confirm the winner once live.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ def _defaults() -> dict[str, float]:
 
     return {
         "drop": eng.DROP_LAMBDA_MULT,
-        "surge": eng.SURGE_LAMBDA_MULT,
         "out_p": dist.SLOW_OUTLIER_PROB,
         "out_m": dist.SLOW_OUTLIER_MULT,
     }
@@ -51,8 +50,9 @@ def _arima_services() -> tuple[str, ...]:
     return eng.SHARED_SERVICES
 
 
-# The services ARIMA scores: the shared scheduler's (labs 2.3-2.5 filter to them). web-gateway
-# is detected by an error-rate threshold instead (D-067), so its rows are left out of scoring.
+# The services ARIMA scores: the shared scheduler's, payments alone since D-068 (labs 2.3-2.5
+# filter to it). web-gateway is detected by an error-rate threshold instead (D-067), so its rows
+# are left out of scoring.
 ARIMA_SERVICES = _arima_services()
 
 
@@ -60,7 +60,6 @@ ARIMA_SERVICES = _arima_services()
 class DataConfig:
     rates: tuple[tuple[str, float], ...] = ()  # service -> traffic mean (per second) overrides
     drop_mult: float | None = None
-    surge_mult: float | None = None
     outlier_prob: float | None = None
     outlier_mult: float | None = None
     aligned: bool = False  # start on a 10-second boundary (else a seed-dependent offset, like a live start)
@@ -69,7 +68,7 @@ class DataConfig:
         parts = [f"{k}={v:g}" for k, v in self.rates]
         if self.aligned:
             parts.append("aligned start")
-        for name in ("drop_mult", "surge_mult", "outlier_prob", "outlier_mult"):
+        for name in ("drop_mult", "outlier_prob", "outlier_mult"):
             v = getattr(self, name)
             if v is not None:
                 parts.append(f"{name}={v:g}")
@@ -81,7 +80,6 @@ class Result:
     label: str
     traffic_per_s: float = 0.0
     by_type: dict[str, list[int]] = field(default_factory=lambda: defaultdict(lambda: [0, 0]))
-    drops_by_service: dict[str, list[int]] = field(default_factory=lambda: defaultdict(lambda: [0, 0]))
     fp: int = 0
     fp_echo: int = 0
     fp_by_service: dict[str, int] = field(default_factory=lambda: defaultdict(int))
@@ -106,7 +104,6 @@ def simulate(data: DataConfig, seed: int, hours: float) -> tuple[list[HealthRow]
     rates = dict(data.rates)
     sim_mod.SERVICES = tuple(dataclasses.replace(s, rps=rates.get(s.name, s.rps)) for s in SERVICES)
     eng.DROP_LAMBDA_MULT = _DEFAULTS["drop"] if data.drop_mult is None else data.drop_mult
-    eng.SURGE_LAMBDA_MULT = _DEFAULTS["surge"] if data.surge_mult is None else data.surge_mult
     dist.SLOW_OUTLIER_PROB = _DEFAULTS["out_p"] if data.outlier_prob is None else data.outlier_prob
     dist.SLOW_OUTLIER_MULT = _DEFAULTS["out_m"] if data.outlier_mult is None else data.outlier_mult
 
@@ -185,13 +182,11 @@ def run_one(args: tuple[DataConfig, DetectorConfig, int, float]) -> dict:
     rows = [r for r in rows if r.service_name in ARIMA_SERVICES]
     incidents = [i for i in incidents if i.service_name in ARIMA_SERVICES]
     rep = score(apply_detector(rows, cfg), incidents, start, end - 100)
-    out = {"rate": rate, "types": [], "drops": [], "fp": [], "hours": {}, "fresh": {}}
+    out = {"rate": rate, "types": [], "fp": [], "hours": {}, "fresh": {}}
     for r in rep.incidents:
         if r.status == NO_DATA:
             continue
         out["types"].append((r.incident.type, r.status == DETECTED))
-        if r.incident.type == "UPSTREAM_DROP":
-            out["drops"].append((r.incident.service_name, r.status == DETECTED))
     for s in rep.services.values():
         out["hours"][s.service_name] = s.scored_hours
         out["fresh"][s.service_name] = len(s.fresh_start_noise)
@@ -207,9 +202,6 @@ def evaluate_variant(data: DataConfig, cfg: DetectorConfig, seeds: int, hours: f
         for t, ok in o["types"]:
             res.by_type[t][1] += 1
             res.by_type[t][0] += int(ok)
-        for svc, ok in o["drops"]:
-            res.drops_by_service[svc][1] += 1
-            res.drops_by_service[svc][0] += int(ok)
         for svc, tag in o["fp"]:
             res.fp += 1
             res.fp_echo += tag == "echo"
@@ -229,18 +221,15 @@ def print_results(results: list[Result]) -> None:
         return f"{ok}/{n}" if n else "-"
 
     print(
-        f"{'variant':58} {'req/s':>5} | {'BAD_DEPLOY':>10} {'SURGE':>7} {'DROP':>7} "
-        f"{'chkout':>6} {'paymt':>6} | {'FP/svc-h avg':>12} {'worst':>6} {'echo':>4} | "
-        f"fresh-start noise: worst"
+        f"{'variant':58} {'req/s':>5} | {'BAD_DEPLOY':>10} {'DROP':>7} | "
+        f"{'FP/svc-h avg':>12} {'worst':>6} {'echo':>4} | fresh-start noise: worst"
     )
     for r in results:
         hours = sum(r.hours_by_service.values())
         worst = max((r.fp_by_service[s] / h for s, h in r.hours_by_service.items() if h), default=0.0)
         print(
             f"{r.label[:58]:58} {r.traffic_per_s:5.1f} | {frac(r.by_type['BAD_DEPLOY']):>10} "
-            f"{frac(r.by_type['TRAFFIC_SURGE']):>7} {frac(r.by_type['UPSTREAM_DROP']):>7} "
-            f"{frac(r.drops_by_service['checkout']):>6} "
-            f"{frac(r.drops_by_service['payments']):>6} | {r.fp / hours if hours else 0:12.2f} {worst:6.2f} "
+            f"{frac(r.by_type['UPSTREAM_DROP']):>7} | {r.fp / hours if hours else 0:12.2f} {worst:6.2f} "
             f"{r.fp_echo:4d} | {r.fresh_worst} (avg {r.fresh_total / max(1, r.fresh_starts):.2f}, "
             f">1: {r.fresh_over_one}/{r.fresh_starts})"
         )
@@ -248,16 +237,17 @@ def print_results(results: list[Result]) -> None:
 
 CURRENT = DetectorConfig(min_training=12, max_training=360, confidence=99.95, p=1, update_interval=1)  # D-059
 
-# Earlier rate profiles, cut to the three services D-056 kept.
-_D031 = (("web-gateway", 10), ("checkout", 6), ("payments", 6))
-_D030 = (("web-gateway", 8), ("checkout", 3), ("payments", 2))
-_ROUGH = (("web-gateway", 25), ("checkout", 15), ("payments", 15))
+# Earlier rate profiles, cut to the services that produce metrics: checkout produces tickets
+# since D-068.
+_D031 = (("web-gateway", 10), ("payments", 6))
+_D030 = (("web-gateway", 8), ("payments", 2))
+_ROUGH = (("web-gateway", 25), ("payments", 15))
 DATA_VARIANTS = {
-    "D-030 rates (~13), aligned start": DataConfig(rates=_D030, aligned=True),
-    "D-031 rates (~22), aligned start": DataConfig(rates=_D031, aligned=True),
-    "half the D-059 rates (~55), aligned start": DataConfig(rates=_ROUGH, aligned=True),
-    "current generator (D-059, ~110), live-like start": DataConfig(),
-    "current generator (D-059, ~110), aligned start": DataConfig(aligned=True),
+    "D-030 rates (payments 2/s), aligned start": DataConfig(rates=_D030, aligned=True),
+    "D-031 rates (payments 6/s), aligned start": DataConfig(rates=_D031, aligned=True),
+    "half the D-059 rates (payments 15/s), aligned start": DataConfig(rates=_ROUGH, aligned=True),
+    "current generator (D-059, payments 30/s), live-like start": DataConfig(),
+    "current generator (D-059, payments 30/s), aligned start": DataConfig(aligned=True),
 }
 
 

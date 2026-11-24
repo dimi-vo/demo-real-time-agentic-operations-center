@@ -69,7 +69,7 @@ def test_simulate_quiet_period_before_first_incident():
     lines = _simulate(minutes=60).splitlines()
     starts = [ln for ln in lines if "INCIDENT START" in ln and "web-gateway" not in ln]
     assert starts, "expected incidents over an hour"
-    # No checkout or payments incident starts before t=02:30, the detector's warm-up (D-060).
+    # No payments incident starts before t=02:30, the detector's warm-up (D-060).
     assert min(_clock(ln) for ln in starts) == Config().quiet_period == 150
     # web-gateway's clock ignores it (D-067): a good deploy at 01:00, then a bad one.
     deploys = [ln for ln in lines if "DEPLOY " in ln and "web-gateway" in ln and "INCIDENT" not in ln]
@@ -82,7 +82,7 @@ def test_simulate_banner_shows_the_schedule():
     first = _simulate(minutes=1).splitlines()[0]
     assert first == (
         "# ops-sim --simulate 1min  (quiet=150s max=35s gap=20s "
-        "rests: BAD_DEPLOY=390s TRAFFIC_SURGE=300s UPSTREAM_DROP=300s; "
+        "rests: BAD_DEPLOY=390s UPSTREAM_DROP=300s; "
         "web-gateway deploys: first=60s every=60-90s)"
     )
     assert _simulate(minutes=1, no_incidents=True).splitlines()[0] == "# ops-sim --simulate 1min  (no incidents)"
@@ -102,11 +102,13 @@ def test_simulate_an_hour_has_overlapping_incidents():
             most = max(most, len(open_now))
         else:
             assert open_now.pop(svc) == itype, ln
-    assert most == 3  # web-gateway's bad deploys come from its own clock (D-067)
+    # payments' incidents and web-gateway's bad deploys (its own clock, D-067); checkout has
+    # none (D-068)
+    assert most == 2
 
 
 def test_simulate_deploy_lines():
-    # D-057: on checkout and payments a deploy is always a BAD DEPLOY, followed on the same
+    # D-057: on payments a deploy is always a BAD DEPLOY, followed on the same
     # tick by its incident's start. D-067: web-gateway also has good deploys (DEPLOY, no
     # incident), and its bad ones start a BAD_DEPLOY_ERRORS.
     lines = [ln for ln in _simulate(minutes=60).splitlines() if not ln.startswith(("#", "[t="))]
@@ -115,7 +117,7 @@ def test_simulate_deploy_lines():
     for i in deploys:
         clock = lines[i].split("]", 1)[0]
         if "web-gateway" not in lines[i]:
-            assert lines[i].startswith(f"{clock}] BAD DEPLOY "), lines[i]
+            assert lines[i].startswith(f"{clock}] BAD DEPLOY      payments "), lines[i]
             assert lines[i + 1].startswith(f"{clock}] INCIDENT START  BAD_DEPLOY "), lines[i + 1]
             kinds.add("shared")
         elif lines[i].startswith(f"{clock}] DEPLOY "):
@@ -151,11 +153,14 @@ def test_simulate_web_gateway_crosses_25_percent_errors_only_in_a_bad_deploy():
     assert high <= {b + j for b in bad for j in (10, 20, 30, 40)}
 
 
-def test_simulate_covers_all_incident_types_over_an_hour():
+def test_simulate_gives_payments_bad_deploys_and_drops_and_nobody_a_surge():
+    # D-068: the shared scheduler serves payments alone; surges are retired.
     text = _simulate(minutes=60)
-    assert "BAD_DEPLOY" in text
-    assert "TRAFFIC_SURGE" in text
-    assert "UPSTREAM_DROP" in text
+    starts = [ln.split("]", 1)[1].split()[2:4] for ln in text.splitlines() if "INCIDENT START" in ln]
+    shared = {(itype, svc) for itype, svc in starts if svc != "web-gateway"}
+    assert shared == {("BAD_DEPLOY", "payments"), ("UPSTREAM_DROP", "payments")}
+    assert {itype for itype, svc in starts if svc == "web-gateway"} == {"BAD_DEPLOY_ERRORS"}
+    assert "SURGE" not in text and "TRAFFIC_HIGH" not in text and "SCALE_OUT" not in text
 
 
 def test_simulate_bad_deploy_rolls_back():
@@ -171,17 +176,17 @@ def test_no_incidents_simulate_has_no_incidents():
 
 
 def test_an_incident_end_line_says_who_resolved_it_and_when():
-    # D-065. A bad deploy on checkout from 0, its ROLLBACK read before tick 17.
+    # D-065. A bad deploy on payments from 0, its ROLLBACK read before tick 17.
     sim = Simulation(1, start=0.0, config=Config(quiet_period=0))
-    picks = iter([(BAD_DEPLOY, "checkout")])
+    picks = iter([(BAD_DEPLOY, "payments")])
     sim.engine._choose_incident = lambda now: next(picks, None)
     sim.tick(0.0)
     for k in range(1, 17):
         sim.tick(float(k))
-    answer = Decision("checkout", 10.0, "release_agent", "LATENCY_HIGH", "ROLLBACK")
+    answer = Decision("payments", 10.0, "release_agent", "LATENCY_HIGH", "ROLLBACK")
     [end] = sim.tick(17.0, decisions=[answer])[2]
     assert format_event(end, clock="00:17") == (
-        "[00:17] INCIDENT END    BAD_DEPLOY     checkout     rollback 4.2.2 -> 4.2.1, "
+        "[00:17] INCIDENT END    BAD_DEPLOY     payments     rollback 2.9.5 -> 2.9.4, "
         "resolved by release_agent ROLLBACK after 17 s"
     )
 
@@ -189,7 +194,8 @@ def test_an_incident_end_line_says_who_resolved_it_and_when():
 def test_simulate_without_decisions_every_incident_expires_at_the_cap():
     # --simulate reads no decisions (D-065), so every incident runs its 35 s.
     ends = [ln for ln in _simulate(minutes=60).splitlines() if "INCIDENT END" in ln]
-    assert len(ends) > 30  # about 36 in the first hour on checkout and payments (D-067)
+    on_payments = [ln for ln in ends if " payments " in ln]
+    assert 16 <= len(on_payments) <= 20  # 18 in the first hour on payments alone (D-068)
     assert all(ln.endswith(" expired after 35 s") for ln in ends), ends
     assert any(", expired after 35 s" in ln and "rollback" in ln for ln in ends)
 

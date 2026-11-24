@@ -6,10 +6,11 @@ incidents, mutates the `DeploymentState`s on deploys and rollbacks, and returns 
 ends an incident early on an agent's correct answer. All scheduling randomness comes from
 the single rng, drawn in a fixed order, so `--seed` reproduces the whole schedule.
 
-Rules (D-060, which amends D-042; D-065 and D-067 amend both):
-- The schedule serves checkout (bad deploys and surges) and payments (bad deploys and drops),
-  D-067. web-gateway is a candidate of none: it deploys on its own clock. A traffic series
-  never gets both a surge and a drop: its band would widen too far to catch the drop.
+Rules (D-060, which amends D-042; D-065, D-067 and D-068 amend both):
+- The schedule serves payments alone: bad deploys and drops (D-068). checkout produces
+  support tickets and web-gateway deploys on its own clock, so neither is a candidate.
+  Traffic surges are retired: a traffic series with both surges and drops gets a band too
+  wide to catch the drops (D-067).
 - Every service runs its own schedule: incidents on different services may overlap, and a
   service has at most one at a time. Each service has its own detector model (D-009), so
   overlap costs no accuracy.
@@ -22,18 +23,18 @@ Rules (D-060, which amends D-042; D-065 and D-067 amend both):
   last one's scheduled end (start + `max_duration`), with a type whose rest is over. Rests
   are per service and type, measured from the scheduled end of that type's last incident on
   that service (`rests`, D-059). Counting from the scheduled end, not the actual one, keeps
-  the schedule the same however incidents end. The rests set the rate (about 37 an hour,
-  about 19 on each of the two services, D-067) and keep the same metric's spikes on a service far
-  enough apart for the detector.
+  the schedule the same however incidents end. The rests set the rate (about 19 an hour on
+  payments, D-068) and keep the same metric's spikes on a service far enough apart for the
+  detector.
 - At each boundary, while some service can start one: pick the type by weight among the
-  types allowed now, then a random service allowed for it. Until all three types have
-  happened, only types not seen yet are allowed, so the first three are one of each.
+  types allowed now, then a random service allowed for it. Until both types have happened,
+  only the one not seen yet is allowed, so the first two are one of each.
 - An incident is **resolved** when an agent answers it correctly: its expected action under
   its expected trigger, for a window that ends after it started. It then ends on the tick
   that reads the decision, mid-window (D-065). Otherwise it **expires** at its cap.
 - BAD_DEPLOY fires a DEPLOY and starts degrading on the same tick; it ends, resolved or
   expired, with a ROLLBACK to the previous version, and metrics return to baseline at that
-  moment. On checkout and payments these are the only version changes (D-057).
+  moment. On payments these are the only version changes (D-057).
 
 web-gateway's deploy clock (D-067, `DeployClock`), outside the rules above (no quiet period,
 gap or rests) and with its own rng, so it never moves the shared schedule:
@@ -59,20 +60,19 @@ from opsgen.distributions import ERROR_RATE
 # Incident types, their weights, candidate services, trigger and expected action. Every
 # type has exactly one expected action, whatever the service (D-043).
 BAD_DEPLOY = "BAD_DEPLOY"
-TRAFFIC_SURGE = "TRAFFIC_SURGE"
 UPSTREAM_DROP = "UPSTREAM_DROP"
 
-INCIDENT_TYPES = (BAD_DEPLOY, TRAFFIC_SURGE, UPSTREAM_DROP)
-INCIDENT_WEIGHTS = {BAD_DEPLOY: 0.50, TRAFFIC_SURGE: 0.25, UPSTREAM_DROP: 0.25}
-# D-067: the shared scheduler serves checkout and payments only; web-gateway is a candidate of
-# none (it gets its own deploy clock). Surges and drops stay on different services: a traffic
-# series that has both gets a band so wide (it is symmetric) that a drop no longer falls below
-# it. Offline, with both types on both services, 1.6 % of drops were caught.
-SHARED_SERVICES = ("checkout", "payments")
+INCIDENT_TYPES = (BAD_DEPLOY, UPSTREAM_DROP)
+INCIDENT_WEIGHTS = {BAD_DEPLOY: 0.50, UPSTREAM_DROP: 0.25}  # two bad deploys for every drop
+# D-068: the shared scheduler serves payments alone. checkout produces support tickets and
+# web-gateway deploys on its own clock (D-067), so neither is a candidate. Traffic surges are
+# retired with checkout: they could not move to payments, because a traffic series that has
+# both surges and drops gets a band so wide (it is symmetric) that a drop no longer falls below
+# it. Offline, with both types on one series, 1.6 % of drops were caught (D-067).
+SHARED_SERVICES = ("payments",)
 CANDIDATES = {
     BAD_DEPLOY: SHARED_SERVICES,
-    TRAFFIC_SURGE: ("checkout",),
-    UPSTREAM_DROP: ("payments",),
+    UPSTREAM_DROP: SHARED_SERVICES,
 }
 # D-067: web-gateway's bad deploy, started only by its deploy clock (never by the shared
 # scheduler, so it is not in INCIDENT_TYPES). It fails requests and changes nothing else, and an
@@ -82,24 +82,21 @@ BAD_DEPLOY_TYPES = (BAD_DEPLOY, BAD_DEPLOY_ERRORS)  # a deploy at the start, a r
 
 TRIGGER = {
     BAD_DEPLOY: "LATENCY_HIGH",
-    TRAFFIC_SURGE: "TRAFFIC_HIGH",
     UPSTREAM_DROP: "TRAFFIC_LOW",
     BAD_DEPLOY_ERRORS: "ERROR_RATE_HIGH",
 }
 EXPECTED_ACTION = {
     BAD_DEPLOY: "ROLLBACK",
-    TRAFFIC_SURGE: "SCALE_OUT",
     UPSTREAM_DROP: "INVESTIGATE_UPSTREAM",
     BAD_DEPLOY_ERRORS: "ROLLBACK",
 }
 
 # Metric effects during degradation. They change a service_metrics record's values, never
-# the number of records (D-058). Each type moves exactly one metric (D-059): a surge leaves
+# the number of records (D-058). Each type moves exactly one metric (D-059): a drop leaves
 # latency alone. The sizes barely matter to the detector, whose band grows with the spike
 # windows it has trained on; they are big enough to read at a glance on the wall's charts.
 BAD_DEPLOY_LATENCY_MULT = 4.0
-BAD_DEPLOY_ERROR_RATE = 0.12  # share of failed requests; nothing reads checkout's or payments' errors
-SURGE_LAMBDA_MULT = 5.0
+BAD_DEPLOY_ERROR_RATE = 0.12  # share of failed requests; nothing reads payments' errors
 DROP_LAMBDA_MULT = 0.1
 # D-067: well above lab 2.2's 25 % threshold, so the first window after the deploy always
 # crosses it; low enough that the window an expired incident ends in (5 bad seconds of 10)
@@ -132,10 +129,10 @@ def _first_tick_of_window(now: float) -> bool:
 # have that type again, the same on every service (D-059). The detector trains on its spike
 # windows: too many of them on one metric and its band outgrows the next spike. These rests
 # keep every type caught and land on about 19 incidents an hour per service: 56 on three
-# services (D-065), 37 on D-067's two. The long bad-deploy
-# rest brings the rate down without making traffic spikes rarer, which would add after-spike
-# false alarms.
-RESTS = {BAD_DEPLOY: 390.0, TRAFFIC_SURGE: 300.0, UPSTREAM_DROP: 300.0}
+# services (D-065), 37 on D-067's two, 19 on payments alone (D-068). The long bad-deploy rest
+# brings the rate down without making traffic spikes rarer, which would add after-spike false
+# alarms.
+RESTS = {BAD_DEPLOY: 390.0, UPSTREAM_DROP: 300.0}
 
 
 @dataclass
@@ -195,9 +192,7 @@ class Incident:
             return Effect(latency_mult=BAD_DEPLOY_LATENCY_MULT, error_rate=BAD_DEPLOY_ERROR_RATE)
         if self.type == BAD_DEPLOY_ERRORS:
             return Effect(error_rate=BAD_DEPLOY_ERRORS_ERROR_RATE)  # errors only (D-067)
-        if self.type == TRAFFIC_SURGE:
-            return Effect(lam_mult=SURGE_LAMBDA_MULT)  # traffic only: latency untouched (D-059)
-        return Effect(lam_mult=DROP_LAMBDA_MULT)
+        return Effect(lam_mult=DROP_LAMBDA_MULT)  # traffic only: latency untouched (D-059)
 
 
 @dataclass(frozen=True)
@@ -402,8 +397,9 @@ class Engine:
         return out
 
     def _choose_incident(self, now: float) -> tuple[str, str] | None:
-        """The next (type, service) to start now, or None. Until all three types have
-        started, only the ones not seen yet are allowed (order random)."""
+        """The next (type, service) to start now, or None. Until both types have started,
+        only the one not seen yet is allowed, so the first two are one of each in a random
+        order (D-068)."""
         types = [t for t in INCIDENT_TYPES if t not in self.seen] or INCIDENT_TYPES
         available = {t: elig for t in types if (elig := self._eligible(t, now))}
         if not available:

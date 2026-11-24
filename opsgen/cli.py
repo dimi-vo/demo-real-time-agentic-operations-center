@@ -7,8 +7,9 @@
   uv run ops-sim --no-incidents          # baseline traffic only: no incidents, no deploys
   uv run ops-sim --show-records checkout # also print checkout's service_metrics record every 5 s
 
-checkout and payments get incidents from the shared schedule; web-gateway deploys on its own
-clock, and about 4 in 7 of its deploys are bad: they fail 40 % of requests (D-067).
+payments gets bad deploys and upstream drops from the shared schedule (D-068); web-gateway
+deploys on its own clock, and about 4 in 7 of its deploys are bad: they fail 40 % of requests
+(D-067). checkout gets no incident.
 
 Live, ops-sim also tails `remediation_decisions`: an agent's correct answer resolves its
 incident on the next tick, and an incident nobody resolves expires at its 35 s cap (D-065).

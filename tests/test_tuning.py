@@ -64,11 +64,39 @@ def test_sweep_simulation_windows_are_complete_and_scored():
     assert len(per_service) == 3
     for srows in per_service.values():
         assert len(srows) == 90  # 15 minutes of 10-second windows, none missing
-    # ~110 requests/s of traffic_count at baseline (D-059 means 50/30/30); a quarter-hour run
-    # holds several surges on checkout and payments (D-067), which lift it.
-    assert 100 < rate < 140
+    # ~110 requests/s of traffic_count at baseline (D-059 means 50/30/30). There are no surges
+    # to lift it any more (D-068), only payments' drops, which lower it a little.
+    assert 100 < rate < 112
     rep = score(apply_detector(rows, CURRENT), incidents, start, end - 100)
     assert sum(s.warmup_rows for s in rep.services.values()) == 3 * 13
+
+
+class _InlinePool:
+    """`evaluate_variant` takes a process pool; run its tasks in this process instead."""
+
+    map = staticmethod(map)
+
+
+def test_the_sweep_scores_payments_alone_and_its_table_has_no_surge_or_checkout_column(capsys):
+    # D-068: ARIMA covers payments only, which gets bad deploys and drops.
+    from scripts.tuning.sweep import CURRENT, DataConfig, evaluate_variant, print_results
+
+    res = evaluate_variant(DataConfig(aligned=True), CURRENT, 1, 0.25, "one quarter-hour", _InlinePool())
+    assert set(res.hours_by_service) == {"payments"}
+    assert set(res.by_type) == {"BAD_DEPLOY", "UPSTREAM_DROP"}
+    print_results([res])
+    header, line = capsys.readouterr().out.splitlines()
+    assert "BAD_DEPLOY" in header and "DROP" in header
+    assert "SURGE" not in header and "chkout" not in header and "paymt" not in header
+    assert line.startswith("one quarter-hour")
+
+
+def test_the_sweep_rate_presets_name_no_checkout():
+    # D-068: checkout produces tickets, not metrics, so a traffic mean for it means nothing.
+    from scripts.tuning.sweep import DATA_VARIANTS
+
+    assert all(name != "checkout" for data in DATA_VARIANTS.values() for name, _ in data.rates)
+    assert any(data.rates for data in DATA_VARIANTS.values())
 
 
 def test_sweep_windows_sum_traffic_and_average_the_samples(monkeypatch):

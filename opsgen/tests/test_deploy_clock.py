@@ -112,14 +112,14 @@ def _shared_incidents(events):
 
 def test_the_clock_never_moves_the_shared_schedule(monkeypatch):
     # D-067: the clock has its own rng, so how often web-gateway deploys, and whether at all,
-    # leaves checkout's and payments' incidents where they were.
+    # leaves payments' incidents where they were (the shared scheduler's only service, D-068).
     normal = _shared_incidents(_run(_engine(7), 2 * 3600))
     off = _engine(7)
     off.clock = None
     assert _shared_incidents(_run(off, 2 * 3600)) == normal
     monkeypatch.setattr(engine, "DEPLOY_CLOCK_BAD_SHARE", 1.0)  # every deploy bad
     assert _shared_incidents(_run(_engine(7), 2 * 3600)) == normal
-    assert len(normal) > 40
+    assert len(normal) > 30  # about 19 an hour
 
 
 def test_an_error_rate_answer_resolves_a_bad_deploy_and_a_latency_one_does_not():

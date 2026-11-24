@@ -15,7 +15,6 @@ from opsgen.engine import (
     BAD_DEPLOY,
     BAD_DEPLOY_ERRORS,
     BAD_DEPLOY_TYPES,
-    TRAFFIC_SURGE,
     UPSTREAM_DROP,
     Config,
     Decision,
@@ -94,9 +93,9 @@ def test_reemit_every_five_seconds():
 
 
 def test_deploy_emits_deployment_record_and_mutates_version():
-    # Force a bad deploy on checkout at tick 0 (the only kind of deploy, D-057).
+    # Force a bad deploy on payments at tick 0 (the only kind of deploy there, D-057).
     sim = _sim(seed=4, config=Config(quiet_period=0))
-    _force(sim, BAD_DEPLOY, "checkout")
+    _force(sim, BAD_DEPLOY, "payments")
     _, deps, events = sim.tick(0.0)
     deployed = [e for e in events if e.kind == "bad_deploy"]
     assert deployed, "expected a bad deploy at tick 0"
@@ -133,11 +132,10 @@ def _run(sim: Simulation, ticks: range) -> dict[str, list[dict]]:
 @pytest.mark.parametrize(
     ("itype", "service", "traffic_mult", "latency_mult"),
     [
-        (TRAFFIC_SURGE, "checkout", engine.SURGE_LAMBDA_MULT, 1.0),  # no latency effect (D-059)
-        (UPSTREAM_DROP, "payments", engine.DROP_LAMBDA_MULT, 1.0),
+        (UPSTREAM_DROP, "payments", engine.DROP_LAMBDA_MULT, 1.0),  # no latency effect (D-059)
         (BAD_DEPLOY, "payments", 1.0, engine.BAD_DEPLOY_LATENCY_MULT),
     ],
-    ids=["surge", "drop", "bad_deploy"],
+    ids=["drop", "bad_deploy"],
 )
 def test_an_incident_moves_the_values_not_the_record_count(itype, service, traffic_mult, latency_mult):
     # D-058: one record per service per second, normal or not; the incident's multipliers
@@ -217,11 +215,11 @@ def test_records_sit_at_the_end_of_their_tick():
 
 
 def test_a_record_follows_the_deploy_record_of_its_tick():
-    # A forced bad deploy on checkout: both its deploy and its rollback change the version.
-    # On that tick the deploy record is at the tick and checkout's record 999 ms later, so
+    # A forced bad deploy on payments: both its deploy and its rollback change the version.
+    # On that tick the deploy record is at the tick and payments' record 999 ms later, so
     # the temporal join gives the record the new version.
     sim = Simulation(42, start=1_794_390_513.319599, config=Config(quiet_period=0))
-    _force(sim, BAD_DEPLOY, "checkout")
+    _force(sim, BAD_DEPLOY, "payments")
     seen = []
     for k in range(100):
         metrics, deps, events = sim.tick(sim.start + k)
@@ -290,7 +288,7 @@ AGENT_FOR_TRIGGER = {
     "TRAFFIC_HIGH": "capacity_agent",
     "TRAFFIC_LOW": "capacity_agent",
 }
-ONE_OF_EACH = [(BAD_DEPLOY, "payments"), (TRAFFIC_SURGE, "checkout"), (UPSTREAM_DROP, "payments")]
+ONE_OF_EACH = [(BAD_DEPLOY, "payments"), (UPSTREAM_DROP, "payments")]
 
 
 def _resolved_on_tick_17(itype, svc):
@@ -335,7 +333,7 @@ def test_the_tick_that_reads_the_decision_samples_normal_metrics(itype, svc):
     _, _, (before, _, _), (at, _, _) = _resolved_on_tick_17(itype, svc)
     [before] = [r for r in before if r["service_name"] == svc]
     [at] = [r for r in at if r["service_name"] == svc]
-    assert not 0.5 < _times_normal(before, itype) < 2, before  # x4, x5 or x0.1 on tick 16
+    assert not 0.5 < _times_normal(before, itype) < 2, before  # x4 or x0.1 on tick 16
     assert 0.5 < _times_normal(at, itype) < 2, at
 
 
