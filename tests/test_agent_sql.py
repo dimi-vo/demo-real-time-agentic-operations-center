@@ -8,8 +8,11 @@ scorer). These tests fail when they drift apart.
 Section 5 (D-068) adds the ticket classifier (5.2). Its prompt answers a Severity and a
 Reason, with a HIGH, a plain LOW and a shouting LOW example filled in from the approved
 ticket templates. Its INSERT writes every P1 ticket's verdict to `ticket_triage`, parsed the
-way the 4.3 legs parse an action. The rules each INSERT follows are keyed by its file, and
-the output lines and allowed answers by its agent.
+way the 4.3 legs parse an action. The ticket responder (5.3) answers an Action and a Reason,
+never a Target, with one example per action, also filled in from the templates. Its INSERT
+is a fourth writer of `remediation_decisions`: one decision per HIGH verdict, with the
+ticket's id, the trigger `HIGH_SEVERITY_TICKET` and a null target. The rules each INSERT
+follows are keyed by its file, and the output lines and allowed answers by its agent.
 """
 
 import re
@@ -21,8 +24,10 @@ import pytest
 from opsgen.ticket_templates import POOLS, TEMPLATES, Template
 from scripts.evaluation.decisions import (
     ACTIONS,
+    AGENT_FOR_TRIGGER,
     ALLOWED_ACTIONS,
     CAPACITY_AGENT,
+    HIGH_SEVERITY_TICKET,
     INVESTIGATE_UPSTREAM,
     RELEASE_AGENT,
     ROLLBACK,
@@ -43,16 +48,20 @@ AGENT_FILES = {
 }
 # Each INSERT: the agent it calls and the table it reads. The release agent has two legs:
 # error-rate breaches (lab 2.2's table, D-067) and latency anomalies. The classifier reads
-# lab 5.1's P1 tickets (D-068).
+# lab 5.1's P1 tickets, and the responder the classifier's verdicts (D-068).
 INSERTS = {
     "4.3_insert_release_agent_errors.sql": (RELEASE_AGENT, "service_error_rate"),
     "4.3_insert_release_agent.sql": (RELEASE_AGENT, "service_health"),
     "4.3_insert_capacity_agent.sql": (CAPACITY_AGENT, "service_health"),
     "5.2_insert_ticket_classifier.sql": (TICKET_CLASSIFIER, "p1_tickets"),
+    "5.3_insert_ticket_responder.sql": (TICKET_RESPONDER, "ticket_triage"),
 }
-ERRORS_INSERT, LATENCY_INSERT, CAPACITY_INSERT, CLASSIFIER_INSERT = INSERTS
+ERRORS_INSERT, LATENCY_INSERT, CAPACITY_INSERT, CLASSIFIER_INSERT, RESPONDER_INSERT = INSERTS
 # The 4.3 legs: one decision per flagged window, into remediation_decisions.
 METRIC_INSERTS = (ERRORS_INSERT, LATENCY_INSERT, CAPACITY_INSERT)
+# The INSERTs whose agent sees only some of the rows they read: the 4.3 legs, and the
+# responder (HIGH verdicts only). The classifier has no filter: lab 5.1 kept only the P1s.
+FILTERED_INSERTS = (*METRIC_INSERTS, RESPONDER_INSERT)
 TABLE_FILE = "sink_remediation_decisions.sql"
 
 # Each agent's answer, line by line: brief section 5.5, cut down in D-034, for the metric
@@ -395,9 +404,76 @@ def test_each_responder_example_reason_names_its_cue():
         assert RESPONDER_CUES[action] in reason, (action, reason)
 
 
+def test_the_responder_insert_turns_every_high_verdict_into_a_decision():
+    """One statement, from ticket_triage into remediation_decisions. The HIGH filter is here,
+    as the error-rate leg's is: 5.2 writes every verdict, and there is no high-severity topic.
+    The latest offset and the filter below the join are checked with the other INSERTs."""
+    sql = read(RESPONDER_INSERT)
+    body = sql[sql.index("INSERT INTO") :]
+    assert body.startswith("INSERT INTO `remediation_decisions`\nSELECT\n")
+    assert "FROM `ticket_triage` /*+" in body
+    assert body.count("WHERE") == 1 and "  WHERE `severity` = 'HIGH'\n) tr,\n" in body
+    assert body.count(";") == 1 and body.rstrip().endswith(");")
+
+
+def test_the_responder_insert_writes_a_ticket_decision():
+    """Spec decision 17: the ticket's time in window_end, the responder on the ticket trigger,
+    the parsed action, a null target (never a version or a replica count), the reason, the raw
+    answer, and the ticket's id last."""
+    sql = read(RESPONDER_INSERT)
+    written = dict(zip(_written_columns(sql), _select_items(sql), strict=True))
+    assert list(written) == list(DECISION_COLUMNS)
+    assert written["window_end"] == "tr.`event_time`"
+    assert written["service_name"] == "tr.`service_name`"
+    assert written["agent_name"] == f"'{TICKET_RESPONDER}'"
+    assert written["trigger"] == f"'{HIGH_SEVERITY_TICKET}'"
+    assert written["action"].startswith("CASE") and "Action:" in written["action"]
+    assert written["target"] == "CAST(NULL AS STRING)"
+    assert written["reason"].startswith("TRIM(") and "Reason:" in written["reason"]
+    assert written["raw_response"] == "a.`agent_response`"
+    assert written["ticket_id"] == "tr.`ticket_id`"
+
+
+def test_the_responder_parses_its_action_as_the_metric_legs_do():
+    """The same agent_status handling and the same regex: its three actions are the only
+    values, and anything else is INVALID."""
+    capacity = _severity_or_action(read(CAPACITY_INSERT))
+    expected = capacity.replace(
+        "IN ('INVESTIGATE_UPSTREAM', 'OBSERVE')", "IN ('ROLLBACK', 'SCALE_OUT', 'INVESTIGATE_UPSTREAM')"
+    )
+    assert expected != capacity
+    assert _severity_or_action(read(RESPONDER_INSERT)) == expected
+
+
+def test_the_responder_input_is_the_ticket_and_the_triage_reason():
+    """Spec decision 22: the ticket, labelled as the classifier reads it, then the classifier's
+    reason, which shows the chain. The reason is null when the classifier's answer had no
+    Reason line, and CONCAT returns null when any argument is null, so it falls back to N/A,
+    like the subject and the description."""
+    sql = read(RESPONDER_INSERT)
+    concat = sql[sql.index("  CONCAT(\n") : sql.index(")) AS a(")]
+    lines = ("'TICKET ', tr.`ticket_id`, ' from ', tr.`source`, '\\n',",
+             "'Priority: ', tr.`priority`, '\\n',",
+             "'Subject: ', COALESCE(tr.`subject`, 'N/A'), '\\n',",
+             "'Description: ', COALESCE(tr.`description`, 'N/A'), '\\n',",
+             "'Triage Reason: ', COALESCE(tr.`reason`, 'N/A')\n")  # fmt: skip
+    positions = [concat.index(line) for line in lines]
+    assert positions == sorted(positions)
+
+
+def test_only_the_responder_insert_writes_the_ticket_trigger():
+    """HIGH_SEVERITY_TICKET comes from lab 5.3 alone, and the responder writes no other
+    trigger: `evaluate` and sql/checks/remediation_routing.sql hold every decision to that."""
+    for name in INSERTS:
+        assert (HIGH_SEVERITY_TICKET in read(name)) == (name == RESPONDER_INSERT), name
+    sql = read(RESPONDER_INSERT)
+    assert [t for t in AGENT_FOR_TRIGGER if f"'{t}'" in sql] == [HIGH_SEVERITY_TICKET]
+    assert AGENT_FOR_TRIGGER[HIGH_SEVERITY_TICKET] == TICKET_RESPONDER
+
+
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
 def test_prompt_allows_exactly_the_answers_the_scorer_accepts(agent):
-    """The Action line of a metric agent, the Severity line of the classifier."""
+    """The Action line of a metric agent or the responder, the Severity line of the classifier."""
     prompt = read(AGENT_FILES[agent])
     label = OUTPUT_LINES[agent][0].rstrip(":")
     stated = re.search(rf"the {label} line must be exactly ([^.]+)\.", prompt)
@@ -435,11 +511,11 @@ def test_insert_calls_its_own_agent_by_name_as_a_string(name):
     assert sql.count(f"'{agent}'") == 1 + written, "once as the call, and as the agent_name if written"
 
 
-@pytest.mark.parametrize("name", METRIC_INSERTS)
+@pytest.mark.parametrize("name", FILTERED_INSERTS)
 def test_insert_filters_below_the_lateral_join(name):
-    """The agent must be called once per anomalous row, not once per window: the WHERE
-    sits in a derived table that is the left input of the LATERAL join. (The classifier
-    has no filter: lab 5.1 already kept only the P1s.)"""
+    """The agent must be called once per anomalous row (or HIGH verdict), not once per
+    window (or ticket): the WHERE sits in a derived table that is the left input of the
+    LATERAL join. (The classifier has no filter: lab 5.1 already kept only the P1s.)"""
     _, table = INSERTS[name]
     sql = read(name)
     where = sql.index("WHERE")
