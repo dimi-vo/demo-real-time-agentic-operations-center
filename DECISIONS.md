@@ -3141,5 +3141,31 @@ with stand-in metric agents fed back, and stand-in ticket agents with one wrong 
 answers, no leaks, medians 5.3 s and 5.8 s. The metric half reads the same with and without the
 ticket tables: 93/93 incidents detected in time, 96/96 anomalous rows answered, 93/93 actions.
 
+Issue 11 (the docs): `README.md` (the opening paragraph tells three stories with four Streaming
+Agents, at about the length it had: web-gateway's bad deploys trip the fixed error-rate
+threshold and the release agent rolls them back; payments is watched by ARIMA on latency and
+traffic, with the release and capacity agents; checkout sends support tickets from Zendesk and
+ServiceNow, Flink routes the P1s, the classifier recovers their real severity into
+`ticket_triage` and the responder recommends an action; the release, capacity and responder
+agents write `remediation_decisions`, in four INSERTs; the README doesn't describe the wall, so
+its new look isn't mentioned), `platform-team/README.md` (`service_metrics` carries a sample a
+second for web-gateway and payments only; the Real-Time Context Engine and Lightning sections
+are 6–8, since section 5 is now the tickets; the cost paragraph: the metric agents' calls track
+incidents, about 45 an hour per developer, and the ticket agents' calls track tickets, about 72
+and 36, or 108 an hour; issue 04 had already written the resource list, the 17 resources and
+their list, the eleven statements, the pool's eight long-running statements against 10 CFUs, the
+readiness row, the files table, and the one "Updating stacks you built earlier" subsection that
+drops `remediation_decisions` before the apply). Tests: `tests/test_evaluate_detection.py` (the
+echo-tag and end-window tests used a `TRAFFIC_SURGE` on web-gateway; they now use an
+`UPSTREAM_DROP` on payments, with the traffic signals flipped). A grep of the tracked tree,
+apart from `DECISIONS.md`, `PLAN.md`, `checkpoints/`, `.agents/` and `inspiration/`, finds no
+stale "three records per second", "checkout and payments" as the ARIMA pair, `TRAFFIC_SURGE`,
+"two agents", "six tables" or "six topics". What it still finds is accurate: the scripts under
+`scripts/tuning/research/`, kept as records with their pre-D-068 note; tests and a comment
+saying surges are gone; and "two agents" for the two ticket agents on the wall or the two metric
+agents in `remediation_routing.sql`. The repo has no markdown link check. A check of the
+relative links and anchors in its tracked markdown finds only `PLAN.md` (gitignored) and the
+`docs/tracks/PRE-PROVISIONED.md` links, which stay until the walkthrough is written.
+
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.
