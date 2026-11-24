@@ -3,25 +3,30 @@
 /*  Ops wall — render code, driven by the live /ws snapshot (D-054).
  *
  *  The wall's state does all the counting; this page only draws what the snapshot says.
- *  One card per service; in it, the charts the snapshot names (svc.charts) and one time axis:
- *  Latency and Traffic for payments, Errors for web-gateway (D-067), none for checkout, which
- *  has no metrics (D-068): its card is a header and a status.
+ *  The frame is the target design's (D-068): a header, then one full-width row per service
+ *  in the snapshot's order. A row is its main panel (name and status chip on the left, a
+ *  detail slot on the right, then the charts the snapshot names in svc.charts over one time
+ *  axis) and its Issues panel (svc.issues: injected, detected of injected with the missed
+ *  line, the median times to detect and to remediate), which moves below the row on a
+ *  narrow screen. Latency and Traffic for payments, Errors for web-gateway (D-067), none for
+ *  checkout, which has no metrics (D-068): its main panel is a header and a status.
  *  A chart, back to front (D-066):
- *  - a translucent purple box per injected incident on that metric, the full plot height,
- *    from its start to its end (to the right edge while open); a missed one is dashed
+ *  - a translucent box per injected incident on that metric, the full plot height, from its
+ *    start to its end (to the right edge while open); a missed one is dashed
  *  - on the errors chart, a thin mark at every deploy and rollback (svc.deploys): solid for a
  *    deploy, dashed for a rollback, good deploys included (D-067)
  *  - the raw service_metrics line (D-061): one point per second on a log y scale fitted to
  *    what's visible; on the errors chart, the share of each second's requests that failed on
  *    a fixed linear 0-100 % scale, with lab 2.2's threshold as a dashed line, and a gap for a
  *    second without requests
- *  - under the plot, a marker strip with one set of marks per detection block: a cyan dot
- *    where the detector flagged it (hollow when no incident owns it: a false alarm), a cyan
- *    line from it to the agent's first decision (to "now" while it waits), and an amber
- *    diamond at that decision, one row below the dot so the two never cover each other
- *  The summary table and the cards' status come ready-made as well.
+ *  - under the plot, a marker strip with one set of marks per detection block: a dot where
+ *    the detector flagged it (hollow when no incident owns it: a false alarm), a line from it
+ *    to the agent's first decision (to "now" while it waits), and an amber diamond at that
+ *    decision, one row below the dot so the two never cover each other
+ *  The rows' status and Issues numbers come ready-made as well; what each mark means is in
+ *  its tooltip.
  *  All positions are axis-relative seconds (0 = left edge, axisSeconds = now). The DOM is
- *  made once and updated in place by every snapshot (D-062): a card per service, a box per
+ *  made once and updated in place by every snapshot (D-062): a row per service, a box per
  *  incident and a mark group per block, kept by key; a ResizeObserver redraws a chart whose
  *  width changes.
  */
@@ -31,9 +36,9 @@ function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   const conn = document.getElementById("conn"), label = conn.querySelector(".conn-label");
-  ws.onopen = () => { label.textContent = "LIVE"; conn.className = "conn live"; };
+  ws.onopen = () => { label.textContent = "Live"; conn.className = "conn live"; };
   ws.onclose = () => {
-    label.textContent = "reconnecting…"; conn.className = "conn offline";
+    label.textContent = "Reconnecting…"; conn.className = "conn offline";
     setTimeout(connect, 1500);
   };
   ws.onmessage = (e) => {
@@ -58,6 +63,7 @@ function s(tag, a = {}, parent) {
 // selection in it survives, nothing is laid out again).
 const setText = (el, text) => { if (el.textContent !== text) el.textContent = text; };
 const setClass = (el, cls) => { if (el.getAttribute("class") !== cls) el.setAttribute("class", cls); };
+const setAttr = (el, k, v) => { if (el.getAttribute(k) !== v) el.setAttribute(k, v); };
 const setHTML = (el, html) => { if (el._html !== html) { el._html = html; el.innerHTML = html; } };
 
 // The page is updated in place, never rebuilt (D-062): the node under the pointer or holding
@@ -120,7 +126,7 @@ function metricModel(svc, kind) {
     key: `${svc.name}/${kind}`,
     records: svc.metrics || [],  // service_metrics samples on the axis, oldest first
     value: VALUE[kind],          // a record's value on this chart; null leaves a gap
-    deploys: svc.deploys || [],  // version changes on the axis, drawn on every chart of the card
+    deploys: svc.deploys || [],  // version changes on the axis, drawn on every chart of the row
   };
 }
 
@@ -396,27 +402,57 @@ function drawChart(host) {
   });
 }
 
-// ---------- Cards ----------
-// A service's card: made once, then updated by every snapshot. Each chart host gets its
-// height before anything in the card is drawn or measured: a host at 0 px would shrink the
+// ---------- Rows ----------
+// A service's row: made once, then updated by every snapshot. Each chart host gets its
+// height before anything in the row is drawn or measured: a host at 0 px would shrink the
 // page for one layout, and the browser would clamp the scroll position to that.
-function createCard() {
-  const card = document.createElement("article");
-  card.innerHTML = `
-    <header class="card-head">
-      <div class="who">
-        <h2></h2>
-        <span class="status"><span class="dot"></span><span class="status-text"></span></span>
+function createRow() {
+  const row = document.createElement("div");
+  row.innerHTML = `
+    <section class="panel frame row-main">
+      <header class="row-head">
+        <div class="who">
+          <h2></h2>
+          <span class="status"><span class="dot"></span><span class="status-text"></span></span>
+        </div>
+        <div class="detail"></div>
+      </header>
+      <div class="row-body">
+        <div class="charts"></div>
+        <div class="axis" aria-hidden="true"></div>
       </div>
-    </header>
-    <div class="charts"></div>
-    <div class="axis" aria-hidden="true"></div>`;
-  const status = card.querySelector(".status");
-  card._ui = {
-    name: card.querySelector("h2"), status, statusText: status.lastElementChild,
+    </section>
+    <aside class="panel frame issues">
+      <div class="issues-head"><h3>Issues</h3><span>Last 10 min</span></div>
+      <div class="stats">
+        <div class="stat">
+          <span class="stat-label">Injected</span>
+          <span class="stat-value" data-k="injected"></span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Detected</span>
+          <span class="stat-line"><span class="stat-value" data-k="detected"></span><span class="stat-of"></span></span>
+          <span class="stat-missed"></span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Median time to detect</span>
+          <span class="stat-value" data-k="medianTimeToDetect"></span>
+        </div>
+        <div class="stat" title="Measured from the incident's start to the agent's answer">
+          <span class="stat-label">Median time to remediate</span>
+          <span class="stat-value" data-k="medianTimeToRemediate"></span>
+        </div>
+      </div>
+    </aside>`;
+  const status = row.querySelector(".status");
+  row._ui = {
+    main: row.querySelector(".row-main"), issues: row.querySelector(".issues"),
+    name: row.querySelector("h2"), status, statusText: status.lastElementChild,
+    stat: Object.fromEntries([...row.querySelectorAll(".stat-value")].map(n => [n.dataset.k, n])),
+    of: row.querySelector(".stat-of"), missed: row.querySelector(".stat-missed"),
     charts: [], chartsKey: null,
   };
-  const axis = card.querySelector(".axis");
+  const axis = row.querySelector(".axis");
   for (let i = 0; i <= 5; i++) {
     const sec = i * AXIS / 5;
     const span = document.createElement("span");
@@ -424,19 +460,19 @@ function createCard() {
     span.textContent = i === 5 ? "now" : `−${Math.round((AXIS - sec) / 60)}m`;
     axis.appendChild(span);
   }
-  return card;
+  return row;
 }
 
-// The card's chart hosts, one per kind the snapshot names (svc.charts, D-067): made on the
-// first update, before anything is drawn, and again only if the list changes. A card with
+// The row's chart hosts, one per kind the snapshot names (svc.charts, D-067): made on the
+// first update, before anything is drawn, and again only if the list changes. A row with
 // no charts (checkout, which has no metrics: D-068) has no time axis either.
-function ensureCharts(card, kinds) {
-  const ui = card._ui, key = kinds.join(",");
+function ensureCharts(row, kinds) {
+  const ui = row._ui, key = kinds.join(",");
   if (ui.chartsKey === key) return;
   ui.chartsKey = key;
   for (const c of ui.charts) ro.unobserve(c.host);
-  card.querySelector(".axis").hidden = kinds.length === 0;
-  const charts = card.querySelector(".charts");
+  row.querySelector(".row-body").hidden = kinds.length === 0;
+  const charts = row.querySelector(".charts");
   charts.replaceChildren();
   ui.charts = kinds.map(kind => {
     const host = document.createElement("div");
@@ -449,26 +485,37 @@ function ensureCharts(card, kinds) {
   });
 }
 
-function updateCard(card, svc) {
-  const ui = card._ui, status = svc.status || "healthy";
-  ensureCharts(card, svc.charts || ["latency", "traffic"]);
-  setClass(card, `card ${status}`);
+function updateRow(row, svc) {
+  const ui = row._ui, status = svc.status || "healthy";
+  ensureCharts(row, svc.charts || ["latency", "traffic"]);
+  setClass(row, `svc-row ${status}`);
   setText(ui.name, svc.name);
+  setAttr(ui.main, "aria-label", svc.name);
+  setAttr(ui.issues, "aria-label", `${svc.name} issues in the last 10 minutes`);
   setClass(ui.status, `status ${status}`);
   setText(ui.statusText, svc.statusText || "");
+  renderIssues(ui, svc.issues || {});
   for (const c of ui.charts) { c.host._m = metricModel(svc, c.kind); c.host._draw(); }
 }
 
-// ---------- Summary ----------
-// One cell per summary field, whole numbers; a field the snapshot leaves empty (no median
-// before the first answer) reads 0.
-const summaryCells = [...document.querySelectorAll("#summary td[data-k]")];
-function renderSummary(S = {}) {
-  for (const td of summaryCells) {
-    const v = Math.round(S[td.dataset.k] ?? 0);
-    setText(td, String(v));
-    if (td.dataset.k === "missed") setClass(td, v > 0 ? "miss" : "");
-  }
+// ---------- Issues ----------
+// A row's Issues panel (D-068): the numbers the state counted (svc.issues), whatever they
+// were counted from. Detected reads "x of y" over a missed line, amber when any was missed.
+// Durations as the design writes them: "6s", "1m 12s", and "—" with nothing to show.
+const issueDur = sec => {
+  if (sec == null) return "—";
+  sec = Math.max(0, Math.round(sec));
+  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, "0")}s`;
+};
+function renderIssues(ui, I) {
+  const injected = I.injected ?? 0, missed = I.missed ?? 0;
+  setText(ui.stat.injected, String(injected));
+  setText(ui.stat.detected, String(I.detected ?? 0));
+  setText(ui.of, `of ${injected}`);
+  setText(ui.missed, missed ? `${missed} missed` : "None missed");
+  setClass(ui.missed, missed ? "stat-missed some" : "stat-missed");
+  setText(ui.stat.medianTimeToDetect, issueDur(I.medianTimeToDetect));
+  setText(ui.stat.medianTimeToRemediate, issueDur(I.medianTimeToRemediate));
 }
 
 // ---------- Tooltip ----------
@@ -522,13 +569,16 @@ const ro = new ResizeObserver(entries => {
   }
 });
 
+// The header's clock, hh:mm:ss on the 24-hour clock whatever the browser's locale.
+function clockText(sec) {
+  const d = new Date(sec * 1000), p = n => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 function render(D) {
   AXIS = D.axisSeconds || 600;
   THRESHOLD = D.errorThresholdPct ?? THRESHOLD;
-  sync(document.getElementById("cards"), D.services || [], svc => svc.name, createCard, updateCard);
-  renderSummary(D.summary || {});
-  setText(document.getElementById("updated"),
-    new Date((D.updatedAt || Date.now() / 1000) * 1000)
-      .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  sync(document.getElementById("rows"), D.services || [], svc => svc.name, createRow, updateRow);
+  setText(document.getElementById("updated"), clockText(D.updatedAt || Date.now() / 1000));
   refreshTip();
 }

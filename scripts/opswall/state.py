@@ -37,11 +37,11 @@ transaction wrote comes again when the statement replays, D-063).
 - The **samples** are the raw ``service_metrics`` records, one per metric service per
   second (D-058, D-068), kept for the axis plus a margin (``trim()``). The snapshot
   carries the ones on the chart; the page draws them as the latency and traffic lines
-  (D-061), and, for a card with the errors chart, the share of each second's requests
+  (D-061), and, for a row with the errors chart, the share of each second's requests
   that failed (null for a second without requests, D-067).
-- The **charts** of a card: web-gateway's is the errors chart alone (lab 2.2's threshold,
+- The **charts** of a row: web-gateway's is the errors chart alone (lab 2.2's threshold,
   D-067), payments' are latency and traffic, and checkout, which produces tickets and no
-  metrics, has none (D-068). A card with the errors chart
+  metrics, has none (D-068). A row with the errors chart
   also gets a **deploy mark** per DEPLOY and ROLLBACK of its service, good deploys
   included, keyed by ``deployed_at`` so the 5-s heartbeat adds nothing.
 
@@ -96,7 +96,7 @@ INCIDENT_METRIC = {  # no TRAFFIC_SURGE: surges are retired (D-068)
     "UPSTREAM_DROP": "traffic",
     "BAD_DEPLOY_ERRORS": "errors",
 }
-# The cards whose only chart is the errors chart: the services lab 2.2 reads (D-067).
+# The rows whose only chart is the errors chart: the services lab 2.2 reads (D-067).
 ERRORS_CHART_SERVICES = ("web-gateway",)
 # Lab 2.2's rule (sql/2.2_error_rate.sql), drawn as a line on the errors chart; a test keeps
 # the two in step.
@@ -415,7 +415,7 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
 
 
 def _charts(name: str) -> list[str]:
-    """The charts a card shows, top to bottom (D-067). A ticket service has no metrics, so
+    """The charts a row shows, top to bottom (D-067). A ticket service has no metrics, so
     none (D-068)."""
     if name in TICKET_SERVICES:
         return []
@@ -597,7 +597,7 @@ def _status(blocks: list[_Block], now: float) -> tuple[str, str]:
 # ---- helpers ------------------------------------------------------------------
 
 def _seeded_services() -> dict[str, ServiceState]:
-    """Every service, so the wall shows its cards before the first record arrives."""
+    """Every service, so the wall shows its rows before the first record arrives."""
     return {name: ServiceState(name=name) for name in SERVICES}
 
 
