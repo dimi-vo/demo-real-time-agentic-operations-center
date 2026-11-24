@@ -160,24 +160,24 @@ def _produce(sr, topic: str, field: MessageField, record: dict) -> bytes:
 
 
 def test_a_live_deployment_record_updates_its_tile(registry):
-    from opsgen.services import SERVICES_BY_NAME
+    from opsgen.services import METRIC_SERVICES_BY_NAME
     from opsgen.simulation import Simulation
 
     sim = Simulation(1, start=1_800_000_000.0)
-    sim.deployments["checkout"].deploy(1_800_000_000.0)
-    record = sim._dep_record("checkout", 1_800_000_000.0)  # what ops-sim produces
-    key = _produce(registry, DEPLOYMENTS_TOPIC, MessageField.KEY, {"service_name": "checkout"})
+    sim.deployments["payments"].deploy(1_800_000_000.0)
+    record = sim._dep_record("payments", 1_800_000_000.0)  # what ops-sim produces
+    key = _produce(registry, DEPLOYMENTS_TOPIC, MessageField.KEY, {"service_name": "payments"})
     value = _produce(registry, DEPLOYMENTS_TOPIC, MessageField.VALUE, record)
 
     deser = make_deserializer(registry)
     decoded = decode_record(value, key, DEPLOYMENTS_TOPIC, deser, key_deserializer=deser)
     assert isinstance(decoded["deployed_at"], datetime), "the decoder hands over datetimes"
-    assert decoded["service_name"] == "checkout", "service_name comes from the key"
+    assert decoded["service_name"] == "payments", "service_name comes from the key"
 
     st = OpsWallState()
     st.apply_deployment(decoded)
-    tile = _service(st, "checkout", 1_800_000_030.0)
-    initial = SERVICES_BY_NAME["checkout"].initial_version
+    tile = _service(st, "payments", 1_800_000_030.0)
+    initial = METRIC_SERVICES_BY_NAME["payments"].initial_version
     assert (tile["previousVersion"], tile["lastChange"]) == (initial, "DEPLOY")
     assert tile["secondsSinceDeploy"] == pytest.approx(30.0)
 
@@ -187,17 +187,17 @@ def test_a_live_incident_record_draws_its_ground_truth(registry):
     from opsgen.groundtruth import end_record, start_record
 
     inc = Incident(
-        "INC0001", BAD_DEPLOY, "checkout", 1_800_000_000.0, 1_800_000_040.0, "LATENCY_HIGH", "ROLLBACK", 1_800_000_040.0
+        "INC0001", BAD_DEPLOY, "payments", 1_800_000_000.0, 1_800_000_040.0, "LATENCY_HIGH", "ROLLBACK", 1_800_000_040.0
     )
     deser = make_deserializer(registry)
     st = OpsWallState()
     for rec in (start_record(inc, 1_800_000_000.0), end_record(inc, 1_800_000_040.0)):
         value = _produce(registry, INCIDENTS_TOPIC, MessageField.VALUE, rec)
         # service_incidents keys are raw strings, not Avro: the value carries service_name.
-        decoded = decode_record(value, b"checkout", INCIDENTS_TOPIC, deser)
+        decoded = decode_record(value, b"payments", INCIDENTS_TOPIC, deser)
         st.apply_incident(decoded)
     now = 1_800_000_060.0
-    [truth] = _service(st, "checkout", now)["groundTruth"]
+    [truth] = _service(st, "payments", now)["groundTruth"]
     axis_left = now - st.axis_seconds
     assert truth["start"] == pytest.approx(1_800_000_000.0 - axis_left)
     assert truth["end"] == pytest.approx(1_800_000_040.0 - axis_left)
@@ -219,12 +219,12 @@ def test_live_metrics_records_reach_the_charts_and_the_rail(registry):
             sent.append(rec)
 
     now = start + 10
-    checkout = _service(st, "checkout", now)
-    mine = [r for r in sent if r["service_name"] == "checkout"]
+    payments = _service(st, "payments", now)
+    mine = [r for r in sent if r["service_name"] == "payments"]
     left = now - st.axis_seconds
-    assert [m["t"] for m in checkout["metrics"]] == pytest.approx([start + k + 0.999 - left for k in range(10)])
-    assert [m["traffic"] for m in checkout["metrics"]] == [r["traffic_count"] for r in mine]
-    assert [m["latency"] for m in checkout["metrics"]] == [round(r["latency_ms"], 1) for r in mine]
+    assert [m["t"] for m in payments["metrics"]] == pytest.approx([start + k + 0.999 - left for k in range(10)])
+    assert [m["traffic"] for m in payments["metrics"]] == [r["traffic_count"] for r in mine]
+    assert [m["latency"] for m in payments["metrics"]] == [round(r["latency_ms"], 1) for r in mine]
 
 
 # --- the topics the consumer tails ---------------------------------------------------

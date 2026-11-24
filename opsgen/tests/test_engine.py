@@ -23,11 +23,11 @@ from opsgen.engine import (
     Engine,
     Incident,
 )
-from opsgen.services import SERVICES, service_names
+from opsgen.services import METRIC_SERVICES, SERVICES
 
 
 def _deployments(now=0.0):
-    return {s.name: DeploymentState.initial(s, now) for s in SERVICES}
+    return {s.name: DeploymentState.initial(s, now) for s in METRIC_SERVICES}
 
 
 def _run(config, seed, horizon):
@@ -415,7 +415,7 @@ def test_no_incidents_runs_an_hour_without_a_deploy():
                 boot[r["service_name"]]["version"],
                 boot[r["service_name"]]["deployed_at"],
             ), r
-    assert heartbeats == 3 * (3600 // 5 - 1)  # every 5 s, except tick 0 (the bootstrap covers it)
+    assert heartbeats == 2 * (3600 // 5 - 1)  # web-gateway and payments every 5 s, except tick 0 (the bootstrap)
 
 
 def test_versions_change_only_on_bad_deploys_and_their_rollbacks():
@@ -488,7 +488,7 @@ def test_every_incident_has_exactly_one_expected_action(itype, svc):
 def test_incident_candidates_match_spec():
     # D-056, D-067, D-068: three services. The shared scheduler serves payments alone (bad
     # deploys and drops); checkout produces tickets and web-gateway deploys on its own clock.
-    assert set(service_names()) == {"web-gateway", "checkout", "payments"}
+    assert SERVICES == ("web-gateway", "checkout", "payments")
     assert SHARED_SERVICES == ("payments",)
     assert INCIDENT_TYPES == (BAD_DEPLOY, UPSTREAM_DROP)
     assert CANDIDATES == {BAD_DEPLOY: ("payments",), UPSTREAM_DROP: ("payments",)}
@@ -542,9 +542,44 @@ def test_a_state_file_without_highest_version_still_never_reuses_one():
     from opsgen.simulation import Simulation
 
     saved = {
-        "services": {"checkout": {"version": "4.2.2", "previous_version": "4.2.3", "last_change": "ROLLBACK"}},
+        "services": {"payments": {"version": "2.9.4", "previous_version": "2.9.5", "last_change": "ROLLBACK"}},
         "incident_counter": 3,
     }
     sim = Simulation(1, start=0.0, initial_state=saved)
-    assert sim.deployments["checkout"].highest_version == "4.2.3"
-    assert sim.deployments["checkout"].deploy(10.0)[1] == "4.2.4"
+    assert sim.deployments["payments"].highest_version == "2.9.5"
+    assert sim.deployments["payments"].deploy(10.0)[1] == "2.9.6"
+
+
+def _saved(version, previous_version, last_change, deployed_at):
+    return {"version": version, "previous_version": previous_version, "highest_version": version,
+            "deployed_at": deployed_at, "last_change": last_change}  # fmt: skip
+
+
+def test_the_state_file_holds_the_metric_services_and_a_pre_d068_one_still_loads(tmp_path):
+    # D-068: only web-gateway and payments deploy, so only they are saved. A file saved before
+    # D-068 also has checkout's versions: it loads, and checkout's entry is ignored.
+    from opsgen.simulation import Simulation
+    from opsgen.state import load_state, save_state, state_path
+
+    path = state_path(tmp_path)
+    first = Simulation(1, start=0.0)
+    for now in range(400):
+        first.tick(float(now))
+    save_state(path, first.state_snapshot())
+    saved = load_state(path)
+    assert set(saved["services"]) == {"web-gateway", "payments"}
+    assert Simulation(1, start=1000.0, initial_state=saved).state_snapshot() == saved  # the round trip
+
+    save_state(path, {
+        "services": {
+            "web-gateway": _saved("3.4.9", "3.4.8", "DEPLOY", 50.0),
+            "checkout": _saved("4.2.7", "4.2.6", "DEPLOY", 60.0),
+            "payments": _saved("2.9.6", "2.9.4", "DEPLOY", 70.0),
+        },
+        "incident_counter": 12,
+    })  # fmt: skip
+    sim = Simulation(2, start=1000.0, initial_state=load_state(path))
+    assert {n: d.version for n, d in sim.deployments.items()} == {"web-gateway": "3.4.9", "payments": "2.9.6"}
+    assert sim.engine.incident_counter == 12
+    assert [r["service_name"] for r in sim.bootstrap()] == ["web-gateway", "payments"]
+    assert set(sim.state_snapshot()["services"]) == {"web-gateway", "payments"}  # checkout is dropped

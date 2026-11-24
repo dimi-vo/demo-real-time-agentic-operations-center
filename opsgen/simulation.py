@@ -15,9 +15,9 @@ from collections.abc import Iterable
 from opsgen.deployments import DeploymentState, highest
 from opsgen.distributions import binomial, mean_latency_ms, poisson
 from opsgen.engine import Config, Decision, Engine, Event
-from opsgen.services import SERVICES
+from opsgen.services import METRIC_SERVICES
 
-REEMIT_INTERVAL = 5  # seconds; the controller reconciliation loop re-emits all services
+REEMIT_INTERVAL = 5  # seconds; the controller reconciliation loop re-emits every metric service
 # A metrics record covers one tick and is stamped at its end: tick + 999 ms (D-058).
 SAMPLE_OFFSET_MS = 999
 
@@ -44,9 +44,11 @@ class Simulation:
         self.config = config or Config()
         self.sched_rng = random.Random(seed)
         self.traffic_rng = random.Random(None if seed is None else seed + 1)
+        # Only the metric services deploy (D-068). A state file from before D-068 also has
+        # checkout's versions; they are ignored.
         saved_services = (initial_state or {}).get("services", {})
         self.deployments: dict[str, DeploymentState] = {}
-        for svc in SERVICES:
+        for svc in METRIC_SERVICES:
             state = DeploymentState.initial(svc, start)
             if svc.name in saved_services:
                 saved = saved_services[svc.name]
@@ -83,7 +85,7 @@ class Simulation:
         }
 
     def bootstrap(self, now: float | None = None) -> list[dict]:
-        """The current state of every service, emitted first on every start."""
+        """The current state of every metric service, emitted first on every start."""
         now = self.start if now is None else now
         return [self._dep_record(name, now) for name in self.deployments]
 
@@ -98,7 +100,7 @@ class Simulation:
         return round(t * 1000)
 
     def _gen_metrics(self, now: float) -> list[dict]:
-        """One metrics sample per service: the second that starts at `now`, summed up
+        """One metrics sample per metric service: the second that starts at `now`, summed up
         (D-058). An incident changes the values, never the number of records.
 
         The record is stamped at the end of its second (tick + 999 ms): after a deploy
@@ -106,7 +108,7 @@ class Simulation:
         never on the next tick's millisecond, where the next deploy record may sit."""
         event_time = self.tick_ms(now) + SAMPLE_OFFSET_MS
         out: list[dict] = []
-        for svc in SERVICES:
+        for svc in METRIC_SERVICES:
             eff = self.engine.effect_for(svc.name, now)
             count = poisson(svc.rps * eff.lam_mult, self.traffic_rng)
             latency = mean_latency_ms(count, svc.median_latency_ms * eff.latency_mult, self.traffic_rng)
@@ -148,8 +150,8 @@ class Simulation:
         return metrics, dep_records, events
 
     def state_snapshot(self) -> dict:
-        """The persistable state: each service's deployment (versions, the highest version
-        it has run, deployed_at) and the last incident number used."""
+        """The persistable state: each metric service's deployment (versions, the highest
+        version it has run, deployed_at) and the last incident number used."""
         return {
             "services": {
                 name: {

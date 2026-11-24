@@ -29,13 +29,14 @@ transaction wrote comes again when the statement replays, D-063).
   time to answer are measured on its first block.
 - The tile: a block open → ``anomaly``; a fix within the last 120 s → ``remediated``;
   otherwise ``healthy``.
-- The **samples** are the raw ``service_metrics`` records, one per service per second
-  (D-058), kept for the axis plus a margin (``trim()``). The snapshot
+- The **samples** are the raw ``service_metrics`` records, one per metric service per
+  second (D-058, D-068), kept for the axis plus a margin (``trim()``). The snapshot
   carries the ones on the chart; the page draws them as the latency and traffic lines
   (D-061), and, for a card with the errors chart, the share of each second's requests
   that failed (null for a second without requests, D-067).
 - The **charts** of a card: web-gateway's is the errors chart alone (lab 2.2's threshold,
-  D-067), checkout's and payments' are latency and traffic. A card with the errors chart
+  D-067), payments' are latency and traffic, and checkout, which produces tickets and no
+  metrics, has none (D-068). A card with the errors chart
   also gets a **deploy mark** per DEPLOY and ROLLBACK of its service, good deploys
   included, keyed by ``deployed_at`` so the 5-s heartbeat adds nothing.
 
@@ -54,7 +55,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from opsgen.services import SERVICES
+from opsgen.services import SERVICES, TICKET_SERVICES
 
 AXIS_SECONDS = 600
 WINDOW_SECONDS = 10.0
@@ -408,7 +409,10 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
 
 
 def _charts(name: str) -> list[str]:
-    """The charts a card shows, top to bottom (D-067)."""
+    """The charts a card shows, top to bottom (D-067). A ticket service has no metrics, so
+    none (D-068)."""
+    if name in TICKET_SERVICES:
+        return []
     return ["errors"] if name in ERRORS_CHART_SERVICES else ["latency", "traffic"]
 
 
@@ -562,7 +566,7 @@ def _status(blocks: list[_Block], now: float) -> tuple[str, str]:
 
 def _seeded_services() -> dict[str, ServiceState]:
     """Every service, so the wall shows its cards before the first record arrives."""
-    return {s.name: ServiceState(name=s.name) for s in SERVICES}
+    return {name: ServiceState(name=name) for name in SERVICES}
 
 
 def _to_seconds(value) -> float | None:

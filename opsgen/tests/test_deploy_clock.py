@@ -17,7 +17,7 @@ from opsgen.engine import (
     Engine,
 )
 from opsgen.groundtruth import start_record
-from opsgen.services import SERVICES
+from opsgen.services import METRIC_SERVICES
 from opsgen.simulation import Simulation
 
 GATEWAY = "web-gateway"
@@ -28,7 +28,7 @@ def _engine(seed, config=None):
 
 
 def _deployments():
-    return {s.name: DeploymentState.initial(s, 0.0) for s in SERVICES}
+    return {s.name: DeploymentState.initial(s, 0.0) for s in METRIC_SERVICES}
 
 
 def _run(eng, horizon, resolve_after=None):

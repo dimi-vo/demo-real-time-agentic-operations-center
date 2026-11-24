@@ -2,9 +2,12 @@
 and incident numbering (brief section 4.5, D-046). Replicas are fixed per service and
 come from `opsgen/services.py`, so only versions (current, previous, and the highest ever
 run, so a deploy never reuses a number: D-067) / deployed_at / last_change are persisted
-per service, plus the last incident number used:
+per metric service, plus the last incident number used:
 
-    {"services": {"checkout": {"version": ..., ...}, ...}, "incident_counter": 7}
+    {"services": {"payments": {"version": ..., ...}, ...}, "incident_counter": 7}
+
+A file saved before D-068 also has checkout, which no longer deploys; `Simulation` ignores
+that entry.
 """
 
 from __future__ import annotations

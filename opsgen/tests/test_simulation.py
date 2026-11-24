@@ -21,7 +21,7 @@ from opsgen.engine import (
     Incident,
 )
 from opsgen.groundtruth import end_record
-from opsgen.services import SERVICES, SERVICES_BY_NAME, service_names
+from opsgen.services import METRIC_SERVICES, METRIC_SERVICES_BY_NAME, SERVICES, TICKET_SERVICES
 from opsgen.simulation import REEMIT_INTERVAL, Simulation
 
 METRICS_FIELDS = {"event_time", "service_name", "traffic_count", "latency_ms", "error_count"}
@@ -51,11 +51,34 @@ def _force(sim, itype, svc):
     sim.engine._choose_incident = lambda now: next(picks, None)
 
 
-def test_bootstrap_emits_every_service():
+def test_two_services_produce_metrics_and_checkout_produces_tickets():
+    # D-068: SERVICES lists all three in the wall's order; web-gateway and payments produce
+    # metrics and deploys, checkout produces support tickets.
+    assert SERVICES == ("web-gateway", "checkout", "payments")
+    assert [s.name for s in METRIC_SERVICES] == ["web-gateway", "payments"]
+    assert TICKET_SERVICES == ("checkout",)
+    assert set(METRIC_SERVICES_BY_NAME) == {"web-gateway", "payments"}
+
+
+def test_bootstrap_emits_the_metric_services():
     sim = _sim()
     boot = sim.bootstrap()
-    assert {r["service_name"] for r in boot} == set(service_names())
+    assert [r["service_name"] for r in boot] == ["web-gateway", "payments"]  # no checkout (D-068)
     assert all(r["last_change"] == "INITIAL" for r in boot)
+
+
+def test_checkout_writes_no_metrics_and_no_deployment_records():
+    # D-068: two metrics records a second, and deployment records (the 5 s re-emit, deploys
+    # and rollbacks) for web-gateway and payments only, over an hour with incidents.
+    sim = _sim(seed=1)
+    changes: dict[str, set[str]] = defaultdict(set)
+    for k in range(3600):
+        metrics, deps, _ = sim.tick(float(k))
+        assert [r["service_name"] for r in metrics] == ["web-gateway", "payments"], k
+        for d in deps:
+            changes[d["service_name"]].add(d["last_change"])
+    assert set(changes) == {"web-gateway", "payments"}
+    assert all({"DEPLOY", "ROLLBACK"} <= seen for seen in changes.values()), changes
 
 
 def test_metrics_record_fields_match_schema():
@@ -71,7 +94,7 @@ def test_metrics_record_fields_match_schema():
 
 def test_deployment_record_fields_match_schema():
     sim = _sim()
-    rec = sim._dep_record("checkout", 0.0)
+    rec = sim._dep_record("payments", 0.0)
     assert set(rec) == DEPLOYMENT_FIELDS
     # The record carries the key column too; Flink registers service_name in the key
     # subject only, so the value schema has every other field.
@@ -87,7 +110,7 @@ def test_reemit_every_five_seconds():
     _, deps0, _ = sim.tick(0.0)
     assert deps0 == []
     _, deps5, _ = sim.tick(float(REEMIT_INTERVAL))
-    assert {r["service_name"] for r in deps5} == set(service_names())
+    assert {r["service_name"] for r in deps5} == {"web-gateway", "payments"}
     _, deps6, _ = sim.tick(6.0)
     assert deps6 == []
 
@@ -118,12 +141,12 @@ def _forced(itype: str, service: str, start: float, end: float) -> Incident:
 
 
 def _run(sim: Simulation, ticks: range) -> dict[str, list[dict]]:
-    """Every service's records over `ticks`, checking there is exactly one per service
+    """Every service's records over `ticks`, checking there is exactly one per metric service
     per tick (D-058)."""
     by_service: dict[str, list[dict]] = defaultdict(list)
     for k in ticks:
         metrics, _, _ = sim.tick(float(k))
-        assert sorted(r["service_name"] for r in metrics) == sorted(service_names()), k
+        assert sorted(r["service_name"] for r in metrics) == ["payments", "web-gateway"], k
         for r in metrics:
             by_service[r["service_name"]].append(r)
     return by_service
@@ -196,7 +219,7 @@ def test_bad_deploy_degrades_from_its_own_tick():
     window = [r for r in metrics if r["service_name"] == bad.service_name]
     for j in range(1, 10):
         window += [r for r in sim.tick(float(k + j))[0] if r["service_name"] == bad.service_name]
-    baseline = SERVICES_BY_NAME[bad.service_name].median_latency_ms
+    baseline = METRIC_SERVICES_BY_NAME[bad.service_name].median_latency_ms
     assert statistics.mean(r["latency_ms"] for r in window) > 2.5 * baseline  # x4 under a bad deploy
 
 
@@ -210,7 +233,7 @@ def test_records_sit_at_the_end_of_their_tick():
         now = sim.start + k
         metrics, deps, _ = sim.tick(now)
         tick_ms = sim.start_ms + 1000 * k
-        assert [r["event_time"] for r in metrics] == [tick_ms + 999] * len(SERVICES)
+        assert [r["event_time"] for r in metrics] == [tick_ms + 999] * 2
         assert all(d["event_time"] == tick_ms for d in deps)
 
 
@@ -253,7 +276,7 @@ def test_windows_of_samples_match_the_old_per_request_windows():
         for r in sim.tick(float(k))[0]:
             new[r["service_name"]][r["event_time"] // 10_000].append(r)
     rng = random.Random(9)
-    for svc in SERVICES:
+    for svc in METRIC_SERVICES:
         assert all(len(rs) == 10 for rs in new[svc.name].values())
         counts = [sum(r["traffic_count"] for r in rs) for rs in new[svc.name].values()]
         lats = [statistics.mean(r["latency_ms"] for r in rs) for rs in new[svc.name].values()]
@@ -325,7 +348,7 @@ def test_a_resolved_incident_and_its_records_end_on_the_tick_that_read_the_decis
 def _times_normal(record, itype):
     """The sample's incident metric as a multiple of its service's normal level."""
     field, normal = ("latency_ms", "median_latency_ms") if itype == BAD_DEPLOY else ("traffic_count", "rps")
-    return record[field] / getattr(SERVICES_BY_NAME[record["service_name"]], normal)
+    return record[field] / getattr(METRIC_SERVICES_BY_NAME[record["service_name"]], normal)
 
 
 @pytest.mark.parametrize(("itype", "svc"), ONE_OF_EACH)

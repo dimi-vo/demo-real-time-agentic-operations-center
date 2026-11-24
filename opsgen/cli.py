@@ -5,11 +5,12 @@
   uv run ops-sim --dry-run --simulate 60 # fast synthetic clock, window summaries
   uv run ops-sim --dry-run --seed 42     # reproducible schedule and traffic
   uv run ops-sim --no-incidents          # baseline traffic only: no incidents, no deploys
-  uv run ops-sim --show-records checkout # also print checkout's service_metrics record every 5 s
+  uv run ops-sim --show-records payments # also print payments' service_metrics record every 5 s
 
 payments gets bad deploys and upstream drops from the shared schedule (D-068); web-gateway
 deploys on its own clock, and about 4 in 7 of its deploys are bad: they fail 40 % of requests
-(D-067). checkout gets no incident.
+(D-067). Those two produce the metrics and deploys. checkout produces support tickets instead,
+and no metrics, deploys or incidents (D-068).
 
 Live, ops-sim also tails `remediation_decisions`: an agent's correct answer resolves its
 incident on the next tick, and an incident nobody resolves expires at its 35 s cap (D-065).
@@ -28,7 +29,7 @@ import time
 
 from opsgen.driver import aligned_start, run_realtime, run_simulate
 from opsgen.engine import Config
-from opsgen.services import service_names
+from opsgen.services import metric_service_names
 from opsgen.simulation import Simulation
 from opsgen.sinks import DryRunSink
 
@@ -47,9 +48,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--show-records",
         metavar="SERVICE",
-        choices=service_names(),
+        choices=metric_service_names(),
         help="Also print SERVICE's service_metrics record to stderr every 5 s, as it is sent "
-        f"({', '.join(service_names())}). Live and --dry-run only",
+        f"({', '.join(metric_service_names())}). Live and --dry-run only",
     )
     p.add_argument("--creds", help="Path to the credential card (live mode; default: read from credentials.env)")
     return p

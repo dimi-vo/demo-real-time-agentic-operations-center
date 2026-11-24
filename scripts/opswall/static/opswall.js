@@ -4,7 +4,8 @@
  *
  *  The wall's state does all the counting; this page only draws what the snapshot says.
  *  One card per service; in it, the charts the snapshot names (svc.charts) and one time axis:
- *  Latency and Traffic for checkout and payments, Errors for web-gateway (D-067).
+ *  Latency and Traffic for payments, Errors for web-gateway (D-067), none for checkout, which
+ *  has no metrics (D-068): its card is a header and a status.
  *  A chart, back to front (D-066):
  *  - a translucent purple box per injected incident on that metric, the full plot height,
  *    from its start to its end (to the right edge while open); a missed one is dashed
@@ -427,12 +428,14 @@ function createCard() {
 }
 
 // The card's chart hosts, one per kind the snapshot names (svc.charts, D-067): made on the
-// first update, before anything is drawn, and again only if the list changes.
+// first update, before anything is drawn, and again only if the list changes. A card with
+// no charts (checkout, which has no metrics: D-068) has no time axis either.
 function ensureCharts(card, kinds) {
   const ui = card._ui, key = kinds.join(",");
   if (ui.chartsKey === key) return;
   ui.chartsKey = key;
   for (const c of ui.charts) ro.unobserve(c.host);
+  card.querySelector(".axis").hidden = kinds.length === 0;
   const charts = card.querySelector(".charts");
   charts.replaceChildren();
   ui.charts = kinds.map(kind => {

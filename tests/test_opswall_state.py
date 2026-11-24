@@ -39,7 +39,7 @@ def _health(st, service, window_end, lat="NORMAL", trf="NORMAL", detected_at="de
     st.apply_health(record)
 
 
-def _decide(st, service, window_end, at, action="ROLLBACK", trigger="LATENCY_HIGH", target="4.2.1",
+def _decide(st, service, window_end, at, action="ROLLBACK", trigger="LATENCY_HIGH", target="2.9.4",
             agent="release_agent"):
     st.apply_decision({"service_name": service, "window_end": _dt(window_end), "agent_name": agent,
                        "trigger": trigger, "action": action, "target": target, "reason": "because"},
@@ -74,19 +74,19 @@ def _pos(t, now=NOW):
 
 def test_services_are_preseeded():
     snap = OpsWallState().snapshot(now=NOW)
+    assert [s["name"] for s in snap["services"]] == ["web-gateway", "checkout", "payments"]  # the wall's order
     names = {s["name"]: s for s in snap["services"]}
-    assert "checkout" in names and "web-gateway" in names
     assert names["checkout"]["status"] == "healthy"
-    assert "maxReplicas" not in names["checkout"]  # D-043: no ceiling
+    assert "maxReplicas" not in names["payments"]  # D-043: no ceiling
 
 
 def test_deployment_upsert_keeps_latest():
     st = OpsWallState()
-    st.apply_deployment({"service_name": "checkout", "version": "1.0.0", "previous_version": "0.9.0",
+    st.apply_deployment({"service_name": "payments", "version": "1.0.0", "previous_version": "0.9.0",
                          "ready_replicas": 3, "deployed_at": _dt(NOW - 300)})
-    st.apply_deployment({"service_name": "checkout", "version": "1.0.1", "previous_version": "1.0.0",
+    st.apply_deployment({"service_name": "payments", "version": "1.0.1", "previous_version": "1.0.0",
                          "ready_replicas": 4})
-    s = _svc(st, "checkout")
+    s = _svc(st, "payments")
     assert s["previousVersion"] == "1.0.0"
     assert 299 <= s["secondsSinceDeploy"] <= 301
 
@@ -106,34 +106,34 @@ def test_unknown_service_is_silently_ignored():
 
 def test_the_samples_on_the_chart_reach_the_snapshot_oldest_first():
     st = OpsWallState()
-    _sample(st, "checkout", NOW - 630.001)                 # kept, but left of the chart
-    _sample(st, "checkout", NOW - 2.001, traffic=31, latency=140.04)
-    _sample(st, "checkout", NOW - 4.001, traffic=29)        # late: put in its place
-    _sample(st, "checkout", NOW - 3.001, traffic=1)
-    _sample(st, "checkout", NOW - 3.001, traffic=30)        # the same second again: newer wins
-    _sample(st, "checkout", NOW + 0.999)                    # covers the running second: waits
-    _sample(st, "payments", NOW - 1.001, traffic=7)
-    metrics = _svc(st, "checkout")["metrics"]
+    _sample(st, "payments", NOW - 630.001)                 # kept, but left of the chart
+    _sample(st, "payments", NOW - 2.001, traffic=31, latency=140.04)
+    _sample(st, "payments", NOW - 4.001, traffic=29)        # late: put in its place
+    _sample(st, "payments", NOW - 3.001, traffic=1)
+    _sample(st, "payments", NOW - 3.001, traffic=30)        # the same second again: newer wins
+    _sample(st, "payments", NOW + 0.999)                    # covers the running second: waits
+    _sample(st, "web-gateway", NOW - 1.001, traffic=7)
+    metrics = _svc(st, "payments")["metrics"]
     assert [m["t"] for m in metrics] == pytest.approx([_pos(NOW - 4.001), _pos(NOW - 3.001), _pos(NOW - 2.001)])
     assert [m["traffic"] for m in metrics] == [29, 30, 31]
     assert metrics[-1] == {"t": pytest.approx(_pos(NOW - 2.001)), "traffic": 31, "latency": 140.0}
-    assert [m["traffic"] for m in _svc(st, "payments")["metrics"]] == [7]
+    assert [m["traffic"] for m in _svc(st, "web-gateway")["metrics"]] == [7]
 
 
 def test_a_sample_in_the_future_shows_once_its_second_is_over():
     st = OpsWallState()
-    _sample(st, "checkout", NOW + 0.999)
-    assert _svc(st, "checkout")["metrics"] == []
-    assert len(_svc(st, "checkout", now=NOW + 1)["metrics"]) == 1
+    _sample(st, "payments", NOW + 0.999)
+    assert _svc(st, "payments")["metrics"] == []
+    assert len(_svc(st, "payments", now=NOW + 1)["metrics"]) == 1
 
 
 def test_trim_drops_the_samples_older_than_the_axis_plus_the_margin():
     st = OpsWallState()
-    _sample(st, "checkout", NOW - 670, traffic=1)
-    _sample(st, "checkout", NOW - 650, traffic=2)
+    _sample(st, "payments", NOW - 670, traffic=1)
+    _sample(st, "payments", NOW - 650, traffic=2)
     st.trim(NOW)  # keeps the last 600 + 60 s
     # A snapshot whose chart still reaches back 700 s would show the dropped one.
-    assert [m["traffic"] for m in _svc(st, "checkout", now=NOW - 100)["metrics"]] == [2]
+    assert [m["traffic"] for m in _svc(st, "payments", now=NOW - 100)["metrics"]] == [2]
 
 
 def test_health_rows_alone_draw_no_line():
@@ -156,12 +156,12 @@ def test_the_wall_knows_the_chart_of_every_incident_type_the_simulator_starts_an
 
 def test_start_record_opens_the_box_end_record_closes_it():
     st = OpsWallState()
-    _incident(st, "checkout", NOW - 200)
-    [gt] = _svc(st, "checkout")["groundTruth"]
+    _incident(st, "payments", NOW - 200)
+    [gt] = _svc(st, "payments")["groundTruth"]
     assert gt["open"] is True and gt["metric"] == "latency"
 
-    _incident(st, "checkout", NOW - 200, NOW - 160)
-    [gt] = _svc(st, "checkout")["groundTruth"]
+    _incident(st, "payments", NOW - 200, NOW - 160)
+    [gt] = _svc(st, "payments")["groundTruth"]
     assert gt["open"] is False
     assert gt["start"] == pytest.approx(AXIS_SECONDS - 200)
     assert gt["end"] == pytest.approx(AXIS_SECONDS - 160)
@@ -230,47 +230,47 @@ def test_a_block_keeps_its_key_as_the_wall_moves_and_no_two_blocks_share_one():
 
 def test_a_block_before_its_answer_is_open_and_grows_with_now():
     st = OpsWallState()
-    _incident(st, "checkout", T0)
-    _health(st, "checkout", T0 + 10, lat="HIGH")  # detected at T0 + 16
+    _incident(st, "payments", T0)
+    _health(st, "payments", T0 + 10, lat="HIGH")  # detected at T0 + 16
 
-    [early], [later] = (_svc(st, "checkout", now)["blocks"] for now in (T0 + 18, T0 + 25))
+    [early], [later] = (_svc(st, "payments", now)["blocks"] for now in (T0 + 18, T0 + 25))
     for block, now in ((early, T0 + 18), (later, T0 + 25)):
         assert block["open"] is True and block["action"] is None and block["timeToAnswer"] is None
         assert block["end"] == AXIS_SECONDS  # at the right edge, i.e. now
         assert block["start"] == pytest.approx(_pos(T0 + 16, now))
     assert later["end"] - later["start"] == pytest.approx(9.0)
     assert early["end"] - early["start"] == pytest.approx(2.0)
-    assert _svc(st, "checkout", T0 + 25)["groundTruth"][0]["verdict"] == "pending"
+    assert _svc(st, "payments", T0 + 25)["groundTruth"][0]["verdict"] == "pending"
 
 
 def test_with_no_answer_the_block_goes_30_s_after_the_last_detection_and_the_incident_is_missed():
     st = OpsWallState()
-    _incident(st, "checkout", T0, T0 + 40)
+    _incident(st, "payments", T0, T0 + 40)
     for k in range(1, 5):
-        _health(st, "checkout", T0 + 10 * k, lat="HIGH")  # last detection at T0 + 46
-    _health(st, "checkout", T0 + 50)
+        _health(st, "payments", T0 + 10 * k, lat="HIGH")  # last detection at T0 + 46
+    _health(st, "payments", T0 + 50)
 
-    assert [b["open"] for b in _svc(st, "checkout", T0 + 76)["blocks"]] == [True]
-    assert _svc(st, "checkout", T0 + 77)["blocks"] == []
+    assert [b["open"] for b in _svc(st, "payments", T0 + 76)["blocks"]] == [True]
+    assert _svc(st, "payments", T0 + 77)["blocks"] == []
 
     def verdict(now):
-        return _svc(st, "checkout", now)["groundTruth"][0]["verdict"]
+        return _svc(st, "payments", now)["groundTruth"][0]["verdict"]
 
     assert verdict(T0 + 30) == "pending"   # during the incident
     assert verdict(T0 + 70) == "pending"   # not yet more than 30 s after it ended
     assert verdict(T0 + 71) == "missed"
-    assert _svc(st, "checkout", T0 + 71)["groundTruth"][0]["timeToAnswer"] is None
+    assert _svc(st, "payments", T0 + 71)["groundTruth"][0]["timeToAnswer"] is None
 
 
 @pytest.mark.parametrize("action", ["OBSERVE", "INVALID"])
 def test_any_answer_closes_the_block(action):
     st = OpsWallState()
-    _incident(st, "checkout", T0, T0 + 40)
-    _health(st, "checkout", T0 + 10, lat="HIGH")
-    _health(st, "checkout", T0 + 20)
-    _decide(st, "checkout", T0 + 10, at=T0 + 30, action=action, target=None)
+    _incident(st, "payments", T0, T0 + 40)
+    _health(st, "payments", T0 + 10, lat="HIGH")
+    _health(st, "payments", T0 + 20)
+    _decide(st, "payments", T0 + 10, at=T0 + 30, action=action, target=None)
 
-    s = _svc(st, "checkout")
+    s = _svc(st, "payments")
     [block] = s["blocks"]
     assert (block["open"], block["action"]) == (False, action)
     assert block["end"] == pytest.approx(_pos(T0 + 30))
@@ -279,12 +279,12 @@ def test_any_answer_closes_the_block(action):
 
 def test_agents_starting_mid_run_still_close_the_block():
     st = OpsWallState()
-    _incident(st, "checkout", T0, T0 + 40)
+    _incident(st, "payments", T0, T0 + 40)
     for k in range(1, 5):
-        _health(st, "checkout", T0 + 10 * k, lat="HIGH")
-    _decide(st, "checkout", T0 + 30, at=T0 + 50)  # the third window is the first one answered
+        _health(st, "payments", T0 + 10 * k, lat="HIGH")
+    _decide(st, "payments", T0 + 30, at=T0 + 50)  # the third window is the first one answered
 
-    s = _svc(st, "checkout")
+    s = _svc(st, "payments")
     [block] = s["blocks"]
     assert block["start"] == pytest.approx(_pos(T0 + 16))
     assert block["end"] == pytest.approx(_pos(T0 + 50))
@@ -294,11 +294,11 @@ def test_agents_starting_mid_run_still_close_the_block():
 
 def test_a_decision_for_another_trigger_or_no_run_is_ignored():
     st = OpsWallState()
-    _health(st, "checkout", T0 + 10, lat="HIGH")
-    _decide(st, "checkout", T0 + 10, at=T0 + 20, action="SCALE_OUT", trigger="TRAFFIC_HIGH",
+    _health(st, "payments", T0 + 10, lat="HIGH")
+    _decide(st, "payments", T0 + 10, at=T0 + 20, action="SCALE_OUT", trigger="TRAFFIC_HIGH",
             agent="capacity_agent")
-    _decide(st, "checkout", T0 + 100, at=T0 + 110)  # a window that was never flagged
-    [block] = _svc(st, "checkout", T0 + 30)["blocks"]
+    _decide(st, "payments", T0 + 100, at=T0 + 110)  # a window that was never flagged
+    [block] = _svc(st, "payments", T0 + 30)["blocks"]
     assert block["open"] is True and block["decisionCount"] == 0
 
 
@@ -313,8 +313,8 @@ def test_traffic_high_and_low_are_separate_blocks_with_their_direction():
 
 def test_a_row_without_detected_at_opens_no_block():
     st = OpsWallState()
-    _health(st, "checkout", T0 + 10, lat="HIGH", detected_at=None)
-    s = _svc(st, "checkout", T0 + 20)
+    _health(st, "payments", T0 + 10, lat="HIGH", detected_at=None)
+    s = _svc(st, "payments", T0 + 20)
     assert s["blocks"] == [] and s["status"] == "healthy"
 
 
@@ -332,21 +332,21 @@ def test_a_replayed_window_off_the_chart_opens_no_block():
 
 def test_a_window_written_twice_keeps_its_first_detection_and_the_newest_status():
     st = OpsWallState()
-    _health(st, "checkout", T0 + 10, lat="HIGH", detected_at=T0 + 16)
-    _health(st, "checkout", T0 + 10, lat="HIGH", detected_at=T0 + 25)
-    [block] = _svc(st, "checkout", T0 + 30)["blocks"]
+    _health(st, "payments", T0 + 10, lat="HIGH", detected_at=T0 + 16)
+    _health(st, "payments", T0 + 10, lat="HIGH", detected_at=T0 + 25)
+    [block] = _svc(st, "payments", T0 + 30)["blocks"]
     assert block["start"] == pytest.approx(_pos(T0 + 16, T0 + 30))
 
-    _health(st, "checkout", T0 + 10, lat="NORMAL", detected_at=T0 + 26)
-    assert _svc(st, "checkout", T0 + 30)["blocks"] == []
+    _health(st, "payments", T0 + 10, lat="NORMAL", detected_at=T0 + 26)
+    assert _svc(st, "payments", T0 + 30)["blocks"] == []
 
 
 def test_a_decision_written_twice_counts_once_and_keeps_its_first_write_time():
     st = OpsWallState()
-    _health(st, "checkout", T0 + 10, lat="HIGH")
-    _decide(st, "checkout", T0 + 10, at=T0 + 24, action="OBSERVE", target=None)
-    _decide(st, "checkout", T0 + 10, at=T0 + 40, action="ROLLBACK")
-    [block] = _svc(st, "checkout")["blocks"]
+    _health(st, "payments", T0 + 10, lat="HIGH")
+    _decide(st, "payments", T0 + 10, at=T0 + 24, action="OBSERVE", target=None)
+    _decide(st, "payments", T0 + 10, at=T0 + 40, action="ROLLBACK")
+    [block] = _svc(st, "payments")["blocks"]
     assert block["decisionCount"] == 1
     assert block["end"] == pytest.approx(_pos(T0 + 24))
     assert block["action"] == "ROLLBACK"
@@ -371,10 +371,10 @@ def test_a_block_with_no_incident_is_a_false_alarm():
 ])
 def test_a_block_starting_shortly_after_its_incident_still_belongs_to_it(first_window_end, owned):
     st = OpsWallState()
-    _incident(st, "checkout", T0, T0 + 40)
-    _health(st, "checkout", first_window_end, lat="HIGH")
-    _decide(st, "checkout", first_window_end, at=first_window_end + DETECT + ANSWER)
-    s = _svc(st, "checkout")
+    _incident(st, "payments", T0, T0 + 40)
+    _health(st, "payments", first_window_end, lat="HIGH")
+    _decide(st, "payments", first_window_end, at=first_window_end + DETECT + ANSWER)
+    s = _svc(st, "payments")
     [block] = s["blocks"]
     assert (block["incidentId"] == "INC0001") is owned
     assert s["groundTruth"][0]["verdict"] == ("answered" if owned else "missed")
@@ -382,11 +382,11 @@ def test_a_block_starting_shortly_after_its_incident_still_belongs_to_it(first_w
 
 def test_a_block_on_the_other_metric_does_not_belong_to_the_incident():
     st = OpsWallState()
-    _incident(st, "checkout", T0, T0 + 40)  # a bad deploy is latency
-    _health(st, "checkout", T0 + 10, trf="HIGH")
-    _decide(st, "checkout", T0 + 10, at=T0 + 24, action="OBSERVE", trigger="TRAFFIC_HIGH", target=None,
+    _incident(st, "payments", T0, T0 + 40)  # a bad deploy is latency
+    _health(st, "payments", T0 + 10, trf="HIGH")
+    _decide(st, "payments", T0 + 10, at=T0 + 24, action="OBSERVE", trigger="TRAFFIC_HIGH", target=None,
             agent="capacity_agent")
-    s = _svc(st, "checkout")
+    s = _svc(st, "payments")
     assert s["blocks"][0]["incidentId"] is None
     assert s["groundTruth"][0]["verdict"] == "missed"
 
@@ -396,34 +396,34 @@ def test_a_block_on_the_other_metric_does_not_belong_to_the_incident():
 
 def test_the_tile_says_healthy_with_nothing_open_or_fixed():
     st = OpsWallState()
-    _health(st, "checkout", NOW - 10)
-    assert (_svc(st, "checkout")["status"], _svc(st, "checkout")["statusText"]) == ("healthy", "Healthy")
+    _health(st, "payments", NOW - 10)
+    assert (_svc(st, "payments")["status"], _svc(st, "payments")["statusText"]) == ("healthy", "Healthy")
 
 
 def test_the_tile_waits_for_the_agent_while_a_block_is_open():
     st = OpsWallState()
-    _health(st, "checkout", T0 + 10, lat="HIGH")
-    _health(st, "checkout", T0 + 20, trf="LOW")
-    s = _svc(st, "checkout", T0 + 30)
+    _health(st, "payments", T0 + 10, lat="HIGH")
+    _health(st, "payments", T0 + 20, trf="LOW")
+    s = _svc(st, "payments", T0 + 30)
     assert s["status"] == "anomaly"
     assert s["statusText"] == "Anomaly detected: latency high and traffic low, waiting for the agent"
 
 
 @pytest.mark.parametrize(("action", "trigger", "target", "text"), [
-    ("ROLLBACK", "LATENCY_HIGH", "4.2.1", "Rolled back to v4.2.1"),
+    ("ROLLBACK", "LATENCY_HIGH", "2.9.4", "Rolled back to v2.9.4"),
     ("SCALE_OUT", "TRAFFIC_HIGH", "6", "Scaled out to 6 replicas"),
     ("INVESTIGATE_UPSTREAM", "TRAFFIC_LOW", None, "Traced to upstream"),
 ])
 def test_the_tile_shows_the_fix_for_two_minutes(action, trigger, target, text):
     st = OpsWallState()
     lat, trf = ("HIGH", "NORMAL") if trigger == "LATENCY_HIGH" else ("NORMAL", trigger.split("_")[1])
-    _health(st, "checkout", T0 + 10, lat=lat, trf=trf)
-    _health(st, "checkout", T0 + 20)
-    _decide(st, "checkout", T0 + 10, at=T0 + 24, action=action, trigger=trigger, target=target)
+    _health(st, "payments", T0 + 10, lat=lat, trf=trf)
+    _health(st, "payments", T0 + 20)
+    _decide(st, "payments", T0 + 10, at=T0 + 24, action=action, trigger=trigger, target=target)
 
-    s = _svc(st, "checkout", T0 + 24 + 120)
+    s = _svc(st, "payments", T0 + 24 + 120)
     assert (s["status"], s["statusText"]) == ("remediated", text)
-    assert _svc(st, "checkout", T0 + 24 + 121)["status"] == "healthy"
+    assert _svc(st, "payments", T0 + 24 + 121)["status"] == "healthy"
 
 
 def test_an_observe_answer_leaves_the_tile_healthy():
@@ -545,7 +545,17 @@ def _deployment(st, service, deployed_at, last_change, version, previous_version
 
 def test_each_card_names_its_charts():
     charts = {s["name"]: s["charts"] for s in OpsWallState().snapshot(now=NOW)["services"]}
-    assert charts == {"web-gateway": ["errors"], "checkout": ["latency", "traffic"], "payments": ["latency", "traffic"]}
+    assert charts == {"web-gateway": ["errors"], "checkout": [], "payments": ["latency", "traffic"]}
+
+
+def test_checkout_has_no_charts_and_its_card_stays_healthy():
+    # D-068: checkout produces tickets, not metrics, so its card has a header and a status and
+    # nothing to draw. Its row comes with the wall's new frame.
+    st = OpsWallState()
+    _health(st, "payments", NOW - 10, lat="HIGH")
+    s = _svc(st, "checkout")
+    assert s["charts"] == [] and s["metrics"] == [] and s["deploys"] == []
+    assert (s["status"], s["statusText"]) == ("healthy", "Healthy")
 
 
 def test_an_error_rate_breach_is_a_block_on_the_errors_chart_owned_by_its_bad_deploy():
@@ -607,10 +617,10 @@ def test_the_errors_chart_gets_the_error_share_of_each_second():
                      "latency_ms": 35.0, "error_count": 0})
     st.apply_metric({"service_name": "web-gateway", "event_time": _dt(NOW - 1.001), "traffic_count": 48,
                      "latency_ms": 35.0, "error_count": None})
-    _sample(st, "checkout", NOW - 1.001)
+    _sample(st, "payments", NOW - 1.001)
     shares = [m["errorPct"] for m in _svc(st, "web-gateway")["metrics"]]
     assert shares == [40.0, None, 0.0]  # a second with no requests is a gap, not 0 %
-    assert "errorPct" not in _svc(st, "checkout")["metrics"][0]  # only where a chart reads it
+    assert "errorPct" not in _svc(st, "payments")["metrics"][0]  # only where a chart reads it
 
 
 def test_deploys_and_rollbacks_become_marks_and_heartbeats_do_not():
@@ -619,7 +629,7 @@ def test_deploys_and_rollbacks_become_marks_and_heartbeats_do_not():
     _deployment(st, "web-gateway", T0, "DEPLOY", "3.4.3", "3.4.2")
     _deployment(st, "web-gateway", T0, "DEPLOY", "3.4.3", "3.4.2")  # its 5-s heartbeat
     _deployment(st, "web-gateway", T0 + 11, "ROLLBACK", "3.4.2", "3.4.3")
-    _deployment(st, "checkout", T0, "DEPLOY", "4.2.2", "4.2.1")
+    _deployment(st, "payments", T0, "DEPLOY", "2.9.5", "2.9.4")
     marks = _svc(st, "web-gateway")["deploys"]
     assert [(m["kind"], m["previousVersion"], m["version"]) for m in marks] == [
         ("DEPLOY", "3.4.2", "3.4.3"),
@@ -629,7 +639,7 @@ def test_deploys_and_rollbacks_become_marks_and_heartbeats_do_not():
     assert len({m["key"] for m in marks}) == 2
     # Only a card whose chart shows them gets marks; the review of service_deployments
     # decides about the others (opswall-redesign issue 01).
-    assert _svc(st, "checkout")["deploys"] == []
+    assert _svc(st, "payments")["deploys"] == []
 
 
 def test_trim_drops_old_error_rate_rows_and_deploy_marks():

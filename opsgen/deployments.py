@@ -1,13 +1,14 @@
 """Per-service deployment state and the version/rollback semantics (brief section 4.3).
 
-Every deploy records the prior version and bumps the patch number past the highest
-version the service has ever run, so a version number is never reused: after 3.4.4 is
-rolled back to 3.4.3, the next deploy is 3.4.5 (D-067). A rollback restores the prior
-version and records the one it rolled back from. On payments the only deploys are bad
-deploys, each rolled back when its incident ends (D-057); checkout never deploys (D-068),
-and web-gateway also has good
-deploys, from its deploy clock (D-067), and a good deploy is never rolled back. Versions
-switch instantly — no mixed-version period — which keeps the temporal join demo crisp.
+Only the metric services, web-gateway and payments, have a deployment state: checkout
+produces tickets and never deploys (D-068). Every deploy records the prior version and
+bumps the patch number past the highest version the service has ever run, so a version
+number is never reused: after 3.4.4 is rolled back to 3.4.3, the next deploy is 3.4.5
+(D-067). A rollback restores the prior version and records the one it rolled back from. On
+payments the only deploys are bad deploys, each rolled back when its incident ends (D-057);
+web-gateway also has good deploys, from its deploy clock (D-067), and a good deploy is
+never rolled back. Versions switch instantly — no mixed-version period — which keeps the
+temporal join demo crisp.
 `SCALE` is reserved for a later project and is never emitted here.
 """
 

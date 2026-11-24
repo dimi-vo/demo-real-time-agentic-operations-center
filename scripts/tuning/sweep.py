@@ -93,16 +93,16 @@ class Result:
 def simulate(data: DataConfig, seed: int, hours: float) -> tuple[list[HealthRow], list[Incident], float, float, float]:
     """Run the generator and return window rows (without detector output), the incidents
     ARIMA is meant to catch (the shared scheduler's types, D-067), the run's start/end, and
-    the average traffic (traffic_count per second, all services)."""
+    the average traffic (traffic_count per second, all metric services)."""
     import opsgen.distributions as dist
     import opsgen.engine as eng
     import opsgen.simulation as sim_mod
     from opsgen.engine import Config
-    from opsgen.services import SERVICES
+    from opsgen.services import METRIC_SERVICES
 
     # Worker processes are reused across tasks: set every knob, defaults included.
     rates = dict(data.rates)
-    sim_mod.SERVICES = tuple(dataclasses.replace(s, rps=rates.get(s.name, s.rps)) for s in SERVICES)
+    sim_mod.METRIC_SERVICES = tuple(dataclasses.replace(s, rps=rates.get(s.name, s.rps)) for s in METRIC_SERVICES)
     eng.DROP_LAMBDA_MULT = _DEFAULTS["drop"] if data.drop_mult is None else data.drop_mult
     dist.SLOW_OUTLIER_PROB = _DEFAULTS["out_p"] if data.outlier_prob is None else data.outlier_prob
     dist.SLOW_OUTLIER_MULT = _DEFAULTS["out_m"] if data.outlier_mult is None else data.outlier_mult

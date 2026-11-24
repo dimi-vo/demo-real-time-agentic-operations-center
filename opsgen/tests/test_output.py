@@ -22,8 +22,8 @@ def test_dry_run_sink_emits_tagged_json_lines():
     lines = [json.loads(line) for line in out.getvalue().splitlines()]
     deployments = [x for x in lines if x.get("_stream") == "service_deployments"]
     samples = [x for x in lines if x.get("_stream") == "service_metrics"]
-    assert len(deployments) == 3
-    assert len(samples) == 3  # one per service per second (D-058)
+    assert len(deployments) == 2
+    assert len(samples) == 2  # one per metric service per second (D-058, D-068)
     for r in samples:
         assert set(r) == {"_stream", "event_time", "service_name", "traffic_count", "latency_ms", "error_count"}
 
@@ -35,11 +35,12 @@ def _simulate(seed=42, minutes=60, **cfg):
     return buf.getvalue()
 
 
-def test_simulate_has_per_window_summaries_for_all_services():
+def test_simulate_has_per_window_summaries_for_the_metric_services():
     text = _simulate(minutes=1)
-    # first window closes at t=00:10, one line per service
-    for name in ("web-gateway", "checkout", "payments"):
-        assert f"[t=00:10] {name:<12} traffic=" in text
+    # first window closes at t=00:10, one line per metric service; checkout has no metrics (D-068)
+    summaries = [ln.split()[1] for ln in text.splitlines() if ln.startswith("[t=00:10]")]
+    assert summaries == ["web-gateway", "payments"]
+    assert "checkout" not in text
 
 
 def test_simulate_summary_sums_the_window_records():
@@ -48,14 +49,14 @@ def test_simulate_summary_sums_the_window_records():
     sim = Simulation(5, start=0.0, config=Config(no_incidents=True))
     expect = {}
     shadow = Simulation(5, start=0.0, config=Config(no_incidents=True))
-    window = [r for k in range(10) for r in shadow.tick(float(k))[0] if r["service_name"] == "checkout"]
+    window = [r for k in range(10) for r in shadow.tick(float(k))[0] if r["service_name"] == "payments"]
     traffic = sum(r["traffic_count"] for r in window)
     expect["traffic"] = f"traffic={traffic:>4}"
     expect["lat"] = f"lat={sum(r['latency_ms'] for r in window) / 10:6.1f}ms"
     expect["err"] = f"err={100 * sum(r['error_count'] for r in window) / traffic:4.1f}%"
     buf = io.StringIO()
     run_simulate(sim, 10 / 60, out=buf)
-    (line,) = [ln for ln in buf.getvalue().splitlines() if ln.startswith("[t=00:10] checkout")]
+    (line,) = [ln for ln in buf.getvalue().splitlines() if ln.startswith("[t=00:10] payments")]
     for part in expect.values():
         assert part in line, (part, line)
 
@@ -208,7 +209,7 @@ def test_cli_has_no_timing_flags():
     parser = _build_parser()
     assert _config_from_args(parser.parse_args([])) == Config()
     assert _config_from_args(parser.parse_args(["--no-incidents"])) == Config(no_incidents=True)
-    assert _config_from_args(parser.parse_args(["--show-records", "checkout"])) == Config()
+    assert _config_from_args(parser.parse_args(["--show-records", "payments"])) == Config()
     flags = {opt for action in parser._actions for opt in action.option_strings}
     assert flags == {"-h", "--help", "--dry-run", "--simulate", "--seed", "--no-incidents", "--creds", "--show-records"}
     for gone in ("--quiet-period", "--spacing-min", "--spacing-max", "--duration", "--cooldown"):
@@ -232,22 +233,25 @@ def test_a_good_deploy_in_the_dry_run_json_and_on_the_console():
 # --- --show-records SERVICE: one service_metrics record every 5 s -----------------------
 
 
-def test_show_records_takes_one_of_the_three_services():
+def test_show_records_takes_one_of_the_metric_services():
     from opsgen.cli import _build_parser
 
     parser = _build_parser()
     assert parser.parse_args([]).show_records is None
-    assert parser.parse_args(["--show-records", "checkout"]).show_records == "checkout"
-    for bad in (["--show-records"], ["--show-records", "catalog"]):
+    assert parser.parse_args(["--show-records", "payments"]).show_records == "payments"
+    assert parser.parse_args(["--show-records", "web-gateway"]).show_records == "web-gateway"
+    # checkout writes no service_metrics (D-068)
+    for bad in (["--show-records"], ["--show-records", "catalog"], ["--show-records", "checkout"]):
         with pytest.raises(SystemExit):
             parser.parse_args(bad)
+    assert "(web-gateway, payments)" in " ".join(parser.format_help().split())
 
 
 def test_show_records_needs_real_time(capsys):
     from opsgen.cli import main
 
     with pytest.raises(SystemExit) as exit_:
-        main(["--dry-run", "--simulate", "1", "--show-records", "checkout"])
+        main(["--dry-run", "--simulate", "1", "--show-records", "payments"])
     assert "--show-records" in str(exit_.value.code) and "--simulate" in str(exit_.value.code)
 
 
@@ -265,20 +269,20 @@ def _ticks(show_records, seconds=12):
 
 
 def test_show_records_prints_the_services_record_every_5_seconds_as_sent(capsys):
-    sent = _ticks("checkout")
+    sent = _ticks("payments")
     lines = capsys.readouterr().err.splitlines()
     assert len(lines) == 3  # ticks 0, 5 and 10: the first one right away, then with the heartbeat
-    checkout = [{k: v for k, v in r.items() if k != "_stream"} for r in sent
-                if r["_stream"] == "service_metrics" and r["service_name"] == "checkout"]  # fmt: skip
+    payments = [{k: v for k, v in r.items() if k != "_stream"} for r in sent
+                if r["_stream"] == "service_metrics" and r["service_name"] == "payments"]  # fmt: skip
     for k, line in zip((0, 5, 10), lines, strict=True):
         clock, rest = line.split("] ", 1)
         assert clock.startswith("[") and len(clock) == len("[10:42:05")
-        prefix = "service_metrics key=checkout "
+        prefix = "service_metrics key=payments "
         assert rest.startswith(prefix)
-        assert json.loads(rest[len(prefix):]) == checkout[k]  # the record the sink was given
+        assert json.loads(rest[len(prefix):]) == payments[k]  # the record the sink was given
 
 
 def test_without_show_records_nothing_more_is_printed_and_stdout_is_unchanged(capsys):
     plain = _ticks(None)
     assert capsys.readouterr().err == ""
-    assert _ticks("payments") == plain  # the sample goes to stderr only
+    assert _ticks("web-gateway") == plain  # the sample goes to stderr only

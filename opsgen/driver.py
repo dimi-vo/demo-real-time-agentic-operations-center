@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from opsgen.engine import DEPLOY_CLOCK_SERVICE, INCIDENT_TYPES, WINDOW_SECONDS, Config, next_window_boundary
 from opsgen.groundtruth import end_record, start_record
-from opsgen.services import service_names
+from opsgen.services import metric_service_names
 from opsgen.simulation import REEMIT_INTERVAL, Simulation
 from opsgen.sinks import format_event, format_record
 from opsgen.state import save_state, state_path
@@ -131,11 +131,11 @@ def schedule_settings(config: Config) -> str:
 
 def run_simulate(sim: Simulation, minutes: float, out=None) -> None:
     """Run a synthetic clock for `minutes` without sleeping, printing one summary line
-    per service per 10-second window plus the deploy/incident log (brief section 4.5).
+    per metric service per 10-second window plus the deploy/incident log (brief section 4.5).
     A line sums up the window's metrics records the way the labs do: total traffic and
     average latency (lab 2.3), and the share of failed requests (lab 2.2) (D-058, D-067)."""
     out = out if out is not None else sys.stdout
-    names = service_names()
+    names = metric_service_names()
     total = round(minutes * 60)
 
     def fresh() -> dict[str, dict]:

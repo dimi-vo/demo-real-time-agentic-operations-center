@@ -7,7 +7,7 @@ event, starts the threads that write into the state and returns them. The wall's
 Next to the starter's threads, the feed runs one more: every 10 s it calls
 ``OpsWallState.trim()``, which drops what is more than 11 minutes old (the 10-minute chart
 plus a margin). That keeps the state's size flat over a workshop of several hours (the
-``service_metrics`` samples alone arrive three a second), and it is what takes an incident
+``service_metrics`` samples alone arrive two a second), and it is what takes an incident
 left open by a simulator restart off the wall after 11 minutes (D-060). It stops with the
 other threads.
 """

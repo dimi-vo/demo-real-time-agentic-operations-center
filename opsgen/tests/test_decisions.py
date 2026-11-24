@@ -329,7 +329,7 @@ class _FakeFeed:
 def test_the_driver_ticks_with_the_drained_decisions_and_emits_the_end_on_that_tick():
     from opsgen.driver import tick_once
     from opsgen.engine import BAD_DEPLOY, Config
-    from opsgen.services import SERVICES_BY_NAME
+    from opsgen.services import METRIC_SERVICES_BY_NAME
     from opsgen.simulation import Simulation
 
     start = 1_800_000_000.0
@@ -348,7 +348,7 @@ def test_the_driver_ticks_with_the_drained_decisions_and_emits_the_end_on_that_t
     assert (rollback["service_name"], rollback["last_change"]) == ("payments", "ROLLBACK")
     assert rollback["event_time"] == tick_ms
     [sample] = [r for kind, r in sink.out if kind == "metrics" and r["service_name"] == "payments"]
-    assert 0.5 < sample["latency_ms"] / SERVICES_BY_NAME["payments"].median_latency_ms < 2  # normal again (x4 before)
+    assert 0.5 < sample["latency_ms"] / METRIC_SERVICES_BY_NAME["payments"].median_latency_ms < 2  # normal again (x4)
     [end] = [r for kind, r in sink.out if kind == "incident"]
     assert (end["incident_id"], end["ended_at"]) == ("INC0001", tick_ms)
     [event] = [ev for kind, ev in sink.out if kind == "event"]

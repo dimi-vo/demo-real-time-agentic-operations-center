@@ -61,14 +61,15 @@ def test_sweep_simulation_windows_are_complete_and_scored():
     per_service = {}
     for r in rows:
         per_service.setdefault(r.service_name, []).append(r)
-    assert len(per_service) == 3
+    assert set(per_service) == {"web-gateway", "payments"}  # checkout has no metrics (D-068)
     for srows in per_service.values():
         assert len(srows) == 90  # 15 minutes of 10-second windows, none missing
-    # ~110 requests/s of traffic_count at baseline (D-059 means 50/30/30). There are no surges
-    # to lift it any more (D-068), only payments' drops, which lower it a little.
-    assert 100 < rate < 112
+    # ~80 requests/s of traffic_count at baseline (D-059 means 50/30 on the two metric
+    # services). There are no surges to lift it (D-068), only payments' drops, which lower it a
+    # little.
+    assert 70 < rate < 82
     rep = score(apply_detector(rows, CURRENT), incidents, start, end - 100)
-    assert sum(s.warmup_rows for s in rep.services.values()) == 3 * 13
+    assert sum(s.warmup_rows for s in rep.services.values()) == 2 * 13
 
 
 class _InlinePool:
@@ -111,7 +112,7 @@ def test_sweep_windows_sum_traffic_and_average_the_samples(monkeypatch):
     class FakeSimulation:
         def __init__(self, seed, start, config):
             self.start = start
-            self.deployments = {"checkout": FakeDeployment()}
+            self.deployments = {"payments": FakeDeployment()}
 
         def tick_ms(self, t):
             return round(t * 1000)
@@ -120,7 +121,7 @@ def test_sweep_windows_sum_traffic_and_average_the_samples(monkeypatch):
             # Even seconds: 9 requests at 100 ms; odd seconds: 1 request at 300 ms.
             k = round(now - self.start)
             count, latency = (9, 100.0) if k % 2 == 0 else (1, 300.0)
-            sample = {"event_time": self.tick_ms(now) + 999, "service_name": "checkout",
+            sample = {"event_time": self.tick_ms(now) + 999, "service_name": "payments",
                       "traffic_count": count, "latency_ms": latency, "error_count": 0}  # fmt: skip
             return [sample], [], []
 
