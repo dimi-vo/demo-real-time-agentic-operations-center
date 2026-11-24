@@ -1,6 +1,7 @@
 """evaluate's decision scoring: validity, routing, coverage, per-incident matching."""
 
 from scripts.evaluation.decisions import (
+    ALLOWED_ACTIONS,
     CAPACITY_AGENT,
     INVALID,
     INVESTIGATE_UPSTREAM,
@@ -67,6 +68,19 @@ def test_an_action_outside_the_agents_set_is_invalid():
     assert rep.valid_share == 1 / 3
 
 
+def test_the_capacity_agent_may_investigate_upstream_or_observe_and_nothing_else():
+    # D-068: SCALE_OUT left the capacity agent with the surges.
+    assert ALLOWED_ACTIONS[CAPACITY_AGENT] == (INVESTIGATE_UPSTREAM, OBSERVE)
+    rows = _series("payments", 20, {10: {"trf": "LOW"}, 11: {"trf": "HIGH"}, 12: {"trf": "HIGH"}})
+    decisions = [
+        _dec("payments", 10, agent=CAPACITY_AGENT, trigger="TRAFFIC_LOW", action=INVESTIGATE_UPSTREAM),
+        _dec("payments", 11, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=OBSERVE),
+        _dec("payments", 12, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=SCALE_OUT),
+    ]
+    rep = _score(decisions, rows, [])
+    assert (rep.agents[CAPACITY_AGENT].decisions, rep.agents[CAPACITY_AGENT].valid) == (3, 2)
+
+
 def test_a_trigger_belonging_to_the_other_agent_is_a_routing_error():
     d = _dec("checkout", 10, agent=RELEASE_AGENT, trigger="TRAFFIC_LOW", action=OBSERVE)
     rep = _score([d], _series("checkout", 20), [])
@@ -77,7 +91,7 @@ def test_one_window_under_both_agents_breaks_mutual_exclusivity():
     rows = _series("checkout", 20, {10: {"lat": "HIGH", "trf": "HIGH"}})
     both = [
         _dec("checkout", 10, agent=RELEASE_AGENT, action=ROLLBACK),
-        _dec("checkout", 10, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=SCALE_OUT),
+        _dec("checkout", 10, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=OBSERVE),
     ]
     assert _score(both, rows, []).both_agents == [("checkout", T0 + 110)]
     assert _score(both[:1], rows, []).both_agents == []
@@ -180,13 +194,15 @@ def test_a_rollback_target_is_judged_against_the_health_row_it_answered():
     assert _score([_dec("checkout", 40, target="2.0.4")], no_prev, []).bad_targets == []
 
 
-def test_a_scale_out_must_carry_the_replica_count_the_sql_computed():
-    rows = _series("web-gateway", 60, {40: {"trf": "HIGH"}})
-    inc = _inc("web-gateway", 40, trigger="TRAFFIC_HIGH", typ="TRAFFIC_SURGE", action=SCALE_OUT)
-    good = _dec("web-gateway", 40, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=SCALE_OUT, target="9")
-    bad = _dec("web-gateway", 40, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=SCALE_OUT, target="4")
-    assert _score([good], rows, [inc]).incidents[0].target_ok is True
-    assert _score([bad], rows, [inc]).incidents[0].target_ok is False
+def test_only_a_rollback_may_carry_a_target():
+    # D-068: no replica count any more. Before, a SCALE_OUT carried the count the capacity
+    # INSERT computed (9 for 3 replicas at three times the expected load).
+    rows = _series("payments", 60, {40: {"trf": "HIGH"}})
+    for action in (SCALE_OUT, OBSERVE):
+        with_count = _dec("payments", 40, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=action, target="9")
+        assert _score([with_count], rows, []).bad_targets == [with_count], action
+        without = _dec("payments", 40, agent=CAPACITY_AGENT, trigger="TRAFFIC_HIGH", action=action)
+        assert _score([without], rows, []).bad_targets == [], action
 
 
 def test_an_action_that_needs_no_target_is_not_target_checked():

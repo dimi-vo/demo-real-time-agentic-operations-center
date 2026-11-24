@@ -26,10 +26,11 @@ are:
   The **headline** decision is the one on the earliest such window: the first
   recommendation the on-call team would see. It matches when its action equals the
   incident's `expected_action`.
-- **Target.** One free-text column (D-034). Both targets are checked against the joined
-  `service_health` row, the input the agent answered (D-045): a `ROLLBACK` should name its
-  `previous_version`, a `SCALE_OUT` should carry the replica count the SQL computed
-  (recomputed here); any other action should carry none.
+- **Target.** One free-text column (D-034). Only a `ROLLBACK` carries one, checked against
+  the joined `service_health` (or `service_error_rate`) row, the input the agent answered
+  (D-045): it should name that row's `previous_version`. Any other action should carry none:
+  the capacity agent's Target line is always N/A since D-068, which took `SCALE_OUT` and its
+  replica count away from it.
 - **Context.** The decision rows hold no metrics, so everything else is read from the
   `service_health` (or `service_error_rate`) row with the same (service_name, window_end).
 - **Outside incidents.** Decisions on rows outside every incident span of their service.
@@ -38,7 +39,6 @@ are:
 
 from __future__ import annotations
 
-import math
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -64,10 +64,12 @@ INVALID = "INVALID"
 
 # One shared vocabulary (D-034, D-043); each agent is offered its own subset in its
 # prompt. Every incident type has exactly one correct action; OBSERVE answers a false alarm.
+# No metric agent offers SCALE_OUT since D-068 (surges are retired); it stays in the
+# vocabulary for the ticket responder.
 ACTIONS = (ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM, OBSERVE)
 ALLOWED_ACTIONS = {
     RELEASE_AGENT: (ROLLBACK, OBSERVE),
-    CAPACITY_AGENT: (SCALE_OUT, INVESTIGATE_UPSTREAM, OBSERVE),
+    CAPACITY_AGENT: (INVESTIGATE_UPSTREAM, OBSERVE),
 }
 AGENT_FOR_TRIGGER = {
     LATENCY_HIGH: RELEASE_AGENT,
@@ -128,16 +130,6 @@ class DecisionRow:
         return AGENT_FOR_TRIGGER.get(self.trigger) == self.agent_name
 
 
-def suggested_replicas(ready: int | None, count: int | None, expected: float | None) -> int | None:
-    """The capacity INSERT's formula (brief section 5.5, uncapped since D-043), in Python."""
-    if ready is None:
-        return None
-    base = ready + 1
-    if count is not None and expected:
-        base = max(base, math.ceil(ready * count / expected))
-    return base
-
-
 def expected_agent(row: HealthRow) -> str | None:
     """Which agent a `service_health` row should call, per the routing rules."""
     if row.traffic_status in ("HIGH", "LOW"):
@@ -173,11 +165,6 @@ def check_target(d: DecisionRow, health: HealthRow | None) -> bool | None:
         if health is None or health.previous_version is None:
             return None if d.target else False
         return d.target == health.previous_version
-    if d.action == SCALE_OUT:
-        if health is None:
-            return None
-        want = suggested_replicas(health.ready_replicas, health.traffic_count, health.expected_traffic_count)
-        return want is not None and d.target == str(want)
     return False if d.target else None
 
 

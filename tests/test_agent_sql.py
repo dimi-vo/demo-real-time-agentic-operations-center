@@ -16,7 +16,6 @@ from scripts.evaluation.decisions import (
     ALLOWED_ACTIONS,
     CAPACITY_AGENT,
     RELEASE_AGENT,
-    suggested_replicas,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,17 +84,46 @@ def test_the_release_prompt_rolls_back_on_either_trigger():
     assert "25 percent" in prompt
 
 
+def _reason(text: str) -> str:
+    return text.split("Reason: ", 1)[1]
+
+
 def test_examples_put_each_trigger_on_a_service_that_gets_it():
-    """D-067: web-gateway's only incident is an error-rate breach, checkout gets surges and
-    payments drops, so an example must not pair web-gateway with latency or traffic."""
+    """D-067, D-068: web-gateway's only incident is an error-rate breach and payments is the
+    only ARIMA service, so an example must not pair web-gateway with latency or traffic, and
+    no example is about checkout (it produces tickets)."""
     for action, text in _examples(read(AGENT_FILES[RELEASE_AGENT])):
         if "Web-gateway" in text:
             assert "error rate" in text and "latency" not in text, (action, text)
+        assert "checkout" not in text.lower(), (action, text)
     capacity = read(AGENT_FILES[CAPACITY_AGENT])
-    assert "web-gateway" not in capacity.lower()
-    examples = dict(_examples(capacity))
-    assert examples["SCALE_OUT"].split("Reason: ", 1)[1].startswith("Checkout")
-    assert examples["INVESTIGATE_UPSTREAM"].split("Reason: ", 1)[1].startswith("Payments")
+    assert "web-gateway" not in capacity.lower() and "checkout" not in capacity.lower()
+
+
+def test_the_release_agent_rolls_back_a_payments_latency_regression():
+    """D-068: the latency ROLLBACK example moves from checkout to payments: its version line
+    (2.9.x) and its latency (about 4 x 220 ms against about 220 ms)."""
+    rollbacks = [t for a, t in _examples(read(AGENT_FILES[RELEASE_AGENT])) if a == "ROLLBACK"]
+    [example] = [t for t in rollbacks if "latency" in t]
+    assert _reason(example).startswith("Payments latency is ")
+    measured, expected = (int(n) for n in re.findall(r"(\d+) ms", example)[:2])
+    assert 3.5 * 220 <= measured <= 4.5 * 220 and 200 <= expected <= 240
+    assert re.search(r"Target: 2\.9\.\d+\n", example)
+
+
+def test_the_capacity_agent_investigates_drops_and_observes_more_traffic():
+    """D-068: surges are retired, so the capacity agent has no SCALE_OUT. Rule 1 answers a
+    drop, rule 2 observes more traffic than forecast (noise, or the echo after a drop). One
+    example each, both on payments, and the Target line is always N/A."""
+    capacity = read(AGENT_FILES[CAPACITY_AGENT])
+    examples = _examples(capacity)
+    assert [action for action, _ in examples] == ["INVESTIGATE_UPSTREAM", "OBSERVE"]
+    for action, text in examples:
+        assert _reason(text).startswith("Payments"), (action, text)
+        assert "Target: N/A\n" in text, (action, text)
+    assert "1. INVESTIGATE_UPSTREAM — the trigger is TRAFFIC_LOW." in capacity
+    assert "2. OBSERVE — the trigger is TRAFFIC_HIGH." in capacity
+    assert "SCALE" not in capacity and "Suggested" not in capacity
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
@@ -228,29 +256,13 @@ def test_inserts_start_with_the_four_identity_columns(name):
     assert head.index("h.`window_end`") < head.index("h.`service_name`") < head.index(f"'{agent}'")
 
 
-def test_capacity_insert_computes_the_replica_suggestion_in_sql():
-    """Brief 5.5: the arithmetic is deterministic, the agent only decides to use it."""
+def test_capacity_insert_has_no_replica_arithmetic():
+    """D-068: with SCALE_OUT gone there is no replica count to compute, so the Suggested
+    Replicas formula and the Ready Replicas input line go, and the header says nothing of
+    replicas."""
     sql = read(CAPACITY_INSERT)
-    assert "GREATEST(" in sql and "CEIL(" in sql
-    assert "Suggested Replicas: " in sql, "the computed value must reach the prompt"
-    # D-043: no autoscaling ceiling, so no cap and no Max Replicas in the prompt.
-    assert "LEAST(" not in sql and "max_replicas" not in sql and "Max Replicas" not in sql
-
-
-@pytest.mark.parametrize(
-    ("ready", "count", "expected", "want"),
-    [
-        (3, 600, 200, 9),  # three times the load
-        (3, 210, 200, 4),  # a nudge over: always at least one more replica
-        (4, 450, 150, 12),  # no ceiling any more (D-043)
-        (2, 90, 30, 6),  # three times the load on two replicas
-        (2, 90, 0, 3),  # an expected count of zero must not divide
-        (2, 90, None, 3),  # nor a missing one
-        (None, 90, 30, None),
-    ],
-)
-def test_suggested_replicas_matches_the_sql_formula(ready, count, expected, want):
-    assert suggested_replicas(ready, count, expected) == want
+    for gone in ("GREATEST(", "CEIL(", "ready_replicas", "Replicas", "replica"):
+        assert gone not in sql, gone
 
 
 def test_escalate_is_gone_from_every_agent_file():

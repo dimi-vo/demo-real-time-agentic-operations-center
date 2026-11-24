@@ -21,8 +21,8 @@ Reason: [one or two sentences]
 
 Correct ROLLBACK example:
 Action: ROLLBACK
-Target: 4.2.1
-Reason: Checkout latency is 580 ms against an expected 142 ms and the current version went live 10 seconds ago. Returning to 4.2.1 is the fastest safe fix.
+Target: 2.9.4
+Reason: Payments latency is 893 ms against an expected 226 ms and the current version went live 10 seconds ago. Returning to 2.9.4 is the fastest safe fix.
 
 Correct ROLLBACK example:
 Action: ROLLBACK

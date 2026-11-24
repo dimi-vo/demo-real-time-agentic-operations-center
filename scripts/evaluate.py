@@ -409,8 +409,8 @@ def _render_decisions(rep: DecisionReport, source: str, total_read: int, details
     console.print(
         "[dim]recommended = the decision on the first window of the incident, the one the "
         "on-call team would act on. (later) = a later window did recommend the expected "
-        "action. target = the version for ROLLBACK or the replica count for SCALE_OUT, "
-        "against what the SQL computed.[/dim]"
+        "action. target = the version for ROLLBACK, against the Previous Version the agent "
+        "was given.[/dim]"
     )
     no_decision = [i for i in rep.incidents if not i.decisions]
     if no_decision:
