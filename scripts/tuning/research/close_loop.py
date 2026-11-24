@@ -1,5 +1,8 @@
 """Close the loop: what a longer incident cap and an early fix do to the reference detector.
 
+Written for the engine before D-068 (surges on checkout). Kept as the record of its study; it
+may not run as is.
+
 Usage (from the repo root):
     uv run python -m scripts.tuning.research.close_loop [SEEDS] [HOURS]    # default 1000 x 3 h
 

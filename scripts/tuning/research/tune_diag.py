@@ -1,6 +1,9 @@
 """Where do the false alarms come from? Breaks down fresh-start noise and echoes for one setup
 of `tune.py`, by service, signal, the last incident before it and the seconds since.
 
+Written for the engine before D-068 (surges on checkout). Kept as the record of its study; it
+may not run as is.
+
 Usage (from the repo root): uv run python -m scripts.tuning.research.tune_diag NAME RESTS SEEDS MINUTES
   e.g. uv run python -m scripts.tuning.research.tune_diag c99.95 390/300/300 50 120
 """

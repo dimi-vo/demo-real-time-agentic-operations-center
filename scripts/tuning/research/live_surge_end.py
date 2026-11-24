@@ -1,6 +1,9 @@
 """Print live vs replica status, forecast and bounds around the end of each surge/drop/bad deploy
 in a recorded service_health dump: the window before, the incident's windows and four after.
 
+Written for the engine before D-068 (surges on checkout). Kept as the record of its study; it
+may not run as is.
+
 Usage (from the repo root):
   uv run evaluate --dump health.jsonl ...      # once, while the pipeline runs
   uv run python -m scripts.tuning.research.live_surge_end health.jsonl [MIN_TRAINING] [CONFIDENCE]

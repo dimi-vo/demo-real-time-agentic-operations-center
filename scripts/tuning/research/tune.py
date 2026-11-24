@@ -1,5 +1,8 @@
 """Data x detector tuning harness (issue 05, D-059).
 
+Written for the engine before D-068 (surges on checkout). Kept as the record of its study; it
+may not run as is.
+
 Data: the service_metrics model (one record per service per second; a 10-s window is the SUM
 of 10 Poisson traffic counts and the plain AVG of 10 per-second mean latencies), built by
 sampler.window(). Schedule: issue 06 (per-service, overlap, 20 s gap per service,

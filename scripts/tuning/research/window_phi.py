@@ -2,6 +2,9 @@
 sees them). A coefficient near 1 is what makes the first normal window after a spike look
 like an anomaly the other way (an echo; D-064).
 
+Written for the engine before D-068 (surges on checkout). Kept as the record of its study; it
+may not run as is.
+
 Usage (from the repo root): uv run python -m scripts.tuning.research.window_phi
 """
 

@@ -1,5 +1,8 @@
 """Re-check ARIMA when web-gateway leaves the shared scheduler and checkout gets its surges (D-067).
 
+Written for the engine before D-068 (surges on checkout). Kept as the record of its study; it
+may not run as is.
+
 Usage (from the repo root):
     uv run python -m scripts.tuning.research.shared_scheduler [SEEDS] [HOURS]    # default 500 x 3 h
 

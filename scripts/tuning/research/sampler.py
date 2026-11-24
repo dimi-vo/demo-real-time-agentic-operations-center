@@ -1,5 +1,8 @@
 """A fast sampler for one 10-s window of the service_metrics data model (D-058).
 
+Written for the engine before D-068 (surges on checkout). Kept as the record of its study; it
+may not run as is.
+
 One record per service per second: the window's traffic is the SUM of 10 per-second Poisson
 counts, its latency the plain AVG of 10 per-second latencies (each the mean of that second's
 requests, or one log-normal draw when the second had none). Latencies follow opsgen's model

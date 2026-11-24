@@ -1,6 +1,9 @@
 """Compare 10 s vs 5 s windows with the repo's offline harness (sweep.py's generator + AR(1)
 replica + evaluate's scorer). Patches the window constants per worker (D-064's option (b)).
 
+Written for the engine before D-068 (surges on checkout). Kept as the record of its study; it
+may not run as is.
+
 Usage (from the repo root): uv run python -m scripts.tuning.research.window_compare
 Prints, per variant in VARIANTS: the first flagged window per incident type, false positives
 (echoes) per service-hour, and the forecast error and band half-width on normal windows.

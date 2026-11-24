@@ -2,6 +2,9 @@
 Each false positive is listed by service, the incident before it, its signal and how long
 after that incident's end its window closed.
 
+Written for the engine before D-068 (surges on checkout). Kept as the record of its study; it
+may not run as is.
+
 Usage (from the repo root): uv run python -m scripts.tuning.research.window_echoes
 """
 

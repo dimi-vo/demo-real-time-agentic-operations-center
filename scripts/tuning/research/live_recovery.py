@@ -1,6 +1,9 @@
 """Live vs replica: does ML_DETECT_ANOMALIES's band widen after an incident, and how fast
 does it recover? Uses a recorded service_health dump (offline files only).
 
+Written for the engine before D-068 (surges on checkout). Kept as the record of its study; it
+may not run as is.
+
 Usage (from the repo root):
   uv run evaluate --dump health.jsonl ...      # once, while the pipeline runs
   uv run python -m scripts.tuning.research.live_recovery health.jsonl [MIN_TRAINING] [CONFIDENCE]

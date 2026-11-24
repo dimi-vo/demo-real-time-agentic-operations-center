@@ -2,7 +2,7 @@
 
 Offline scripts for tuning two things together: the **data** the simulator produces (traffic
 means, spike sizes and lengths, rests between incidents) and **our reference ARIMA detector**
-(the `ML_DETECT_ANOMALIES` settings in labs 2.4 and 2.5, on checkout and payments). They answer questions like "does
+(the `ML_DETECT_ANOMALIES` settings in labs 2.4 and 2.5, on payments alone since D-068). They answer questions like "does
 confidence 99.95 still catch every drop at 60 incidents an hour?" in seconds to minutes,
 without a live replay. They are the evidence behind D-059 (data and detector settings) and
 D-064 (window size).
@@ -29,6 +29,13 @@ under-predicts false alarms just after incidents (D-031). It can't model `d`, `q
 Always confirm a winner live.
 
 ## The scripts in this folder
+
+Written for the engine before D-068 (surges on checkout). Kept as the record of their studies;
+they may not run as is. D-068 retired `TRAFFIC_SURGE` and left payments the shared scheduler's
+only service, and these scripts still name surges, checkout and three rests (`close_loop.py`
+raises a `ValueError` for its scenarios with their own rests). The building blocks above are
+kept up to date. D-068's re-check, on payments alone, is
+`.scratch/checkout-tickets/research/payments_only.py`.
 
 Run every script from the repo root: `uv run python -m scripts.tuning.research.<name> ...`.
 Output goes to stdout; redirect it to keep it (for example `> .scratch/<feature>/t_grid.out`).
