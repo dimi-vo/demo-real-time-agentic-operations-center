@@ -2733,11 +2733,6 @@ gave 0.05 per service with or without the fix (D-065's row C) and 42 opposite fl
 everything else is the same. They moved because issue 02 took checkout out of the metric
 services, so for a given seed payments' traffic draws change (from the same distribution).
 **Open.**
-- payments' row of the target design is `opswall-redesign` issue 03. The design's row shows 5 s
-  windows, p95 latency and sub-services, none of which exist in our data; the grilling of
-  2026-11-24 settled it: one "payments" node, Flink's 10 s `service_health` windows as the
-  aggregated records, the mean latency, and its deploy lines. web-gateway's row came with issue
-  02 (below), and every row's chart now covers 2 minutes.
 - From D-067: the windowing-only step (`2.3_window_metrics.sql`) may be redundant. Kept.
 **Pending (live check, `.scratch/checkout-tickets/issues/12-live-check.md`).**
 - The pool's CFU use with eight long-running statements (2.2, 2.5, the three 4.3 legs, 5.1,
@@ -3277,6 +3272,36 @@ the version and the releases) and `tests/test_opswall_server.py`. Offline render
 web-gateway's row lands on the design's columns, two rolled-back releases read in accent, the
 chart shows the bad deploy's box, its version and the answer, checkout's row is as before, and
 hover and keyboard focus work.
+
+`opswall-redesign` issue 03 (payments' row: the design's aggregate row). The design's row shows
+5 s windows, p95 latency and five sub-services, none of which exist in our data, so the grilling
+of 2026-11-24 made it one node, Flink's 10 s windows and the mean: `scripts/opswall/state.py` (a
+`HealthRow` keeps its whole record, times in epoch seconds, the newer record for a window winning
+and the first detection kept; payments' row kind is `"windows"`, carrying `windowSeconds`, 10, and
+`windows`, the newest 7 `service_health` windows with their record and `flags`, each status
+column that flags the window after the column it judges, `JUDGED`, and the count flagged in the
+last 10 minutes; every metric row now carries its deploy marks, so payments' bad deploys and
+rollbacks reach its charts, which settles issue 01's last question), `static/opswall.js`
+(payments' row: one "payments" source box with the design's chip icon, its ambient flow into the
+Σ box of the window, a line on to "Aggregated records" with "N flagged in 10 min"; each line is the
+record's JSON with its own names, `avg_latency_ms`, `traffic_count`, `version`, `window_end`,
+`latency_status`, `traffic_status`, cut at the panel's width, its tooltip the whole record; a
+flagged status and the value it judges are accent and bold, the value first so it shows on a
+line cut short, and the line is tinted; a window the page hasn't seen flushes the box and starts
+its 10 s fill again, sends a packet out and pushes its line in, the arrival being the trigger,
+and on the first snapshot the fill starts where the newest window's detection left it; "Window
+10s" in the header; only a row's top chart labels its deploy lines, as the design labels its
+latency markers; the design rows share one body builder), `static/opswall.css` (the row's styles
+and the design's fill, flush, out and push animations). Tests: `tests/test_opswall_state.py` (the
+newest 7, a whole record in its order, a window written twice, the flags and the flagged count,
+only the windows row carries windows, payments' deploy marks, the row kind) and
+`tests/test_opswall_ingest.py` (the dumped `service_health` rows reach the records whole). Offline
+render at 1440 and 820 px with issue 02's harness, `--row windows`, its feeder writing all 19
+columns of `2.5_service_health.sql` from the ARIMA replica
+(`.scratch/opswall-redesign/research/issue03-wall-*.png`): payments' row lands on the design's
+columns, a bad deploy's window reads `"avg_latency_ms":895.3` in accent on a tinted line, its
+tooltip lists the 19 columns, the latency chart labels the deploy and the rollback and the
+traffic chart draws their lines, and the other rows are as in issue 02's render.
 
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.

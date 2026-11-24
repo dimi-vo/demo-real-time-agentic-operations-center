@@ -752,9 +752,8 @@ def test_deploys_and_rollbacks_become_marks_and_heartbeats_do_not():
     ]
     assert [m["t"] for m in marks] == pytest.approx([_pos(T0), _pos(T0 + 11)])
     assert len({m["key"] for m in marks}) == 2
-    # Only a card whose chart shows them gets marks; the review of service_deployments
-    # decides about the others (opswall-redesign issue 01).
-    assert _svc(st, "payments")["deploys"] == []
+    # payments' charts draw its own: its bad deploys and their rollbacks (opswall-redesign 03).
+    assert [(m["kind"], m["version"]) for m in _svc(st, "payments")["deploys"]] == [("DEPLOY", "2.9.5")]
 
 
 def test_trim_drops_old_error_rate_rows_and_deploy_marks():
@@ -846,6 +845,71 @@ def test_a_rollback_whose_deploy_is_older_than_the_list_marks_nothing():
     assert [(r["version"], r["rolledBackAfter"]) for r in releases["newest"]] == [("3.4.4", None)]
 
 
+# --- payments' aggregated records: the service_health windows (D-068) ---------------------
+
+
+def _window(st, window_end, lat="NORMAL", trf="NORMAL", **extra):
+    """One service_health row with the columns the record line shows."""
+    fields = {"traffic_count": 300, "avg_latency_ms": 231.44, "version": "2.9.4", "previous_version": None,
+              "last_change": "INITIAL", **extra}
+    _health(st, "payments", window_end, lat=lat, trf=trf, **fields)
+
+
+def test_payments_row_says_its_window_and_carries_the_newest_7_windows_newest_first():
+    st = OpsWallState()
+    for k in range(9):
+        _window(st, NOW - 90 + 10 * k, traffic_count=300 + k)
+    row = _svc(st, "payments")
+    assert row["windowSeconds"] == 10
+    newest = row["windows"]["newest"]
+    assert [w["windowEnd"] for w in newest] == [NOW - 10 * k for k in range(1, 8)]
+    assert [w["record"]["traffic_count"] for w in newest] == [308, 307, 306, 305, 304, 303, 302]
+    assert len({w["key"] for w in newest}) == 7
+
+
+def test_a_window_keeps_its_whole_record_with_its_times_in_epoch_seconds():
+    st = OpsWallState()
+    _window(st, NOW - 10, version="2.9.5", previous_version="2.9.4", last_change="DEPLOY")
+    [w] = _svc(st, "payments")["windows"]["newest"]
+    record = w["record"]
+    assert record["service_name"] == "payments"
+    assert (record["window_start"], record["window_end"]) == (NOW - 20, NOW - 10)
+    assert record["detected_at"] == NOW - 10 + DETECT
+    assert (record["avg_latency_ms"], record["traffic_count"], record["version"]) == (231.44, 300, "2.9.5")
+    assert (record["latency_status"], record["traffic_status"]) == ("NORMAL", "NORMAL")
+    assert record["previous_version"] == "2.9.4"
+    assert list(record)[:3] == ["service_name", "window_start", "window_end"]  # in the record's order
+
+
+def test_a_window_written_twice_shows_the_newer_record_and_its_first_detection():
+    st = OpsWallState()
+    _window(st, NOW - 10, avg_latency_ms=230.0, detected_at=NOW - 4)
+    _window(st, NOW - 10, avg_latency_ms=990.0, lat="HIGH", detected_at=NOW - 1)
+    [w] = _svc(st, "payments")["windows"]["newest"]
+    assert (w["record"]["avg_latency_ms"], w["record"]["latency_status"]) == (990.0, "HIGH")
+    assert w["record"]["detected_at"] == NOW - 4
+
+
+def test_a_window_flagged_high_or_low_names_its_statuses_and_their_values_and_counts_over_10_minutes():
+    st = OpsWallState()
+    _window(st, NOW - 620, lat="HIGH")                # before the last 10 minutes
+    _window(st, NOW - 300, lat="HIGH", trf="HIGH")
+    _window(st, NOW - 30, trf="LOW")
+    _window(st, NOW - 20, lat="WARMING_UP", trf="WARMING_UP")
+    _window(st, NOW - 10)
+    windows = _svc(st, "payments")["windows"]
+    assert windows["flagged"] == 2
+    assert [(w["windowEnd"], w["flags"]) for w in windows["newest"]][:4] == [
+        (NOW - 10, []), (NOW - 20, []), (NOW - 30, ["traffic_count", "traffic_status"]),
+        (NOW - 300, ["avg_latency_ms", "latency_status", "traffic_count", "traffic_status"])]
+
+
+def test_only_the_windows_row_carries_windows():
+    snap = OpsWallState().snapshot(now=NOW)
+    assert [s["name"] for s in snap["services"] if "windows" in s] == ["payments"]
+    assert _svc(OpsWallState(), "payments")["windows"] == {"flagged": 0, "newest": []}
+
+
 # --- checkout's row: tickets and agent runs (D-068) ------------------------------------
 
 ZD = "ZENDESK"
@@ -865,7 +929,7 @@ def _row(st, now=NOW):
 def test_the_snapshot_says_which_kind_of_row_each_service_gets():
     # From opsgen.services' split (issue 02), so the page holds no service names.
     rows = {s["name"]: s["row"] for s in OpsWallState().snapshot(now=NOW)["services"]}
-    assert rows == {"web-gateway": "releases", "checkout": "tickets", "payments": "metrics"}
+    assert rows == {"web-gateway": "releases", "checkout": "tickets", "payments": "windows"}
 
 
 def test_the_list_has_the_newest_5_tickets_and_the_count_of_the_last_10_minutes():

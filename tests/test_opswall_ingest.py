@@ -122,6 +122,20 @@ def test_real_health_rows_reach_the_wall():
     assert payments["metrics"] == [], "the lines come from service_metrics, not service_health (D-061)"
 
 
+def test_real_health_rows_reach_the_aggregated_records_whole():
+    payments = _service(_live_payments_wall(), "payments", NOW)
+    newest = payments["windows"]["newest"]
+    last = max(HEALTH, key=lambda r: r["window_end"])
+    assert newest[0]["windowEnd"] == _to_seconds(last["window_end"])
+    record = newest[0]["record"]
+    assert set(record) == set(last)  # every column of the dumped row, the synthetic detected_at included
+    for column in ("avg_latency_ms", "traffic_count", "version", "latency_status", "traffic_status"):
+        assert record[column] == last[column]
+    assert record["window_end"] == _to_seconds(last["window_end"])
+    for w in newest:  # the fixture flags latency only
+        assert w["flags"] == (["avg_latency_ms", "latency_status"] if w["record"]["latency_status"] == "HIGH" else [])
+
+
 def test_the_first_rollback_closes_the_real_detection():
     """4 flagged windows, one normal, one more: two blocks, and all 5 rollbacks counted."""
     st = _live_payments_wall()

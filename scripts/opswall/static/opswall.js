@@ -8,11 +8,12 @@
  *  detail slot on the right, then its body) and its Issues panel (svc.issues: injected,
  *  detected of injected with the missed line, the median times to detect and to remediate),
  *  which moves below the row on a narrow screen. svc.row says which kind of row:
- *  - "metrics" draws the charts the snapshot names in svc.charts (Latency and Traffic for
- *    payments) over the time axis;
  *  - "releases" (web-gateway, the design's deploy row) draws the laptop, the line and the
  *    Releases list on the left and its Errors chart (D-067) on the right, with "Running v…"
  *    in the header (see "Releases row" below);
+ *  - "windows" (payments, the design's aggregate row) draws the service, the Σ box of its
+ *    10 s window and the Aggregated records on the left and its Latency and Traffic charts on
+ *    the right, with "Window 10s" in the header (see "Windows row" below);
  *  - "tickets" (checkout) draws the ticket sources, the list and the timeline of tickets
  *    and agent runs instead (see "Ticket row" below).
  *  Every row's time axis is the last 2 minutes (D.chartSeconds), the design's "−2m … now".
@@ -381,7 +382,8 @@ function drawChart(host) {
   // keyboard stop with its own tooltip; the pointer gets the same words on the line's. A
   // deploy's version sits at the top just left of its line, as the design's markers do; a
   // rollback's label just right of it, so the two of a bad deploy, seconds apart, stay clear
-  // of each other. The versions are placed first, then the rollbacks, newest first: a label
+  // of each other. Only a row's top chart labels them, as in the design; the lines below
+  // carry the same tooltips. The versions are placed first, then the rollbacks, newest first: a label
   // that would cover one already placed moves to the other side of its line, or hides if it
   // fits there neither (its tooltip still says it).
   const deployLabel = d => (d.kind === "ROLLBACK" ? "rollback" : `v ${d.version ?? "?"}`);
@@ -400,7 +402,8 @@ function drawChart(host) {
   });
   const topLabel = recs.length ? scale.labels.find(([v]) => Y(v) <= PLOT_TOP + 1) : null;
   const minX = topLabel ? topLabel[1].length * LABEL_CHAR + 8 : 0;  // the scale's label has the top left
-  const taken = [], newest = m.deploys.map((d, i) => i).reverse();
+  const taken = [], newest = m.deployLabels === false ? [] : m.deploys.map((d, i) => i).reverse();
+  if (m.deployLabels === false) for (const g of deploys.children) g.lastChild.setAttribute("visibility", "hidden");
   const order = [...newest.filter(i => m.deploys[i].kind !== "ROLLBACK"), ...newest.filter(i => m.deploys[i].kind === "ROLLBACK")];
   for (const i of order) {
     const d = m.deploys[i], x = X(d.t), width = deployLabel(d).length * LABEL_CHAR;
@@ -568,9 +571,9 @@ function ensureCharts(row, kinds) {
 
 function updateRow(row, svc) {
   const ui = row._ui, status = svc.status || "healthy", tickets = svc.row === "tickets";
-  const releases = svc.row === "releases";
+  const releases = svc.row === "releases", windows = svc.row === "windows";
   ensureCharts(row, tickets ? [] : svc.charts || ["latency", "traffic"]);
-  setClass(row, `svc-row${tickets ? " ticket-row" : releases ? " releases-row" : ""} ${status}`);
+  setClass(row, `svc-row${tickets ? " ticket-row" : releases ? " releases-row" : windows ? " windows-row" : ""} ${status}`);
   setText(ui.name, svc.name);
   setAttr(ui.main, "aria-label", svc.name);
   setAttr(ui.issues, "aria-label", `${svc.name} issues in the last 10 minutes`);
@@ -581,7 +584,24 @@ function updateRow(row, svc) {
     : "Measured from the incident's start to the agent's answer");
   if (tickets) updateTicketRow(row, svc);
   if (releases) updateReleaseRow(row, svc);
-  for (const c of ui.charts) { c.host._m = metricModel(svc, c.kind); c.host._draw(); }
+  if (windows) updateWindowsRow(row, svc);
+  ui.charts.forEach((c, i) => {
+    c.host._m = { ...metricModel(svc, c.kind), deployLabels: i === 0 };  // the design labels the top chart's markers
+    c.host._draw();
+  });
+}
+
+// A design row's body: its left column (sources, flow, list), and the row's charts with their
+// axis moved into the right column. Its header's detail: a label and a mono value.
+function flowBody(row, cls, left, label) {
+  const body = document.createElement("div");
+  body.className = `flow-body ${cls}`;
+  body.innerHTML = `<div class="flow-left">${left}</div><div class="chart-col"></div>`;
+  row.querySelector(".row-main").appendChild(body);
+  body.querySelector(".chart-col").appendChild(row.querySelector(".row-body"));
+  const detail = row.querySelector(".detail");
+  detail.innerHTML = `<span>${label} <span class="detail-value"></span></span>`;
+  return { body, value: detail.querySelector(".detail-value"), q: sel => body.querySelector(sel) };
 }
 
 // ---------- Releases row ----------
@@ -598,10 +618,7 @@ const ARROW = '<svg width="7" height="9" viewBox="0 0 7 9" class="flow-arrow"><p
 const flowDots = (cls, delays) => delays.map(d => `<span class="${cls}" style="animation-delay: ${d}"></span>`).join("");
 
 function createReleaseBody(row) {
-  const body = document.createElement("div");
-  body.className = "flow-body rl-body";
-  body.innerHTML = `
-    <div class="flow-left">
+  const { body, value, q } = flowBody(row, "rl-body", `
       <div class="src-box rl-laptop">
         <svg role="img" aria-label="Developer laptop" width="18" height="18" viewBox="0 0 24 24" fill="none"
           stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${LAPTOP}</svg>
@@ -614,17 +631,9 @@ function createReleaseBody(row) {
       <div class="list">
         <div class="list-head"><span class="list-title">Releases</span><span class="list-count"></span></div>
         <div class="list-view rl-view" aria-live="polite"><div class="rl-rows"></div></div>
-      </div>
-    </div>
-    <div class="chart-col"></div>`;
-  row.querySelector(".row-main").appendChild(body);
-  body.querySelector(".chart-col").appendChild(row.querySelector(".row-body"));
-  const q = sel => body.querySelector(sel);
-  row._rl = { body, laptop: q(".rl-laptop"), packet: q(".rl-packet"), rows: q(".rl-rows"), count: q(".list-count"),
-              seen: null };  // the release keys on the previous snapshot; null before the first
-  const detail = row.querySelector(".detail");
-  detail.innerHTML = '<span>Running <span class="running"></span></span>';
-  row._rl.running = detail.querySelector(".running");
+      </div>`, "Running");
+  row._rl = { body, running: value, laptop: q(".rl-laptop"), packet: q(".rl-packet"), rows: q(".rl-rows"),
+              count: q(".list-count"), seen: null };  // the release keys on the previous snapshot; null before the first
 }
 
 function updateReleaseRow(row, svc) {
@@ -663,6 +672,112 @@ function updateReleaseRow(row, svc) {
     clearTimeout(rl.laptop._busy);
     rl.laptop._busy = setTimeout(() => rl.laptop.classList.remove("busy"), 1000);
     replay(rl.packet, "travel");
+  }
+}
+
+// ---------- Windows row ----------
+// A row whose snapshot says row: "windows" (payments, the design's aggregate row, D-068). The
+// design's cluster of five services is one node here, the service itself (there are no
+// sub-services in our data), its ambient flow running into the Σ box of the window Flink
+// aggregates (svc.windowSeconds, 10 s; the design's 5 s is not ours), then a line on to
+// "Aggregated records": the newest service_health windows, each one line of the record's own
+// JSON, cut at the panel's width, its tooltip the whole record. A status that flags the window
+// and the value it judges (svc.windows.newest[].flags; the value comes first, so it shows on a
+// line cut short) are accent and bold, and tint the line. A window the page hasn't
+// seen (not on the first snapshot) flushes the box and starts its fill again, sends a packet
+// out and pushes its line in with the design's fade: the arrival is the trigger, not the
+// clock, since Flink writes a window a few seconds after it closed. The fill takes the
+// window's length, and on the first snapshot starts where the newest window's detection
+// left it. Under prefers-reduced-motion nothing moves (CSS).
+const CHIP = '<rect x="4" y="4" width="16" height="16" rx="3"></rect><path d="M9 9h6v6H9z"></path>';
+const WINDOW_FRESH_SECONDS = 30;  // a new window this long after its end or sooner animates
+const LINE_KEYS = ["avg_latency_ms", "traffic_count", "version", "window_end", "latency_status", "traffic_status"];
+const TIME_KEYS = new Set(["window_start", "window_end", "detected_at"]);
+const clockOf = sec => { const d = new Date(sec * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; };
+// A record's value as the line prints it: times as the local clock, numbers to 0.1, strings quoted.
+function recordValue(key, v) {
+  if (v == null) return { text: "null", cls: "k" };
+  if (TIME_KEYS.has(key) && typeof v === "number") return { text: `"${clockOf(v)}"`, cls: "s" };
+  if (typeof v === "number") return { text: Number.isInteger(v) ? String(v) : v.toFixed(1), cls: "v" };
+  return { text: `"${esc(v)}"`, cls: "s" };
+}
+function recordLine(w) {
+  const flags = new Set(w.flags || []), rec = w.record || {};
+  const parts = LINE_KEYS.filter(k => k in rec).map(k => {
+    const { text, cls } = recordValue(k, rec[k]);
+    return `<span class="k">"${k}":</span><span class="${flags.has(k) ? "flag" : cls}">${text}</span>`;
+  });
+  return `<span class="k">{</span>${parts.join('<span class="k">,</span>')}<span class="k">}</span>`;
+}
+function recordTip(w) {
+  const rec = w.record || {};
+  const lines = Object.keys(rec).map(k => `${esc(k)}: ${recordValue(k, rec[k]).text}`);
+  return `<strong>Window to ${clockOf(w.windowEnd)}</strong><span class="record">${lines.join("<br>")}</span>`;
+}
+
+function createWindowsBody(row, svc) {
+  const name = esc(svc.name);
+  const { body, value, q } = flowBody(row, "ag-body", `
+      <div class="ag-cluster">
+        <svg width="250" height="280" viewBox="0 0 250 280" aria-hidden="true"><path d="M40 140 H122" class="tk-path"></path></svg>
+        <div class="src-box ag-node" title="${name}">
+          <svg role="img" aria-label="${name}" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.6" stroke-linejoin="round">${CHIP}</svg>
+        </div>
+        <span class="ag-label">${name}</span>
+        ${flowDots("flowc path-ag", ["0s", ".47s", ".93s"])}
+        <div class="ag-sigma"><div class="ag-fill"></div><span class="ag-sum"><span>Σ</span><span class="ag-secs"></span></span></div>
+      </div>
+      <div class="flow-line ag-line" aria-hidden="true"><span class="ag-packet"></span>${ARROW}</div>
+      <div class="list">
+        <div class="list-head"><span class="list-title">Aggregated records</span><span class="list-count"></span></div>
+        <div class="list-view ag-view" aria-live="polite"><div class="ag-rows"></div></div>
+      </div>`, "Window");
+  row._ag = { body, window: value, sigma: q(".ag-sigma"), fill: q(".ag-fill"), secs: q(".ag-secs"), packet: q(".ag-packet"),
+              rows: q(".ag-rows"), count: q(".list-count"), seen: null };  // the window keys on the previous snapshot
+}
+
+function updateWindowsRow(row, svc) {
+  if (!row._ag) createWindowsBody(row, svc);
+  const ag = row._ag, windows = svc.windows || {}, list = windows.newest || [], secs = svc.windowSeconds || 10;
+  setText(ag.window, `${secs}s`);
+  setText(ag.secs, `${secs}s`);
+  setAttr(ag.sigma, "title", `Aggregates every ${secs} seconds`);
+  ag.sigma.style.setProperty("--window", `${secs}s`);
+  setText(ag.count, `${windows.flagged || 0} flagged in 10 min`);
+
+  // The keys this snapshot brings that the page hasn't seen: they animate (not on the first).
+  const first = ag.seen === null;
+  const fresh = first ? [] : list.filter(w => !ag.seen.has(w.key) && UPDATED - w.windowEnd <= WINDOW_FRESH_SECONDS);
+  ag.seen = new Set(list.map(w => w.key));
+
+  sync(ag.rows, list, w => w.key, w => {
+    const n = document.createElement("div");
+    n.innerHTML = '<div class="ag-json"></div>';
+    if (fresh.includes(w)) {  // the design's fade, once, as the packet lands
+      n._fresh = true;
+      setTimeout(() => { n._fresh = false; n.classList.remove("fresh"); }, 3800);
+    }
+    return n;
+  }, (n, w) => {
+    const flagged = (w.flags || []).length > 0;
+    setClass(n, `ag-row${flagged ? " flagged" : ""}${n._fresh ? " fresh" : ""}`);
+    setHTML(n.firstChild, recordLine(w));
+    n.setAttribute("data-tip", recordTip(w));
+  });
+
+  if (first && list.length) {  // the fill picks up where the newest window's arrival left it
+    const since = UPDATED - (list[0].record?.detected_at ?? list[0].windowEnd);
+    ag.fill.style.animationDelay = `${-Math.max(0, Math.min(secs, since)).toFixed(1)}s`;
+    replay(ag.fill, "fill");
+  }
+  if (fresh.length) {
+    ag.fill.style.animationDelay = "0s";
+    replay(ag.fill, "fill");
+    replay(ag.sigma, "flush");
+    ag.packet.dataset.flag = (fresh[0].flags || []).length ? "yes" : "no";
+    replay(ag.packet, "out");
+    replay(ag.rows, "jpush");
   }
 }
 

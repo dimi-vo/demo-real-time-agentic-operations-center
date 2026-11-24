@@ -220,8 +220,8 @@ body {
 .status.working .dot { background: var(--accent); }
 .open-p1 { font-family: var(--mono); font-weight: 700; color: var(--text-2); }
 .open-p1.some { color: var(--accent); }
-/* A releases row's header: "Running v 3.4.2" */
-.running { font-family: var(--mono); color: var(--text); }
+/* A design row's header detail: "Running v 3.4.2", "Window 10s" */
+.detail-value { font-family: var(--mono); color: var(--text); }
 
 /* What the design's rows share (checkout, web-gateway): the body's two columns, a source's
    box, the line with its ambient flow on to a list, and the list itself */
@@ -386,6 +386,56 @@ body {
    rows slide down to make room. */
 .rl-row.fresh { animation: rfresh 3s ease-out .95s backwards; }
 
+/* A windows row (payments, D-068): the service, the Σ box of its window, the line on to the
+   Aggregated records, the design's aggregate row with one node */
+.ag-cluster { flex: 0 0 auto; position: relative; width: 250px; height: 280px; }
+.ag-cluster > svg { position: absolute; inset: 0; }
+.ag-node { position: absolute; left: 0; top: 120px; }
+.ag-label {
+  position: absolute; left: -25px; top: 166px; width: 90px; text-align: center;
+  font-family: var(--mono); font-size: 11px; color: var(--text-soft); white-space: nowrap;
+}
+.path-ag { offset-path: path('M40 140 H122'); offset-rotate: 0deg; }
+.ag-sigma {
+  position: absolute; left: 122px; top: 112px; width: 56px; height: 56px; z-index: 1;
+  border: 1px solid #3A404A; border-radius: 50%; background: var(--bg); overflow: hidden;
+}
+.ag-fill {
+  position: absolute; inset: 0; background: rgba(143, 184, 255, 0.16);
+  transform-origin: center bottom; transform: scaleY(0);
+}
+.ag-sum {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 1px; font-family: var(--mono); line-height: 1.1;
+}
+.ag-sum > span:first-child { font-size: 15px; color: var(--text); }
+.ag-secs { font-size: 10px; color: var(--text-soft); }
+.ag-line { flex: 1 1 120px; min-width: 112px; margin-left: -72px; }
+.ag-packet {
+  position: absolute; top: -4px; left: 0; width: 14px; height: 8px; border-radius: 2px;
+  background: var(--blue); opacity: 0;
+}
+.ag-packet[data-flag="yes"] { background: var(--accent); }
+.ag-view {
+  height: 240px;
+  -webkit-mask-image: linear-gradient(#000 75%, transparent); mask-image: linear-gradient(#000 75%, transparent);
+}
+.ag-row {
+  --fresh: #5C626C;
+  height: 40px; padding: 0 14px; display: flex; align-items: center; border-bottom: 1px solid var(--raised);
+}
+.ag-row.flagged { --fresh: var(--accent); background: rgba(245, 181, 68, 0.07); }
+.ag-json {
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--mono); font-size: 12px; color: var(--text-3);
+}
+.ag-json .v { color: var(--text); }
+.ag-json .s { color: var(--text-soft); }
+.ag-json .flag { color: var(--accent); font-weight: 700; }
+/* A new window's line waits for its packet, then fades in as the lines slide down. */
+.ag-row.fresh { animation: ifresh 3s ease-out .6s backwards; }
+.tip .record { display: block; margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--text-soft); }
+
 /* The design's animations: the ambient flow, a new ticket's dot, ring, push and fade. Each
    comes in -a/-b twins so the page can start it again. */
 @keyframes along { 0% { offset-distance: 0%; opacity: 0; } 12% { opacity: 1; } 88% { opacity: 1; } 100% { offset-distance: 100%; opacity: 0; } }
@@ -427,6 +477,23 @@ body {
 @keyframes rpushB { from { transform: translateY(-48px); } to { transform: translateY(0); } }
 .rpush-a { animation: rpushA .7s cubic-bezier(.2, .8, .2, 1) .95s backwards; }
 .rpush-b { animation: rpushB .7s cubic-bezier(.2, .8, .2, 1) .95s backwards; }
+/* A window's: the Σ box fills over the window and flushes, a packet goes out, the lines push */
+@keyframes fillA { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes fillB { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+.fill-a { animation: fillA var(--window, 10s) linear forwards; }
+.fill-b { animation: fillB var(--window, 10s) linear forwards; }
+@keyframes flushA { 0% { border-color: var(--blue); box-shadow: 0 0 0 4px rgba(143, 184, 255, .18); } 100% { border-color: #3A404A; box-shadow: 0 0 0 0 transparent; } }
+@keyframes flushB { 0% { border-color: var(--blue); box-shadow: 0 0 0 4px rgba(143, 184, 255, .18); } 100% { border-color: #3A404A; box-shadow: 0 0 0 0 transparent; } }
+.flush-a { animation: flushA .8s ease-out; }
+.flush-b { animation: flushB .8s ease-out; }
+@keyframes outA { 0% { left: 0; opacity: 0; } 8% { opacity: 1; } 88% { opacity: 1; } 100% { left: calc(100% - 14px); opacity: 0; } }
+@keyframes outB { 0% { left: 0; opacity: 0; } 8% { opacity: 1; } 88% { opacity: 1; } 100% { left: calc(100% - 14px); opacity: 0; } }
+.out-a { animation: outA .6s cubic-bezier(.3, 0, .3, 1) both; }
+.out-b { animation: outB .6s cubic-bezier(.3, 0, .3, 1) both; }
+@keyframes jpushA { from { transform: translateY(-40px); } to { transform: translateY(0); } }
+@keyframes jpushB { from { transform: translateY(-40px); } to { transform: translateY(0); } }
+.jpush-a { animation: jpushA .6s cubic-bezier(.2, .8, .2, 1) .6s backwards; }
+.jpush-b { animation: jpushB .6s cubic-bezier(.2, .8, .2, 1) .6s backwards; }
 
 /* Tooltip */
 .tip {
@@ -462,6 +529,7 @@ body {
   .tip { transition: none; }
   .flow, .flowc, .pkt-a, .pkt-b, .merge-a, .merge-b, .ring-a, .ring-b, .push-a, .push-b, .tk-row.fresh,
   .tk-run.open .tk-cap, .tk-chip.working .tk-square,
-  .travel-a, .travel-b, .rpush-a, .rpush-b, .rl-row.fresh, .rback-a, .rback-b { animation: none; }
+  .travel-a, .travel-b, .rpush-a, .rpush-b, .rl-row.fresh, .rback-a, .rback-b,
+  .fill-a, .fill-b, .flush-a, .flush-b, .out-a, .out-b, .jpush-a, .jpush-b, .ag-row.fresh { animation: none; }
   .src-box { transition: none; }
 }

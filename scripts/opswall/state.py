@@ -43,9 +43,9 @@ transaction wrote comes again when the statement replays, D-063).
   that failed (null for a second without requests, D-067).
 - The **charts** of a row: web-gateway's is the errors chart alone (lab 2.2's threshold,
   D-067), payments' are latency and traffic, and checkout, which produces tickets and no
-  metrics, has none (D-068). A row with the errors chart
-  also gets a **deploy mark** per DEPLOY and ROLLBACK of its service, good deploys
-  included, keyed by ``deployed_at`` so the 5-s heartbeat adds nothing.
+  metrics, has none (D-068). A metric row also gets a **deploy mark** per DEPLOY and
+  ROLLBACK of its service, good deploys included, keyed by ``deployed_at`` so the 5-s
+  heartbeat adds nothing.
 - The **chart** of every row shows the last 2 minutes (``CHART_SECONDS``, the design's, D-068);
   what has left it still counts in the Issues panel and the status, worked out over the
   history.
@@ -53,13 +53,18 @@ transaction wrote comes again when the statement replays, D-063).
   version (the latest ``service_deployments`` record's, heartbeat included) and its Releases
   list: the newest 5 DEPLOYs of the last 10 minutes, each with how long it ran before the
   ROLLBACK that left its version, and their count.
+- A **windows** row (payments, the design's aggregate row, D-068) also carries its window (10 s,
+  Flink's) and its "Aggregated records": the newest 7 ``service_health`` windows, each with its
+  whole record (one per window, the newer record winning, the first detection kept) and the
+  status columns that flag it, and the count of flagged windows of the last 10 minutes.
 - The **row kind** (``row``): ``"tickets"`` for the ticket services of ``opsgen.services``
-  (checkout), ``"releases"`` for a row with the errors chart (web-gateway), ``"metrics"`` for
-  the others, so the page holds no service names (D-068). Each kind carries only what the
-  page draws for it: a metric row its charts, samples, deploys, blocks and incidents, a
-  releases row its version and Releases list as well; a ticket row its sources, list and
-  timeline. The words the page shows come with the snapshot too: ``actionWords`` for every
-  action, a ticket source's name, a lane's state.
+  (checkout), ``"releases"`` for a row with the errors chart (web-gateway), ``"windows"`` for
+  the others (payments), so the page holds no service names (D-068). Each kind carries only
+  what the page draws for it: a metric row its charts, samples, deploys, blocks and
+  incidents, a releases row its version and Releases list as well, a windows row its window
+  and newest windows; a ticket row its sources, list and timeline. The words the page shows
+  come with the snapshot too: ``actionWords`` for every action, a ticket source's name, a
+  lane's state.
 - A **ticket** is one record per ``ticket_id``, filled in from five topics in any order: its
   fields (``support_tickets``), when lab 5.1 routed it (the ``p1_tickets`` record's Kafka
   timestamp), the classifier's verdict and reason and when it gave them (``ticket_triage``),
@@ -136,6 +141,9 @@ INCIDENT_METRIC = {  # no TRAFFIC_SURGE: surges are retired (D-068)
 # "releases" row: the design's deploy row, with its running version and Releases list (D-068).
 ERRORS_CHART_SERVICES = ("web-gateway",)
 RELEASES_LISTED = 5  # the newest deploys a Releases list shows
+WINDOWS_LISTED = 7   # the newest service_health windows a windows row's "Aggregated records" shows
+# The service_health column each status column judges: a flagged window's line marks both.
+JUDGED = {"latency_status": "avg_latency_ms", "traffic_status": "traffic_count"}
 # Lab 2.2's rule (sql/2.2_error_rate.sql), drawn as a line on the errors chart; a test keeps
 # the two in step.
 ERROR_RATE_THRESHOLD_PCT = 25.0
@@ -149,6 +157,7 @@ class HealthRow:
     latency_status: str
     traffic_status: str
     detected_at: float | None = None  # when the detector produced the verdict; None on older rows
+    record: dict = field(default_factory=dict)  # every column, times in epoch seconds: the record line
 
 
 @dataclass
@@ -288,6 +297,7 @@ class OpsWallState:
             latency_status=record.get("latency_status") or "NORMAL",
             traffic_status=record.get("traffic_status") or "NORMAL",
             detected_at=_to_seconds(record.get("detected_at")),
+            record={k: _to_seconds(v) if isinstance(v, datetime) else v for k, v in record.items()},
         )
         with self._lock:
             s = self._services[name]
@@ -297,6 +307,8 @@ class OpsWallState:
             for i, prior in enumerate(s.health):
                 if prior.window_end == w:
                     row.detected_at = _earliest(prior.detected_at, row.detected_at)
+                    if "detected_at" in row.record:
+                        row.record["detected_at"] = row.detected_at
                     s.health[i] = row
                     return
             s.health.append(row)
@@ -513,7 +525,7 @@ def _metric_row(s: ServiceState, now: float, left: float, chart_left: float, rel
     """A metric service's row: its charts and what they draw, its status and Issues numbers. The
     blocks, the incidents and the status are worked out over the history (``left``), the chart
     shows what reaches its last 2 minutes (``chart_left``). A "releases" row adds its running
-    version and its Releases list."""
+    version and its Releases list, a "windows" row its window and its newest windows."""
     rows = {source: sorted((r for r in getattr(s, source) if r.window_end >= left), key=lambda r: r.window_end)
             for source in ("health", "error_rates")}
     incidents = sorted((i for i in s.incidents if _incident_end(i, now) >= left),
@@ -524,7 +536,7 @@ def _metric_row(s: ServiceState, now: float, left: float, chart_left: float, rel
         b.incident = _owner(b, incidents, now)
 
     status, status_text = _status(blocks, now)
-    kind = "releases" if s.name in ERRORS_CHART_SERVICES else "metrics"
+    kind = "releases" if s.name in ERRORS_CHART_SERVICES else "windows"
     row = {
         "name": s.name,
         "row": kind,  # which kind of row the page builds (D-068)
@@ -536,11 +548,14 @@ def _metric_row(s: ServiceState, now: float, left: float, chart_left: float, rel
         "blocks": [_block_json(b, now, rel) for b in blocks if (b.end if b.closer else now) >= chart_left],
         "charts": charts,
         "metrics": _samples_json(s.samples, chart_left, now, errors="errors" in charts),
-        "deploys": [_deploy_json(d, rel) for d in s.deploys if d.at >= chart_left] if "errors" in charts else [],
+        "deploys": [_deploy_json(d, rel) for d in s.deploys if d.at >= chart_left],
     }
     if kind == "releases":
         row["version"] = s.version
         row["releases"] = _releases_json(s.deploys, left, now)
+    else:
+        row["windowSeconds"] = int(WINDOW_SECONDS)
+        row["windows"] = _windows_json(s.health, left, now)
     return row
 
 
@@ -590,6 +605,23 @@ def _releases_json(deploys: list[DeployMark], left: float, now: float) -> dict:
         newest.append({"key": f"{d.kind}@{_ms(d.at)}", "version": d.version, "deployedAt": d.at,
                        "rolledBackAfter": after, "rolledBackAfterText": None if after is None else _dur_words(after)})
     return {"count": len(recent), "newest": newest}
+
+
+def _windows_json(health: list[HealthRow], left: float, now: float) -> dict:
+    """A windows row's "Aggregated records" (D-068): the newest service_health windows, newest
+    first, each with its whole record and the columns that flag it: each status column that
+    flags it (a latency HIGH, a traffic HIGH or LOW) after the column it judges, which the line
+    shows first; and the count of flagged windows of the last 10 minutes."""
+    def flags(h: HealthRow) -> list[str]:
+        statuses = dict.fromkeys(t.column for t in TRIGGERS if t.source == "health" and getattr(h, t.column) == t.flag)
+        return [c for status in statuses for c in (JUDGED[status], status)]
+
+    rows = sorted((h for h in health if h.window_end <= now), key=lambda h: h.window_end)
+    return {
+        "flagged": sum(1 for h in rows if h.window_end >= left and flags(h)),
+        "newest": [{"key": f"W@{_ms(h.window_end)}", "windowEnd": h.window_end, "record": h.record, "flags": flags(h)}
+                   for h in reversed(rows[-WINDOWS_LISTED:])],
+    }
 
 
 def _blocks(rows: dict[str, list], decisions: list[DecisionMark], now: float) -> list[_Block]:
