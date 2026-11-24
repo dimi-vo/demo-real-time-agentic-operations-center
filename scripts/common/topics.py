@@ -7,10 +7,10 @@ its schema subject and the table on top of it stay in place; only the records go
 
 from __future__ import annotations
 
-# The three topics the generator writes to, and the three the labs' INSERTs write to (lab 2.2's
-# error-rate rule, D-067; the ARIMA detection; the agents). All six are created by the platform
-# team's Terraform (D-050).
-SOURCE_TOPICS = ("service_metrics", "service_deployments", "service_incidents")
+# The five topics the generator writes to (checkout's tickets and their answer key since D-068),
+# and the three the labs' INSERTs write to (lab 2.2's error-rate rule, D-067; the ARIMA
+# detection; the agents). All eight are created by the platform team's Terraform (D-050).
+SOURCE_TOPICS = ("service_metrics", "service_deployments", "service_incidents", "support_tickets", "ticket_answer_key")
 OUTPUT_TOPICS = ("service_error_rate", "service_health", "remediation_decisions")
 
 

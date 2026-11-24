@@ -114,3 +114,15 @@ def test_source_tables_includes_service_incidents():
     # check wouldn't have caught it at all. Pin it so future table additions remember
     # the readiness check.
     assert "service_incidents" in provision.SOURCE_TABLES
+
+
+def test_the_ticket_source_tables_are_checked_too():
+    # D-068: checkout's tickets and their answer key; the generator writes both.
+    assert provision.SOURCE_TABLES == (
+        "service_metrics",
+        "service_deployments",
+        "service_incidents",
+        "support_tickets",
+        "ticket_answer_key",
+    )
+    assert len(provision.PLATFORM_TABLES) == 8

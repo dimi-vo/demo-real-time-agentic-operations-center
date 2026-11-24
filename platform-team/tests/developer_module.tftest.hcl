@@ -108,12 +108,48 @@ run "statements_signed_as_principal_in_the_developer_catalog" {
       contains(keys(output.flink_statements), "service_metrics") &&
       contains(keys(output.flink_statements), "service_deployments") &&
       contains(keys(output.flink_statements), "service_incidents") &&
+      contains(keys(output.flink_statements), "support_tickets") &&
+      contains(keys(output.flink_statements), "ticket_answer_key") &&
       contains(keys(output.flink_statements), "service_error_rate") &&
       contains(keys(output.flink_statements), "service_health") &&
       contains(keys(output.flink_statements), "remediation_decisions") &&
       contains(keys(output.flink_statements), "llm_textgen_model")
     )
-    error_message = "the module must create the three source tables, the three output tables and the model"
+    error_message = "the module must create the five source tables, the three output tables and the model"
+  }
+}
+
+# checkout's tickets and their answer key (D-068): append-only sources with service_incidents'
+# options, no key columns, one bucket.
+run "the_ticket_source_tables_are_created" {
+  command = plan
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in [
+        confluent_flink_statement.create_support_tickets_table,
+        confluent_flink_statement.create_ticket_answer_key_table,
+        ] : (
+        can(regex("'changelog.mode' = 'append'", s.statement)) &&
+        can(regex("'kafka.consumer.isolation-level' = 'read-uncommitted'", s.statement)) &&
+        can(regex("'kafka.cleanup-policy' = 'delete'", s.statement)) &&
+        can(regex("DISTRIBUTED INTO 1 BUCKETS", s.statement)) &&
+        !can(regex("PRIMARY KEY", s.statement))
+      )
+    ])
+    error_message = "support_tickets and ticket_answer_key must be append-only, read-uncommitted, delete-cleanup tables in one bucket with no key"
+  }
+
+  assert {
+    condition = (
+      can(regex("^CREATE TABLE IF NOT EXISTS `support_tickets`", confluent_flink_statement.create_support_tickets_table.statement)) &&
+      can(regex("^CREATE TABLE IF NOT EXISTS `ticket_answer_key`", confluent_flink_statement.create_ticket_answer_key_table.statement))
+    )
+    error_message = "the two ticket source tables must be created"
   }
 }
 

@@ -22,8 +22,15 @@ def test_source_topics_include_service_incidents():
 
 
 def test_source_topics_are_exactly_the_generator_streams():
-    # Mirror of opsgen/kafka_io.py: the three topics the KafkaSink writes to.
-    assert set(SOURCE_TOPICS) == {"service_metrics", "service_deployments", "service_incidents"}
+    # Mirror of opsgen/kafka_io.py: the five topics the KafkaSink writes to, checkout's tickets
+    # and their answer key included (D-068).
+    assert set(SOURCE_TOPICS) == {
+        "service_metrics",
+        "service_deployments",
+        "service_incidents",
+        "support_tickets",
+        "ticket_answer_key",
+    }
 
 
 def test_output_topics_are_exactly_the_three_lab_tables():
@@ -40,7 +47,7 @@ def run_reset(install_fakes):
     return run
 
 
-def test_empties_all_six_topics(run_reset):
+def test_empties_all_eight_topics(run_reset):
     h = run_reset()
     assert sorted(h.admin.emptied) == sorted(ALL_TOPICS)
 

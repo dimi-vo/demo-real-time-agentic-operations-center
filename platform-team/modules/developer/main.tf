@@ -1,6 +1,6 @@
 # =============================================================================
 # One developer's stack: their environment and EnvironmentAdmin binding, a
-# Kafka cluster, a Flink compute pool, and the workshop's six tables (three source
+# Kafka cluster, a Flink compute pool, and the workshop's eight tables (five source
 # tables, three output tables) and model (statements.tf). The cluster and pool names
 # are fixed, because the developer's deploy finds them by name inside the environment.
 #

@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "support_tickets_value",
+  "namespace": "io.confluent.aiops",
+  "doc": "Value schema for the support_tickets topic. Repo copy for --dry-run and the schema-vs-DDL drift test (tests/test_schema_vs_ddl.py); live serialization uses the schema Flink registers from sql/source_support_tickets.sql. One record per checkout support ticket, written when it is created (D-068).",
+  "fields": [
+    {"name": "event_time", "type": ["null", {"type": "long", "logicalType": "local-timestamp-millis"}], "default": null},
+    {"name": "ticket_id", "type": ["null", "string"], "default": null},
+    {"name": "source", "type": ["null", "string"], "default": null},
+    {"name": "service_name", "type": ["null", "string"], "default": null},
+    {"name": "priority", "type": ["null", "string"], "default": null},
+    {"name": "subject", "type": ["null", "string"], "default": null},
+    {"name": "description", "type": ["null", "string"], "default": null}
+  ]
+}

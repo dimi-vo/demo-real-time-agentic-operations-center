@@ -23,6 +23,8 @@ PAIRS = [
     ("sql/source_service_metrics.sql", "schemas/service_metrics.avsc", None),
     ("sql/source_service_deployments.sql", "schemas/service_deployments.avsc", "schemas/service_deployments_key.avsc"),
     ("sql/source_service_incidents.sql", "schemas/service_incidents.avsc", None),
+    ("sql/source_support_tickets.sql", "schemas/support_tickets.avsc", None),  # D-068
+    ("sql/source_ticket_answer_key.sql", "schemas/ticket_answer_key.avsc", None),
 ]
 _PRIMARY_KEY = re.compile(r"PRIMARY KEY \(([^)]*)\)")
 
@@ -103,3 +105,34 @@ def test_ddl_parsed_expected_columns():
     assert deps["service_name"] == "string"
     assert "max_replicas" not in deps  # D-043: no autoscaling ceiling
     assert len(deps) == 10
+
+
+def test_the_ticket_tables_have_the_specs_columns_in_order():
+    # D-068, spec decisions 13 and 14.
+    tickets = _ddl_columns((ROOT / "sql/source_support_tickets.sql").read_text())
+    assert list(tickets.items()) == [
+        ("event_time", "local-timestamp-millis"),
+        ("ticket_id", "string"),
+        ("source", "string"),
+        ("service_name", "string"),
+        ("priority", "string"),
+        ("subject", "string"),
+        ("description", "string"),
+    ]
+    answer_key = _ddl_columns((ROOT / "sql/source_ticket_answer_key.sql").read_text())
+    assert list(answer_key.items()) == [
+        ("event_time", "local-timestamp-millis"),
+        ("ticket_id", "string"),
+        ("true_severity", "string"),
+        ("expected_action", "string"),
+    ]
+
+
+@pytest.mark.parametrize("table", ["support_tickets", "ticket_answer_key"])
+def test_the_ticket_tables_take_service_incidents_options(table):
+    # Same WITH options, bucket and watermark as service_incidents; no key columns.
+    def tail(name):
+        sql = (ROOT / f"sql/source_{name}.sql").read_text()
+        return sql[sql.index("  WATERMARK") :]
+
+    assert tail(table) == tail("service_incidents")

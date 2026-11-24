@@ -1,0 +1,12 @@
+{
+  "type": "record",
+  "name": "ticket_answer_key_value",
+  "namespace": "io.confluent.aiops",
+  "doc": "Value schema for the ticket_answer_key topic. Repo copy for --dry-run and the schema-vs-DDL drift test (tests/test_schema_vs_ddl.py); live serialization uses the schema Flink registers from sql/source_ticket_answer_key.sql. One record per support ticket, on the same tick, with its true severity and expected action (null when LOW). For the wall and evaluate only (D-068).",
+  "fields": [
+    {"name": "event_time", "type": ["null", {"type": "long", "logicalType": "local-timestamp-millis"}], "default": null},
+    {"name": "ticket_id", "type": ["null", "string"], "default": null},
+    {"name": "true_severity", "type": ["null", "string"], "default": null},
+    {"name": "expected_action", "type": ["null", "string"], "default": null}
+  ]
+}

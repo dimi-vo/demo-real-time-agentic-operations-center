@@ -1,7 +1,7 @@
-# The workshop's tables and model, created as the platform team: the three source tables
-# (service_metrics, service_deployments, service_incidents), the three output tables the
-# labs fill with INSERT statements (service_error_rate, service_health,
-# remediation_decisions), and the model.
+# The workshop's tables and model, created as the platform team: the five source tables
+# (service_metrics, service_deployments, service_incidents, and checkout's support_tickets
+# and ticket_answer_key, D-068), the three output tables the labs fill with INSERT
+# statements (service_error_rate, service_health, remediation_decisions), and the model.
 # Each statement is signed with the Global key and runs as that key's owner (principal_id).
 #
 # The DDL is all IF NOT EXISTS, so re-running apply is a no-op for anything already
@@ -147,6 +147,89 @@ resource "confluent_flink_statement" "create_service_incidents_table" {
   depends_on = [confluent_flink_statement.create_service_deployments_table]
 }
 
+resource "confluent_flink_statement" "create_support_tickets_table" {
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE TABLE IF NOT EXISTS `support_tickets` (
+      `event_time` TIMESTAMP(3) COMMENT 'When the ticket was created; also the Kafka record timestamp',
+      `ticket_id` STRING COMMENT 'The ticket id in its source: ZD-48215 for Zendesk, INC0041872 for ServiceNow',
+      `source` STRING COMMENT 'Where the ticket was filed: ZENDESK or SERVICENOW',
+      `service_name` STRING COMMENT 'The service the ticket is about: always checkout',
+      `priority` STRING COMMENT 'P1, P2 or P3, as the reporter set it; lab 5.1 routes the P1 tickets',
+      `subject` STRING COMMENT 'The ticket subject line',
+      `description` STRING COMMENT 'The ticket text: one to three sentences in English',
+      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
+    )
+    DISTRIBUTED INTO 1 BUCKETS
+    WITH (
+      'changelog.mode' = 'append',
+      'connector' = 'confluent',
+      'kafka.cleanup-policy' = 'delete',
+      'kafka.consumer.isolation-level' = 'read-uncommitted',
+      'kafka.message-timestamp-type' = 'create-time',
+      'kafka.retention.time' = '24 h',
+      'scan.startup.mode' = 'earliest-offset',
+      'value.format' = 'avro-registry'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_service_incidents_table]
+}
+
+resource "confluent_flink_statement" "create_ticket_answer_key_table" {
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE TABLE IF NOT EXISTS `ticket_answer_key` (
+      `event_time` TIMESTAMP(3) COMMENT 'When the ticket was created (its support_tickets event_time); also the Kafka record timestamp',
+      `ticket_id` STRING COMMENT 'The ticket this answers for (support_tickets.ticket_id)',
+      `true_severity` STRING COMMENT 'What the simulator meant: HIGH (many customers cannot buy or pay) or LOW; P2 and P3 are always LOW',
+      `expected_action` STRING COMMENT 'For a HIGH ticket, what the responder should pick: ROLLBACK, SCALE_OUT or INVESTIGATE_UPSTREAM; NULL when LOW',
+      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
+    )
+    DISTRIBUTED INTO 1 BUCKETS
+    WITH (
+      'changelog.mode' = 'append',
+      'connector' = 'confluent',
+      'kafka.cleanup-policy' = 'delete',
+      'kafka.consumer.isolation-level' = 'read-uncommitted',
+      'kafka.message-timestamp-type' = 'create-time',
+      'kafka.retention.time' = '24 h',
+      'scan.startup.mode' = 'earliest-offset',
+      'value.format' = 'avro-registry'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_support_tickets_table]
+}
+
 resource "confluent_flink_statement" "create_service_error_rate_table" {
   organization { id = data.confluent_organization.main.id }
   environment { id = confluent_environment.main.id }
@@ -190,7 +273,7 @@ resource "confluent_flink_statement" "create_service_error_rate_table" {
     "sql.current-database" = confluent_kafka_cluster.main.display_name
   }
 
-  depends_on = [confluent_flink_statement.create_service_incidents_table]
+  depends_on = [confluent_flink_statement.create_ticket_answer_key_table]
 }
 
 resource "confluent_flink_statement" "create_service_health_table" {
