@@ -2943,6 +2943,39 @@ bare and in order; no hint, against `support_tickets`' earliest-offset default; 
 docstring names section 5). Nothing else needed the lab: `reset`, `reset-health` and the
 call-rate check name 5.1 since issue 04, and Terraform runs no INSERT.
 
+Issue 06 (lab 5.2, the ticket classifier): `sql/5.2_ticket_classifier.sql` (new; `CREATE
+AGENT ticket_classifier` on `llm_textgen_model`, with no tools and the existing `WITH`
+options; the prompt in the existing order: two labelled lines, `Severity: [HIGH | LOW]` and
+`Reason:`; three examples, each an approved template filled in and shown the way the INSERT
+shows a ticket, then its answer: a HIGH from "Checkout crawling since the campaign email went
+out" (template 6), a plain LOW from "Saved cards not loading for me" (17) and a shouting LOW
+from "URGENT!!! DISCOUNT CODE NOT WORKING" (13), each Reason naming how many customers and
+whether they can still buy or pay, the shouting one saying it is one customer and checkout
+works, whatever the capitals; the role, checkout's service desk triage engineer, told that
+every ticket is a P1 and reporters over-prioritise; rule 1, HIGH when many customers cannot
+complete checkout or pay right now, then rule 2, LOW for everything else, where capitals,
+exclamation marks, "urgent" and the P1 never make a ticket HIGH; strict values; no
+apostrophe), `sql/5.2_insert_ticket_classifier.sql` (new; `p1_tickets` from the latest offset,
+so a restart never re-classifies old tickets with fresh model calls, and no filter, into
+`ticket_triage`: the seven ticket columns, the severity, parsed with 4.3's regex and
+`agent_status` handling, `HIGH` or `LOW` and otherwise `INVALID`, the reason with 4.3's regex,
+and the raw answer; every P1 is written, LOW ones included, so the wall and `evaluate` see each
+verdict, and 5.3 reads the HIGH rows; the input names the id, source, priority, subject and
+description, the last two in `COALESCE(…, 'N/A')` because `CONCAT` returns null when any
+argument is null). `sql/checks/remediation_call_rate.sql` has counted one classifier call per
+P1 ticket since issue 04, so the checks are unchanged. Tests: `tests/test_agent_sql.py` (the
+output lines and the allowed answers are per agent: the classifier's Severity and Reason, with
+no Action or Target line; an example for each allowed answer; the classifier's examples are P1
+templates from `opsgen/ticket_templates.py` filled from their pools, one HIGH, one plain LOW
+and one shouting LOW; each Reason names the customers and whether they can buy or pay; the
+shouting one is one customer while checkout works; the two rules in order; the INSERT joins
+the rules keyed by INSERT file, so the latest offset, the agent called by name, `INVALID` for a
+failed or out-of-set answer and the arity against the DDL of the table it writes, while the
+filter, the identity columns and the null `ticket_id` stay rules of the three 4.3 legs; it
+writes `ticket_triage`'s columns in order, parses the severity as the capacity leg parses an
+action and the reason as every leg does, and its input carries the five ticket columns; no
+`ESCALATE` in any agent file; the module docstring names section 5).
+
 Issue 08 (the design's frame and the Issues panels): `scripts/opswall/state.py` (each service
 in the snapshot gets `issues`, over the incidents that *started* in the last 10 minutes, so an
 incident cut by the chart's left edge is drawn but not counted: `injected`; `detected`, an
