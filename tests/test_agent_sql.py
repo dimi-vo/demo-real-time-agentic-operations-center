@@ -34,9 +34,10 @@ TABLE_FILE = "sink_remediation_decisions.sql"
 
 # Brief section 5.5, cut down in D-034.
 OUTPUT_LINES = ("Action:", "Target:", "Reason:")
+# D-034's eight, then the ticket a ticket_responder decision is about (D-068).
 DECISION_COLUMNS = (
     "window_end", "service_name", "agent_name", "trigger",
-    "action", "target", "reason", "raw_response",
+    "action", "target", "reason", "raw_response", "ticket_id",
 )  # fmt: skip
 
 
@@ -213,7 +214,7 @@ def test_each_release_leg_writes_and_tells_its_own_trigger(name, trigger):
 
 def _parsing(sql: str) -> str:
     """The Action, Target and Reason expressions: from the first CASE to the raw response."""
-    return sql[sql.index("  CASE") : sql.index("  a.`agent_response`\nFROM")]
+    return sql[sql.index("  CASE") : sql.index("  a.`agent_response`,\n")]
 
 
 def test_both_release_legs_parse_the_answer_the_same_way():
@@ -282,6 +283,34 @@ def test_inserts_select_exactly_as_many_values_as_the_table_has_columns(table_sq
         depth += (ch == "(") - (ch == ")")
         items += ch == "," and depth == 0
     assert items == len(DECISION_COLUMNS)
+
+
+@pytest.mark.parametrize("name", INSERTS)
+def test_a_metric_decision_has_no_ticket(name):
+    """D-068: ticket_id is the last column, and only the ticket responder (lab 5.3) sets it.
+    Each 4.3 leg writes a typed null there, after the raw answer."""
+    sql = read(name)
+    assert "  a.`agent_response`,\n  CAST(NULL AS STRING)\nFROM (" in sql
+
+
+def test_ticket_id_is_a_nullable_string_after_the_raw_response(table_sql):
+    line = re.search(r"^\s+`ticket_id` (.+)$", table_sql, re.MULTILINE).group(1)
+    assert line.startswith("STRING COMMENT ") and "NOT NULL" not in line
+    assert "The ticket a ticket_responder decision is about; null for the metric agents" in line
+
+
+def test_the_column_comments_name_every_agent_that_writes_and_the_ticket_trigger(table_sql):
+    """Three agents write the table: the two metric agents (4.3) and the ticket responder (5.3).
+    The classifier writes ticket_triage, never this table."""
+
+    def comment(column):
+        return re.search(rf"^\s+`{column}` .*COMMENT '([^']*)'", table_sql, re.MULTILINE).group(1)
+
+    for agent in ("release_agent", "capacity_agent", "ticket_responder"):
+        assert agent in comment("agent_name"), agent
+    assert "ticket_classifier" not in comment("agent_name")
+    assert "HIGH_SEVERITY_TICKET" in comment("trigger")
+    assert "event_time" in comment("window_end")  # a ticket decision carries the ticket's time there
 
 
 def test_no_select_star_with_extra_expressions():

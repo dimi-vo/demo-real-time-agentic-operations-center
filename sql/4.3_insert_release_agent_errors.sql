@@ -9,7 +9,7 @@
 -- Same shape as 4.3_insert_release_agent.sql, which explains the rest: the filter sits below
 -- the LATERAL join (one agent call per flagged row), the table is read from the latest
 -- offset (starting the statement replays no history through the model), and a failed or
--- out-of-set answer becomes INVALID.
+-- out-of-set answer becomes INVALID, and the last column, ticket_id, is null.
 INSERT INTO `remediation_decisions`
 SELECT
   h.`window_end`,
@@ -25,7 +25,8 @@ SELECT
   END,
   NULLIF(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Target:\*{0,2}\s*([^\n]+)', 1)), 'N/A'),
   TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Reason:\*{0,2}\s*([\s\S]+?)$', 1)),
-  a.`agent_response`
+  a.`agent_response`,
+  CAST(NULL AS STRING)
 FROM (
   SELECT *
   FROM `service_error_rate` /*+ OPTIONS('scan.startup.mode'='latest-offset') */

@@ -41,6 +41,7 @@ DECISIONS_SCHEMA = json.dumps({
         {"name": "target", "type": ["null", "string"], "default": None},
         {"name": "reason", "type": ["null", "string"], "default": None},
         {"name": "raw_response", "type": ["null", "string"], "default": None},
+        {"name": "ticket_id", "type": ["null", "string"], "default": None},  # D-068
     ],
 })  # fmt: skip
 
@@ -312,6 +313,9 @@ class _RecordingSink:
     def emit_event(self, ev):
         self.out.append(("event", ev))
 
+    def emit_tickets(self, tickets):
+        self.out += [("ticket", t) for t in tickets]
+
     def flush(self):
         pass
 
@@ -353,6 +357,117 @@ def test_the_driver_ticks_with_the_drained_decisions_and_emits_the_end_on_that_t
     assert (end["incident_id"], end["ended_at"]) == ("INC0001", tick_ms)
     [event] = [ev for kind, ev in sink.out if kind == "event"]
     assert event.incident.resolved_by == "release_agent ROLLBACK"
+
+
+# --- ticket decisions (D-068) ----------------------------------------------------------
+#
+# The ticket responder (lab 5.3) writes to the same table, with a ticket_id. Its decision is
+# about checkout, which never has an incident, so it resolves nothing; the metric agents
+# write a null ticket_id, and their decisions resolve as before.
+
+START = 1_800_000_000.0
+
+
+def _utc_naive(epoch: float) -> datetime:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None)
+
+
+def _ticket_decision(window_end: datetime) -> dict:
+    """A responder row as lab 5.3 writes it: the ticket's event_time in window_end, no target."""
+    return {
+        "window_end": window_end,
+        "service_name": "checkout",
+        "agent_name": "ticket_responder",
+        "trigger": "HIGH_SEVERITY_TICKET",
+        "action": "INVESTIGATE_UPSTREAM",
+        "target": None,
+        "reason": "Every card payment fails at the payment gateway, so the provider needs looking at.",
+        "raw_response": "Action: INVESTIGATE_UPSTREAM\nReason: Every card payment fails at the payment gateway.",
+        "ticket_id": "ZD-48215",
+    }
+
+
+def _capacity_decision(window_end: datetime) -> dict:
+    """The capacity agent's answer to a payments drop, with the null ticket_id 4.3 writes."""
+    return {
+        "window_end": window_end,
+        "service_name": "payments",
+        "agent_name": "capacity_agent",
+        "trigger": "TRAFFIC_LOW",
+        "action": "INVESTIGATE_UPSTREAM",
+        "target": None,
+        "reason": "Payments traffic fell far below the forecast.",
+        "raw_response": "Action: INVESTIGATE_UPSTREAM\nTarget: N/A\nReason: Payments traffic fell far below forecast.",
+        "ticket_id": None,
+    }
+
+
+def _through_the_feed(registry, records: list[dict]) -> list[Decision]:
+    """What the live feed hands the driver for these records, checking it skipped none."""
+    consumer = _FakeConsumer([_Msg(_value(registry, r)) for r in records])
+    log = io.StringIO()
+    feed = _feed(consumer, registry, log)
+    try:
+        assert consumer.idle.wait(5)
+        drained = feed.drain()
+    finally:
+        feed.stop()
+    assert log.getvalue() == "", log.getvalue()
+    return drained
+
+
+def test_a_ticket_decision_decodes_like_any_other(registry):
+    [decision] = _through_the_feed(registry, [_ticket_decision(_naive("2026-11-24T09:26:04.512Z"))])
+    assert decision == Decision(
+        service_name="checkout",
+        window_end=_epoch("2026-11-24T09:26:04.512Z"),
+        agent_name="ticket_responder",
+        trigger="HIGH_SEVERITY_TICKET",
+        action="INVESTIGATE_UPSTREAM",
+    )
+
+
+def _payments_drop_answered_by(drained: list[Decision]):
+    """A payments drop from the first tick; `drained` is read before tick 17."""
+    from opsgen.driver import tick_once
+    from opsgen.engine import UPSTREAM_DROP, Config
+    from opsgen.simulation import Simulation
+
+    sim = Simulation(1, start=START, config=Config(quiet_period=0))
+    picks = iter([(UPSTREAM_DROP, "payments")])
+    sim.engine._choose_incident = lambda now: next(picks, None)
+    feed = _FakeFeed([[]] * 17 + [drained])
+    sink = _RecordingSink()
+    for k in range(18):
+        tick_once(sim, sink, START + k, decisions=feed)
+    return sim, [r for kind, r in sink.out if kind == "incident"]
+
+
+def test_a_ticket_decision_resolves_nothing(registry):
+    # Same action as the drop's answer, after the drop started: still nothing, since it is
+    # about checkout and its trigger is no incident's.
+    drained = _through_the_feed(registry, [_ticket_decision(_utc_naive(START + 10))])
+    sim, incidents = _payments_drop_answered_by(drained)
+    assert [r["ended_at"] for r in incidents] == [None]  # the start record only
+    assert sim.engine.active["payments"].resolved_by is None
+    assert "checkout" not in sim.engine.active
+
+
+def test_a_metric_decision_with_a_null_ticket_id_resolves_as_before(registry):
+    drained = _through_the_feed(registry, [_capacity_decision(_utc_naive(START + 10))])
+    sim, incidents = _payments_drop_answered_by(drained)
+    assert [r["ended_at"] for r in incidents] == [None, 1_800_000_017_000]  # ended on the tick that read it
+    assert "payments" not in sim.engine.active
+
+
+def test_a_ticket_decision_among_metric_ones_changes_nothing(registry):
+    drained = _through_the_feed(
+        registry,
+        [_ticket_decision(_utc_naive(START + 10)), _capacity_decision(_utc_naive(START + 10))],
+    )
+    assert [d.agent_name for d in drained] == ["ticket_responder", "capacity_agent"]
+    _, incidents = _payments_drop_answered_by(drained)
+    assert incidents[-1]["ended_at"] == 1_800_000_017_000
 
 
 # --- the command line ----------------------------------------------------------------

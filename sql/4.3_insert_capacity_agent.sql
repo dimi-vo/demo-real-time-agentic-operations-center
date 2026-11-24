@@ -5,7 +5,8 @@
 --
 -- The agent answers INVESTIGATE_UPSTREAM for a drop and OBSERVE for more traffic than
 -- forecast (D-068), so it gets the count, the forecast and the band, and nothing to compute.
--- Its Target line is always N/A, which NULLIF turns into a null target.
+-- Its Target line is always N/A, which NULLIF turns into a null target. The last column,
+-- ticket_id, is null, as in the release legs.
 INSERT INTO `remediation_decisions`
 SELECT
   h.`window_end`,
@@ -21,7 +22,8 @@ SELECT
   END,
   NULLIF(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Target:\*{0,2}\s*([^\n]+)', 1)), 'N/A'),
   TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Reason:\*{0,2}\s*([\s\S]+?)$', 1)),
-  a.`agent_response`
+  a.`agent_response`,
+  CAST(NULL AS STRING)
 FROM (
   SELECT *
   FROM `service_health` /*+ OPTIONS('scan.startup.mode'='latest-offset') */

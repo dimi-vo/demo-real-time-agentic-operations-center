@@ -12,7 +12,8 @@
 -- An agent that failed (status other than SUCCESS) or answered outside its allowed set
 -- yields action = 'INVALID' (D-007); raw_response always keeps the full answer.
 -- REGEXP_EXTRACT tolerates optional markdown bold (**Action:**) that models sometimes
--- emit despite the instruction.
+-- emit despite the instruction. The last column, ticket_id, is null: only the ticket
+-- responder (lab 5.3) writes a decision about a ticket (D-068).
 INSERT INTO `remediation_decisions`
 SELECT
   h.`window_end`,
@@ -28,7 +29,8 @@ SELECT
   END,
   NULLIF(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Target:\*{0,2}\s*([^\n]+)', 1)), 'N/A'),
   TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Reason:\*{0,2}\s*([\s\S]+?)$', 1)),
-  a.`agent_response`
+  a.`agent_response`,
+  CAST(NULL AS STRING)
 FROM (
   SELECT *
   FROM `service_health` /*+ OPTIONS('scan.startup.mode'='latest-offset') */

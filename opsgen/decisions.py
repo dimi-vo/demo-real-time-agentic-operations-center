@@ -7,6 +7,12 @@ record is decoded through Schema Registry into an `opsgen.engine.Decision` and q
 driver drains the queue before every tick and hands the decisions to `Simulation.tick`,
 where a correct answer resolves its incident.
 
+The ticket responder (lab 5.3, D-068) writes to the same table, with `ticket_id` set: agent
+`ticket_responder`, trigger `HIGH_SEVERITY_TICKET`, about checkout, the ticket's
+`event_time` in `window_end`. Every field in `_FIELDS` is set on it, so it decodes like any
+other decision and simply matches nothing: checkout never has an incident. The engine never
+reads `ticket_id`, and the metric agents write it as null.
+
 Trouble never stops the generator: a missing topic, an unreachable broker or a record that
 won't decode is warned once per kind on stderr, and the feed keeps trying. Meanwhile
 incidents expire at their cap, as they did before. `--dry-run` and `--simulate` never build
@@ -29,6 +35,7 @@ from opsgen.engine import Decision
 from scripts.common.topic_reader import epoch_seconds
 
 DECISIONS_TOPIC = "remediation_decisions"
+# What the engine needs; set on every decision, a ticket decision's included (D-068).
 _FIELDS = ("service_name", "window_end", "agent_name", "trigger", "action")
 POLL_TIMEOUT_SECONDS = 0.5
 RETRY_SECONDS = 3.0

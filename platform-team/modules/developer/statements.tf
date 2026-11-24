@@ -342,14 +342,15 @@ resource "confluent_flink_statement" "create_remediation_decisions_table" {
 
   statement = <<-EOT
     CREATE TABLE IF NOT EXISTS `remediation_decisions` (
-      `window_end` TIMESTAMP(3) NOT NULL COMMENT 'End of the window (service_health or service_error_rate) the decision was made on',
+      `window_end` TIMESTAMP(3) NOT NULL COMMENT 'End of the window (service_health or service_error_rate) the decision was made on, or the ticket event_time for a ticket decision',
       `service_name` STRING NOT NULL,
-      `agent_name` STRING NOT NULL COMMENT 'release_agent or capacity_agent',
-      `trigger` STRING NOT NULL COMMENT 'LATENCY_HIGH, ERROR_RATE_HIGH, TRAFFIC_HIGH or TRAFFIC_LOW',
-      `action` STRING NOT NULL COMMENT 'ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM, OBSERVE, or INVALID',
-      `target` STRING COMMENT 'Version for ROLLBACK, replica count for SCALE_OUT, otherwise null',
+      `agent_name` STRING NOT NULL COMMENT 'release_agent, capacity_agent or ticket_responder',
+      `trigger` STRING NOT NULL COMMENT 'LATENCY_HIGH, ERROR_RATE_HIGH, TRAFFIC_HIGH, TRAFFIC_LOW or HIGH_SEVERITY_TICKET',
+      `action` STRING NOT NULL COMMENT 'ROLLBACK, SCALE_OUT (from ticket_responder only), INVESTIGATE_UPSTREAM, OBSERVE, or INVALID',
+      `target` STRING COMMENT 'Version for ROLLBACK from the release agent, otherwise null',
       `reason` STRING COMMENT 'The agent explanation, one or two sentences',
-      `raw_response` STRING COMMENT 'The full agent answer, kept for debugging when parsing returns null'
+      `raw_response` STRING COMMENT 'The full agent answer, kept for debugging when parsing returns null',
+      `ticket_id` STRING COMMENT 'The ticket a ticket_responder decision is about; null for the metric agents'
     )
     DISTRIBUTED INTO 1 BUCKETS
     WITH (
