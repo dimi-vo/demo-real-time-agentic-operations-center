@@ -2712,7 +2712,8 @@ the **verdict** is the classifier's (`INVALID` when its answer can't be parsed).
   sources, ticket list and agent lanes don't fit today's cards of charts, and building the
   row in today's frame would mean building it twice.
 **Measured.** ARIMA on payments alone, offline (`.scratch/checkout-tickets/research/
-payments_only.py`, output in `payments_only.out` next to it): the real generator through the
+payments_only.py`, outputs in `payments_only.out` and, re-run on the fully merged tree,
+`payments_only.after-all-issues.out` next to it): the real generator through the
 AR(1) replica at the labs' settings (12/360/99.95), scored with `evaluate`'s code
 (`close_loop.score_run`), 300 seeds × 3 h per run, web-gateway's deploy clock on, payments'
 rows and incidents scored:
@@ -2720,13 +2721,17 @@ rows and incidents scored:
 | Run | Inc/h (steady) | Mix | Bad deploys | Drops | Window 1 | Echoes, other FPs | Fresh /svc |
 |---|---|---|---|---|---|---|---|
 | D-067: surges on checkout, drops on payments, both scored | 37.3 | BD/SURGE/DROP 44/28/28 | 100 % | 100 % | 100 % | 0, 0 | 0.04 |
-| **D-068: payments alone** | 18.7 (19.0) | BD/DROP 45/55 | 100 % (7406/7406) | 100 % (9094/9094) | 100 % | 0, 0 | 0.05 |
+| **D-068: payments alone** | 18.7 (19.0) | BD/DROP 45/55 | 100 % (7406/7406) | 100 % (9094/9094) | 100 % | 0, 0 | 0.06 |
 
 Steady is hours 2 and 3 of each run. The mix by count is 45/55 although the weights are 2:1,
-because the bad-deploy rest is the longer one. The fresh-start noise is D-065's row C (0.05),
-and an incident costs 1.02 agent calls. Every incident fixed at T+11 (an answer about 1 s
-after detection) gives the same recall and no echoes; 42 opposite traffic flags then land in
-the window that holds the return to normal, which `evaluate` counts as neither.
+because the bad-deploy rest is the longer one. An incident costs 1.02 agent calls. Every
+incident fixed at T+11 (an answer about 1 s after detection) gives the same recall and no
+echoes; 47 opposite traffic flags then land in the window that holds the return to normal,
+which `evaluate` counts as neither, and the fresh-start noise is 0.08 per service. The row is
+the re-run on the fully merged tree (issue 01's last comment). The first run, before issue 02,
+gave 0.05 per service with or without the fix (D-065's row C) and 42 opposite flags;
+everything else is the same. They moved because issue 02 took checkout out of the metric
+services, so for a given seed payments' traffic draws change (from the same distribution).
 **Open.**
 - The web-gateway and payments rows of the target design (the releases list, the payments
   cluster, aggregated records) come with the full redesign. The design's payments row shows
@@ -2742,6 +2747,12 @@ the window that holds the return to normal, which `evaluate` counts as neither.
 - Whether `ticket_triage` records get their Kafka timestamp when written, as decisions do
   (D-066). Otherwise the Classifier bars have no length; the fallback is a `classified_at`
   column set by `CURRENT_TIMESTAMP`, like `detected_at`.
+- Whether ticket decisions get their Kafka timestamp when written too (found in the code
+  review). Lab 5.3 reads `ticket_triage`, which has a watermark on `event_time`. If Flink
+  stamps each decision with its input's rowtime, a ticket decision carries the ticket's
+  `event_time` as its Kafka timestamp. Then the Responder bars have no length, and neither
+  have the wall's time to remediate and `evaluate`'s verdict → action median. The
+  `classified_at` fallback doesn't cover this hop.
 - Both agents against the answer key on Confluent Cloud (≥ 95 %).
 - ARIMA on payments alone, live, against the offline re-check above. The capacity agent
   answers `OBSERVE` to every `TRAFFIC_HIGH`.
@@ -3166,6 +3177,72 @@ saying surges are gone; and "two agents" for the two ticket agents on the wall o
 agents in `remediation_routing.sql`. The repo has no markdown link check. A check of the
 relative links and anchors in its tracked markdown finds only `PLAN.md` (gitignored) and the
 `docs/tracks/PRE-PROVISIONED.md` links, which stay until the walkthrough is written.
+
+Code review (of the merged `checkout-tickets` branch, 2026-11-24): `scripts/evaluation/tickets.py`
+(a ticket never classified has no verdict, `TicketResult.verdict` None, so a verdict is only HIGH,
+LOW or INVALID and `NEVER` is gone; the counts are unchanged, and `--details` lists such a ticket
+as "never classified" rather than "got NEVER"; `TicketTables` moved here from
+`scripts/evaluate.py`, and `score_tickets` takes it, the ticket decisions and the range; `INVALID`
+comes from `decisions.py`, and `HIGH` and `LOW` stay `evaluate`'s own, since nothing in
+`scripts/evaluation/` imports `opsgen`), `scripts/evaluation/decisions.py` (`score_decisions` is
+the one place that leaves the ticket decisions out, and its report counts the metric decisions
+read, `read`, which `evaluate` prints and checks instead of filtering a second time),
+`scripts/evaluate.py` (the acceptance lines' colouring helper is `status_text`, not `verdict`).
+ops-sim: `opsgen/simulation.py` (`tick` returns a `Tick` NamedTuple, `metrics`, `deployments`,
+`events` and `tickets`, and the tests that took one field by index or unpacked one name it),
+`opsgen/tickets.py` (each source is one row of `SOURCES`, a `Source` with its code, name, first
+number and id format, in place of the constants, `SOURCE_NAMES`, `FIRST_NUMBERS` and `ticket_id`'s
+if/else; the draws and ids are unchanged, `ops-sim --dry-run --simulate 15 --seed 1` prints issue
+03's 63 tickets), `opsgen/sinks.py`. `scripts/reset.py`: `--keep-source` keeps the generator state
+file, the whole of it. Everything in the file numbers past what the kept source topics hold, the
+incident counter (D-046), each service's highest version (D-067) and the two ticket counters, so
+deleting it, or any part of it, would let the next ops-sim reuse incident ids, versions and ticket
+ids next to the old ones; a plain `reset` empties those topics and still deletes the file
+(docstring, help, and the line it prints). `scripts/preprovisioned/provision.py` takes
+`SOURCE_TABLES` and `OUTPUT_TABLES` from `scripts/common/topics.py` (it runs under `uv run deploy`
+and already imports `scripts.common`). The wall: `scripts/opswall/state.py` builds a ticket row
+with its own function, `_ticket_row`, and a metric row with `_metric_row`, each with only what the
+page draws for it, so checkout's row no longer carries `charts`, `groundTruth`, `blocks`,
+`metrics`, `deploys` or the version fields (issue 02's `charts: []` with them). The snapshot
+carries what the page worked out or declared again: each lane's name and state, Working or Idle,
+and `agentsText`, "Both agents idle" or "1 of 2 agents working" (the page counted the open runs'
+lanes and wrote "of 2"); `sources` and each listed ticket's `sourceName`, from opsgen's table; the
+Issues medians in words, `medianTimeToDetectText` and `medianTimeToRemediateText`, by `_dur_words`,
+which now rounds a half up, as the page's `issueDur` did; and `actionWords`, one table for the
+responder's bars and the metric rows' tooltips, which now say "roll back" as the bars do (the
+page's own table said "Rollback"). The wall takes `HIGH` and `LOW` from `opsgen.tickets`, as it
+takes the services from `opsgen.services`, and has one `INVALID`. Time to remediate is spec
+decision 29's, the first block's time to detect plus its time to answer: it took the earliest
+answer of any block, so a later block answered sooner shortened it. While the first block waits
+unanswered (until it is answered, or removed 30 s after its last detection), that sum is undefined,
+so it runs to the first answer, as before. `static/opswall.js` draws all that, and its `issueDur`,
+`ACTION` table, source and lane names and lane-state logic are gone; `static/opswall.css` colours
+checkout's status text with its dot, amber for "Agent resolving P1" and green for "Healthy" (spec
+decision 35), and a metric row's "Healthy" stays grey (a `ticket-row` class on the row). The labs:
+`sql/5.3_insert_ticket_responder.sql` labels the classifier's reason `Classifier said:` instead of
+issue 07's `Triage Reason:`, which holds `Reason:`, so an answer that echoed its input would have
+had the classifier's reason stored as its own; the prompt's examples and role say the same
+(`sql/5.3_ticket_responder.sql`), and the INSERT's header says why. `sql/5.1_p1_tickets.sql`,
+`2.2_service_error_rate.sql` and `2.5_service_health.sql` say "then run" where they said "then
+Run"; `statements.tf` copies none of them, so Terraform is unchanged. This entry: the Measured
+fresh-start figure from the re-run on the merged tree, and the ticket decisions' Kafka timestamp
+under Pending (also in the spec's Pending and issue 12's checks). Tests:
+`tests/test_evaluate_tickets.py` (never classified is a None verdict, and `--details` names it in
+the report's words), `tests/test_reset.py` (`--keep-source` keeps the state file byte for byte),
+`tests/test_opswall_state.py` (remediation is the first block's detect plus answer when a later
+block is answered sooner, and start → the first answer while the first block waits; a ticket row's
+fields and nothing of a metric row's; the lanes and `agentsText`; the sources and `sourceName`; the
+medians in words, "1m 05s" and a half rounding up; `actionWords`; the orphan-incident trim test on
+web-gateway), `tests/test_opswall_server.py` and `tests/test_opswall_ingest.py` (the new fields),
+`tests/test_agent_sql.py` (no INSERT's input label holds a label its answer is parsed by; the
+responder's examples and input use `Classifier said:`), and the opsgen tests on `Tick`'s field
+names. Offline render with issue 09's harness at 1440 and 820 px (`review-fix-wall-*.png` next to
+`issue09-wall-*.png`): at issue 09's moment (seed 4, found after 186 s), the same rows, lists,
+bars, labels and Issues numbers as `issue09-wall-*.png`, checkout's "Agent resolving P1" now amber,
+web-gateway's "Rolled back" green and payments' "Healthy" grey as before; the chips, "1 of 2 agents
+working", the sources' names and a bar's tooltip come from the snapshot, and hover and keyboard
+focus work. `uv run evaluate` on `research/issue09-dumps/`: classifier 62/65, responder 29/29, 2
+unexpected answers, no leaks, as before.
 
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.
