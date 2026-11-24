@@ -11,7 +11,8 @@ Pure functions over plain data, so they're unit-tested offline. The definitions
   both tables is one row with both verdicts (`merge_rows`). These names are the incidents'
   `expected_trigger` values, except `TRAFFIC_HIGH`: no incident expects it since surges were
   retired (D-068), so it is always a false alarm, such as the echo after a drop. It is still
-  scored like any signal. `WARMING_UP` rows carry no signal.
+  scored like any signal. `WARMING_UP` rows carry no signal. The ticket responder's trigger,
+  `HIGH_SEVERITY_TICKET` (D-068), is no detection signal: tickets are scored in `tickets.py`.
 - **Incident span.** The 10-second windows of the incident's service that overlap
   its degradation, `[started_at, ended_at)`. The **onset window** is the window that
   contains `started_at`; it is window 1 of the span, the next one window 2, and so on.

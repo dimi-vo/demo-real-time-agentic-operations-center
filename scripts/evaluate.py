@@ -19,15 +19,38 @@ reads that and prints:
 - per incident: the recommended action against the expected one, with the target;
 - routing and coverage: mutual exclusivity, and agent calls against anomalous rows.
 
+Ticket half (D-068): if `support_tickets` and `ticket_answer_key` have rows (ops-sim writes
+both), it also reads `p1_tickets` (lab 5.1), `ticket_triage` (lab 5.2) and the ticket decisions,
+the `remediation_decisions` rows with a `ticket_id` (lab 5.3), and prints a "Tickets" section
+for the P1 tickets created in the scored range:
+
+- classification: true severity by verdict, with INVALID and never-classified counts;
+- response: for really-HIGH tickets classified HIGH, answered or not and the expected action or
+  not; answers to really-LOW tickets (unexpected) and to tickets with no HIGH verdict (routing
+  errors);
+- filter leaks (P2 or P3 tickets in `p1_tickets` or `ticket_triage`), and the median ticket →
+  verdict and verdict → action times, from the records' Kafka timestamps;
+- acceptance: the classifier right on at least 95 % of the P1 tickets, the responder on at
+  least 95 % of its answers, no leaks; NO_DATA with no P1 ticket in range.
+
+Ticket decisions never reach the metric decision half. A missing or empty ticket table gets a
+hint naming what fills it. Each half runs without the other's tables: with no metric rows, the
+tickets set the scored range by the same rule (the last `--minutes`, ending 100 s before the
+newest).
+
 Offline: `--dump FILE` saves the rows it read as JSONL; `--rows FILE` evaluates such a
 file without connecting (so a run can be shared and re-scored without credentials).
 `--dump-error-rate` / `--error-rate-rows` do the same for `service_error_rate`,
-`--dump-decisions` / `--decision-rows` for `remediation_decisions`, and
-`--dump-incidents` / `--incidents` for `service_incidents`. `--rows` needs
-`--incidents`: offline, there is no other ground truth. Either detection table may be
-missing (the other is scored alone); with neither, there is nothing to score.
-Definitions are in `scripts/evaluation/detection.py` (D-021) and
-`scripts/evaluation/decisions.py` (D-032).
+`--dump-decisions` / `--decision-rows` for `remediation_decisions`,
+`--dump-incidents` / `--incidents` for `service_incidents`, and `--dump-tickets` /
+`--ticket-rows`, `--dump-answer-key` / `--answer-key-rows`, `--dump-p1-tickets` /
+`--p1-ticket-rows` and `--dump-triage` / `--triage-rows` for the four ticket tables (each
+also has a `--…-topic` override). `--rows` or `--ticket-rows` means offline: nothing is read
+over Kafka. Offline, metric rows need `--incidents`: there is no other ground truth. Either
+detection table may be missing (the other is scored alone); with neither and no tickets, there
+is nothing to score. Records read over Kafka carry their Kafka timestamp (`kafka_timestamp`),
+and a dump keeps it. Definitions are in `scripts/evaluation/detection.py` (D-021),
+`scripts/evaluation/decisions.py` (D-032) and `scripts/evaluation/tickets.py` (D-068).
 """
 
 from __future__ import annotations
@@ -35,6 +58,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,11 +90,35 @@ from scripts.evaluation.detection import (
     rescale_confidence,
     score,
 )
+from scripts.evaluation.tickets import (
+    CLASSIFIER_TARGET,
+    CLASSIFY_GRACE_SECONDS,
+    FAIL,
+    HIGH,
+    INVALID,
+    LOW,
+    NEVER,
+    P1_TICKETS,
+    RESPONDER_TARGET,
+    TICKET_TRIAGE,
+    AnswerKey,
+    Ticket,
+    TicketReport,
+    Triage,
+    score_tickets,
+)
+from scripts.evaluation.tickets import default_range as ticket_default_range
 
 SERVICE_HEALTH = "service_health"
 SERVICE_ERROR_RATE = "service_error_rate"
 REMEDIATION_DECISIONS = "remediation_decisions"
 SERVICE_INCIDENTS = "service_incidents"
+SUPPORT_TICKETS = "support_tickets"
+TICKET_ANSWER_KEY = "ticket_answer_key"
+OPS_SIM = "Run ops-sim"
+FILL_P1_TICKETS = "Run the INSERT in sql/5.1_p1_tickets.sql"
+FILL_TICKET_TRIAGE = "Run the INSERT in sql/5.2_insert_ticket_classifier.sql"
+FILL_TICKET_DECISIONS = "Run the INSERT in sql/5.3_insert_ticket_responder.sql"
 FP_TARGET_PER_HOUR = 1.0
 FRESH_START_TARGET = 1
 
@@ -113,7 +161,20 @@ def _parse_args(argv):
     p.add_argument("--decision-rows", help="score this JSONL dump of decisions instead of reading Kafka")
     p.add_argument("--dump-decisions", help="also write the decisions read to this JSONL file")
     p.add_argument("--no-decisions", action="store_true", help="skip the decision half")
-    p.add_argument("--details", action="store_true", help="list every false positive and fresh-start anomaly")
+    for name, topic, rows, dump in (
+        ("tickets", SUPPORT_TICKETS, "--ticket-rows", "--dump-tickets"),
+        ("answer-key", TICKET_ANSWER_KEY, "--answer-key-rows", "--dump-answer-key"),
+        ("p1-tickets", P1_TICKETS, "--p1-ticket-rows", "--dump-p1-tickets"),
+        ("triage", TICKET_TRIAGE, "--triage-rows", "--dump-triage"),
+    ):
+        p.add_argument(f"--{name}-topic", default=topic, help=f"ticket table (default: {topic})")
+        p.add_argument(rows, help=f"score this JSONL dump of {topic} instead of reading Kafka")
+        p.add_argument(dump, help=f"also write the {topic} records read to this JSONL file")
+    p.add_argument(
+        "--details",
+        action="store_true",
+        help="list every false positive and fresh-start anomaly, and every wrong verdict and wrong ticket action",
+    )
     p.add_argument(
         "--rescale",
         metavar="FROM:TO",
@@ -142,7 +203,7 @@ def _read_table(topic: str, creds, root: Path) -> list[dict] | None:
     _, card = load_card(creds, root)
     with console.status(f"Reading {topic} …"):
         try:
-            records = read_topic(card, topic)
+            records = read_topic(card, topic, timestamps=True)  # the ticket timings need them (D-068)
         except TopicNotFound:
             return None
     return [jsonable(r) for r in records]
@@ -155,10 +216,18 @@ def _missing(topic: str, insert: str) -> None:
     )
 
 
+def _offline(args) -> bool:
+    """A health dump or a ticket dump: no table is read over Kafka, so no credentials are in play."""
+    return bool(args.rows or args.ticket_rows)
+
+
 def _load_rows(args, root: Path) -> list[dict]:
-    """The `service_health` records; none when the table is missing (warned)."""
+    """The `service_health` records; none when the table is missing (warned), or offline
+    without --rows."""
     if args.rows:
         return _read_jsonl(args.rows)
+    if _offline(args):
+        return []
     records = _read_table(args.topic, args.creds, root)
     if records is None:
         _missing(args.topic, "sql/2.5_service_health.sql")
@@ -173,7 +242,7 @@ def _load_error_rate_rows(args, root: Path) -> list[dict]:
     offline without --error-rate-rows."""
     if args.error_rate_rows:
         return _read_jsonl(args.error_rate_rows)
-    if args.rows:  # offline health dump, no credentials in play
+    if _offline(args):
         return []
     records = _read_table(args.error_rate_topic, args.creds, root)
     if records is None:
@@ -188,9 +257,9 @@ def _load_incidents(args, root: Path) -> tuple[list[Incident], str]:
     """The ended incidents to score against, and where they came from (D-046)."""
     if args.incidents:
         return incidents_from_records(_read_jsonl(args.incidents)), args.incidents
-    if args.rows:  # offline health dump, no credentials in play
+    if _offline(args):
         raise SystemExit(
-            "--rows scores offline, so it needs --incidents FILE as well: a dump of "
+            "Scoring a dump is offline, so it needs --incidents FILE as well: a dump of "
             f"`{SERVICE_INCIDENTS}` made with --dump-incidents."
         )
     records = _read_table(SERVICE_INCIDENTS, args.creds, root)
@@ -211,7 +280,7 @@ def _load_decisions(args, root: Path) -> list[dict] | None:
         return None
     if args.decision_rows:
         return _read_jsonl(args.decision_rows) or None
-    if args.rows:  # offline health dump, no credentials in play
+    if _offline(args):
         return None
     records = _read_table(args.decisions_topic, args.creds, root)
     if records and args.dump_decisions:
@@ -219,45 +288,131 @@ def _load_decisions(args, root: Path) -> list[dict] | None:
     return records or None
 
 
+@dataclass
+class TicketTables:
+    """The four ticket tables (D-068), parsed, and where the tickets came from."""
+
+    source: str
+    tickets: list[Ticket]
+    answer_keys: list[AnswerKey]
+    p1_rows: list[Ticket]
+    triage: list[Triage]
+
+
+def _load_ticket_table(args, root: Path, topic: str, rows: str | None, dump: str | None) -> list[dict] | None:
+    """One ticket table's records; None when the topic doesn't exist, and [] offline without
+    its dump."""
+    if rows:
+        return _read_jsonl(rows)
+    if _offline(args):
+        return []
+    records = _read_table(topic, args.creds, root)
+    if records is not None and dump:
+        _dump(records, dump)
+    return records
+
+
+def _has_rows(topic: str, records: list[dict] | None, fill: str) -> bool:
+    """Whether a ticket table has rows; if not, say what fills it."""
+    if records is None:
+        console.print(
+            f"[yellow]`{topic}` doesn't exist yet. Ask your platform team to re-apply, "
+            f"then {fill[0].lower()}{fill[1:]}.[/yellow]"
+        )
+    elif not records:
+        console.print(f"[yellow]`{topic}` has no rows yet. {fill} to fill it.[/yellow]")
+    return bool(records)
+
+
+def _load_tickets(args, root: Path) -> TicketTables | None:
+    """The ticket tables, or None when the ticket half can't run: it needs the tickets and
+    their answer key, as the detection half needs `service_incidents`. `p1_tickets` and
+    `ticket_triage` may be missing or empty (each warned): the tickets are then unrouted or
+    never classified."""
+    if _offline(args) and not args.ticket_rows:
+        console.print("[dim]No --ticket-rows dump of support_tickets: the ticket half is skipped.[/dim]")
+        return None
+    tickets = _load_ticket_table(args, root, args.tickets_topic, args.ticket_rows, args.dump_tickets)
+    if not _has_rows(args.tickets_topic, tickets, OPS_SIM):
+        return None
+    keys = _load_ticket_table(args, root, args.answer_key_topic, args.answer_key_rows, args.dump_answer_key)
+    if not _has_rows(args.answer_key_topic, keys, OPS_SIM):
+        return None
+    p1 = _load_ticket_table(args, root, args.p1_tickets_topic, args.p1_ticket_rows, args.dump_p1_tickets)
+    _has_rows(args.p1_tickets_topic, p1, FILL_P1_TICKETS)
+    triage = _load_ticket_table(args, root, args.triage_topic, args.triage_rows, args.dump_triage)
+    _has_rows(args.triage_topic, triage, FILL_TICKET_TRIAGE)
+    return TicketTables(
+        source=args.ticket_rows or args.tickets_topic,
+        tickets=[Ticket.from_record(r) for r in tickets],
+        answer_keys=[AnswerKey.from_record(r) for r in keys],
+        p1_rows=[Ticket.from_record(r) for r in p1 or []],
+        triage=[Triage.from_record(r) for r in triage or []],
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     root = get_project_root()
     records, error_records = _load_rows(args, root), _load_error_rate_rows(args, root)
-    if not records and not error_records:
-        raise SystemExit(f"Neither `{args.topic}` nor `{args.error_rate_topic}` has rows yet.")
+    tickets = _load_tickets(args, root)
+    if not records and not error_records and tickets is None:
+        raise SystemExit(
+            f"Neither `{args.topic}`, `{args.error_rate_topic}` nor `{args.tickets_topic}` has rows yet."
+        )
     rows = merge_rows([HealthRow.from_record(r) for r in records], [HealthRow.from_record(r) for r in error_records])
-    if args.rescale:
+    if args.rescale and rows:
         base, target = (float(x) for x in args.rescale.split(":"))
         rows = rescale_confidence(rows, base, target)
         console.print(f"[yellow]Statuses re-derived offline for confidence {target} (ran at {base}).[/yellow]")
 
-    range_from, range_to = default_range(rows, args.minutes)
+    # One span for both halves: the metric rows set it, or the tickets in a run without them.
+    range_from, range_to = default_range(rows, args.minutes) if rows else ticket_default_range(
+        tickets.tickets, args.minutes
+    )  # fmt: skip
     if args.range_to:
         range_to = epoch_seconds(args.range_to)
         range_from = range_to - args.minutes * 60.0
     if args.range_from:
         range_from = epoch_seconds(args.range_from)
 
-    incidents, gt_source = _load_incidents(args, root)
-    report = score(rows, incidents, range_from, range_to)
-    sources = [s for s, recs in ((args.rows or args.topic, records),
-                                 (args.error_rate_rows or args.error_rate_topic, error_records)) if recs]  # fmt: skip
-    _render(report, " + ".join(sources), gt_source, len(incidents), args.details)
+    if rows:
+        incidents, gt_source = _load_incidents(args, root)
+        report = score(rows, incidents, range_from, range_to)
+        tables = ((args.rows or args.topic, records), (args.error_rate_rows or args.error_rate_topic, error_records))
+        sources = [s for s, recs in tables if recs]
+        _render(report, " + ".join(sources), gt_source, len(incidents), args.details)
+    else:
+        console.print("\n[dim]No metric rows: the detection and decision halves are skipped.[/dim]")
 
-    records = _load_decisions(args, root)
-    if records is None:
-        console.print(
-            f"\n[dim]No decisions in `{args.decisions_topic}` yet — the decision half is skipped. "
-            f"Run the agent INSERTs (sql/4.3_insert_*.sql) to fill it.[/dim]"
+    decisions = [DecisionRow.from_record(r) for r in _load_decisions(args, root) or []]
+    if rows:
+        # Ticket decisions go to the ticket half; the metric half never sees them (D-068).
+        metric = [d for d in decisions if not d.is_ticket]
+        if metric:
+            _render_decisions(
+                score_decisions(metric, rows, incidents, range_from, range_to),
+                args.decision_rows or args.decisions_topic,
+                len(metric),
+                args.details,
+            )
+        else:
+            console.print(
+                f"\n[dim]No decisions from the metric agents in `{args.decisions_topic}` yet — the decision "
+                f"half is skipped. Run the agent INSERTs (sql/4.3_insert_*.sql) to fill it.[/dim]"
+            )
+
+    if tickets is not None:
+        answers = [d for d in decisions if d.is_ticket]
+        if not answers:
+            console.print(
+                f"\n[yellow]No ticket decisions in `{args.decisions_topic}` yet. "
+                f"{FILL_TICKET_DECISIONS} to fill it.[/yellow]"
+            )
+        rep = score_tickets(
+            tickets.tickets, tickets.answer_keys, tickets.p1_rows, tickets.triage, answers, range_from, range_to
         )
-        return
-    decisions = [DecisionRow.from_record(r) for r in records]
-    _render_decisions(
-        score_decisions(decisions, rows, incidents, range_from, range_to),
-        args.decision_rows or args.decisions_topic,
-        len(decisions),
-        args.details,
-    )
+        _render_tickets(rep, tickets.source, len(tickets.tickets), args.details)
 
 
 def _render(rep: DetectionReport, source: str, gt_source: str, n_incidents: int, details: bool) -> None:
@@ -485,6 +640,112 @@ def _render_decisions(rep: DecisionReport, source: str, total_read: int, details
     )
     console.print(f"  Action matches ground truth: {sum(i.matched for i in scored)}/{len(scored)} incidents")
     console.print(f"  Routing mutually exclusive: {_ok(not rep.both_agents)}")
+
+
+def _render_tickets(rep: TicketReport, source: str, total_read: int, details: bool) -> None:
+    console.print(
+        f"\n[bold]Tickets[/bold] ({source}): {len(rep.results)} P1 tickets created in the scored range "
+        f"{_dt(rep.range_from)} → {_t(rep.range_to)} ({total_read} tickets read in total)\n"
+    )
+    if not rep.results:
+        console.print("[yellow]No P1 tickets in the scored range: the ticket half reports NO_DATA.[/yellow]")
+    else:
+        t = Table(title="Classification: true severity by verdict", title_justify="left")
+        for col in ("true severity", HIGH, LOW, INVALID, "never classified", "right"):
+            t.add_column(col, justify="right" if col != "true severity" else "left")
+        m = rep.matrix
+        for sev in (HIGH, LOW):
+            n = sum(v for (truth, _), v in m.items() if truth == sev)
+            t.add_row(
+                sev, *(str(m[(sev, v)]) for v in (HIGH, LOW)), _flag(m[(sev, INVALID)]), _flag(m[(sev, NEVER)]),
+                f"{m[(sev, sev)]}/{n}",
+            )  # fmt: skip
+        console.print(t)
+        console.print(
+            f"[dim]verdict = ticket_triage's severity. never classified = no ticket_triage record by the end of "
+            f"the range plus {CLASSIFY_GRACE_SECONDS:.0f} s, usually because the 5.2 INSERT isn't running. "
+            f"INVALID and never classified count as wrong.[/dim]\n"
+        )
+
+        waiting = [r for r in rep.to_answer if r.decision is None]
+        console.print("[bold]Response[/bold] (really HIGH tickets classified HIGH)")
+        console.print(
+            f"  {len(rep.to_answer)} to answer: {len(rep.answered)} answered, {rep.right_actions} with the "
+            f"expected action, {_flag(rep.invalid_actions)} INVALID"
+        )
+        if waiting:
+            console.print(f"  [dim]Not answered: {', '.join(r.ticket.ticket_id for r in waiting)}[/dim]")
+        console.print(
+            f"  Unexpected answers (to really-LOW tickets the classifier called HIGH): {len(rep.unexpected)}"
+            f"{_ids(rep.unexpected)}"
+        )
+        console.print(
+            f"  Routing errors (answers to tickets with no HIGH verdict): {_flag(len(rep.routing_errors))}"
+            f"{_ids(rep.routing_errors)}"
+        )
+        if rep.misrouted:
+            console.print(f"  [red]Ticket decisions not from ticket_responder on HIGH_SEVERITY_TICKET: "
+                          f"{len(rep.misrouted)}[/red]")  # fmt: skip
+        if rep.bad_targets:
+            console.print(f"  [red]Ticket decisions with a target (they have none): {len(rep.bad_targets)}[/red]")
+
+    console.print(f"\n[bold]Filter leaks[/bold] (P2 or P3 tickets past lab 5.1's filter): {_flag(len(rep.leaks))}")
+    for table, tid, priority in rep.leaks if details else rep.leaks[:10]:
+        console.print(f"  {table:14} {tid} {priority}")
+
+    def secs(v: float | None) -> str:
+        return "-" if v is None else f"{v:.1f} s"
+
+    console.print(
+        f"\n[bold]Timing[/bold] (medians): ticket → verdict {secs(rep.median_to_verdict)}, "
+        f"verdict → action {secs(rep.median_to_action)}"
+    )
+    console.print("[dim]From the ticket's event_time to the Kafka timestamps of its ticket_triage record and its "
+                  "decision.[/dim]")  # fmt: skip
+
+    wrong = [r for r in rep.results if not r.classified_right]
+    if wrong:
+        console.print("\n[bold]Wrong verdicts[/bold] (true severity vs verdict, with the classifier's own words)")
+        for r in wrong if details else wrong[:10]:
+            console.print(f"  [red]{r.ticket.ticket_id}[/red] really {r.truth.true_severity}, got {r.verdict}: "
+                          f"{r.ticket.subject or '-'}")  # fmt: skip
+            if r.triage is not None:
+                console.print(f"    reason: {r.triage.reason or '-'}")
+                if details:
+                    console.print(f"    raw: {(r.triage.raw_response or '').strip()}")
+    wrong_actions = [r for r in rep.answered if not r.answered_right]
+    if wrong_actions:
+        console.print("\n[bold]Wrong actions[/bold] (expected vs recommended, with the responder's own words)")
+        for r in wrong_actions if details else wrong_actions[:10]:
+            console.print(f"  [red]{r.ticket.ticket_id}[/red] expected {r.truth.expected_action}, got "
+                          f"{r.decision.action}: {r.ticket.subject or '-'}")  # fmt: skip
+            console.print(f"    reason: {r.decision.reason or '-'}")
+            if details:
+                console.print(f"    raw: {(r.decision.raw_response or '').strip()}")
+    if (wrong or wrong_actions) and not details:
+        console.print("  [dim]--details lists them all, each with the agent's raw_response.[/dim]")
+
+    def verdict(status: str, text: str) -> str:
+        if status == NO_DATA:
+            return "[dim]NO_DATA[/dim]"
+        return f"[red]{text}[/red]" if status == FAIL else f"[green]{text}[/green]"
+
+    console.print("\n[bold]Acceptance (D-068)[/bold]")
+    n, share = len(rep.results), rep.classifier_accuracy
+    console.print(
+        f"  Classifier: {verdict(rep.classifier_status, f'{rep.classified_right}/{n} right')}"
+        + (f" ({share:.0%}, target ≥ {CLASSIFIER_TARGET:.0%})" if share is not None else " (no P1 tickets)")
+    )
+    n, share = len(rep.answered), rep.responder_accuracy
+    console.print(
+        f"  Responder: {verdict(rep.responder_status, f'{rep.right_actions}/{n} answers right')}"
+        + (f" ({share:.0%}, target ≥ {RESPONDER_TARGET:.0%})" if share is not None else " (no answers)")
+    )
+    console.print(f"  Filter leaks: {verdict(rep.leaks_status, str(len(rep.leaks)))} (target 0)")
+
+
+def _ids(decisions: list[DecisionRow]) -> str:
+    return f" ({', '.join(d.ticket_id for d in decisions)})" if decisions else ""
 
 
 def _ok(passed: bool) -> str:

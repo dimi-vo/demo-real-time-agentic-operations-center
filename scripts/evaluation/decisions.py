@@ -8,9 +8,13 @@ are:
   maps a failed agent call, or an answer outside the set, to `INVALID` (D-007), so
   anything but `INVALID` is valid. Brief section 11 wants at least 95% valid.
 - **Routing.** `LATENCY_HIGH` and `ERROR_RATE_HIGH` (D-067) belong to the release agent,
-  `TRAFFIC_HIGH` and `TRAFFIC_LOW` to the capacity agent. A decision whose agent doesn't match its trigger
-  is a routing error. **Mutual exclusivity**: no (service, window) may appear under both
-  agents.
+  `TRAFFIC_HIGH` and `TRAFFIC_LOW` to the capacity agent, and `HIGH_SEVERITY_TICKET` to the
+  ticket responder (D-068), whose actions are `ROLLBACK`, `SCALE_OUT` and
+  `INVESTIGATE_UPSTREAM`. A decision whose agent doesn't match its trigger is a routing error.
+  **Mutual exclusivity**: no (service, window) may appear under both metric agents.
+- **Ticket decisions** (D-068) are the rows with a `ticket_id`: the responder's answer about a
+  ticket, not a window. `score_decisions` leaves them out, since they have no health row and
+  would count as unexpected and move `counted_from`; `tickets.py` scores them.
 - **Coverage.** Every anomalous `service_health` row should produce exactly one decision,
   and no other row should produce any: agent calls track anomalies, not windows. A row is
   *expected to call* the capacity agent when `traffic_status` is HIGH or LOW, and the
@@ -42,7 +46,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 
-from scripts.common.topic_reader import epoch_seconds
+from scripts.common.topic_reader import KAFKA_TIMESTAMP, epoch_seconds
 from scripts.evaluation.detection import (
     ERROR_RATE_HIGH,
     LATENCY_HIGH,
@@ -55,6 +59,8 @@ from scripts.evaluation.detection import (
 
 RELEASE_AGENT = "release_agent"
 CAPACITY_AGENT = "capacity_agent"
+TICKET_RESPONDER = "ticket_responder"  # D-068
+HIGH_SEVERITY_TICKET = "HIGH_SEVERITY_TICKET"
 
 ROLLBACK = "ROLLBACK"
 SCALE_OUT = "SCALE_OUT"
@@ -70,12 +76,14 @@ ACTIONS = (ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM, OBSERVE)
 ALLOWED_ACTIONS = {
     RELEASE_AGENT: (ROLLBACK, OBSERVE),
     CAPACITY_AGENT: (INVESTIGATE_UPSTREAM, OBSERVE),
+    TICKET_RESPONDER: (ROLLBACK, SCALE_OUT, INVESTIGATE_UPSTREAM),  # D-068
 }
 AGENT_FOR_TRIGGER = {
     LATENCY_HIGH: RELEASE_AGENT,
     ERROR_RATE_HIGH: RELEASE_AGENT,  # D-067
     TRAFFIC_HIGH: CAPACITY_AGENT,
     TRAFFIC_LOW: CAPACITY_AGENT,
+    HIGH_SEVERITY_TICKET: TICKET_RESPONDER,  # D-068
 }
 
 VALID_ACTION_TARGET = 0.95
@@ -102,6 +110,8 @@ class DecisionRow:
     target: str | None = None
     reason: str | None = None
     raw_response: str | None = None
+    ticket_id: str | None = None  # a ticket_responder decision's ticket (D-068); null for the metric agents
+    written_at: float | None = None  # the record's Kafka timestamp, when it was read with one
 
     @classmethod
     def from_record(cls, rec: dict) -> DecisionRow:
@@ -115,7 +125,14 @@ class DecisionRow:
             target=target.strip() if isinstance(target, str) else target,
             reason=rec.get("reason"),
             raw_response=rec.get("raw_response"),
+            ticket_id=rec.get("ticket_id"),
+            written_at=epoch_seconds(rec.get(KAFKA_TIMESTAMP)),
         )
+
+    @property
+    def is_ticket(self) -> bool:
+        """A ticket_responder decision (D-068): scored by `tickets.py`, never here."""
+        return self.ticket_id is not None
 
     @property
     def key(self) -> Key:
@@ -252,7 +269,7 @@ def score_decisions(
     """Score the decisions in `[range_from, range_to)` against the incidents and the
     health rows that should have triggered them."""
     scoped = sorted(
-        (d for d in decisions if range_from <= d.window_end < range_to),
+        (d for d in decisions if not d.is_ticket and range_from <= d.window_end < range_to),
         key=lambda d: (d.window_end, d.service_name, d.agent_name),
     )
     health = {(r.service_name, r.window_end): r for r in health_rows}

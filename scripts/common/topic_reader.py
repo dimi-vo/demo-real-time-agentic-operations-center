@@ -18,6 +18,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+# The field `read_topic(..., timestamps=True)` adds to each record: its Kafka timestamp. Not a
+# column; `evaluate` times the ticket agents' hops with it (D-068).
+KAFKA_TIMESTAMP = "kafka_timestamp"
+
 
 class TopicNotFound(Exception):
     """The topic doesn't exist (yet)."""
@@ -37,12 +41,14 @@ def read_topic(
     max_seconds: float = 180.0,
     idle_seconds: float = 15.0,
     isolation: str = "read_committed",
+    timestamps: bool = False,
 ) -> list[dict]:
     """Every record value in `topic`, oldest first per partition, as plain dicts.
 
     Raises TopicNotFound if the topic doesn't exist. Tombstones are skipped.
     `isolation="read_uncommitted"` also shows rows of transactions Flink hasn't committed
-    yet (useful to tell "slow" from "not committing").
+    yet (useful to tell "slow" from "not committing"). `timestamps=True` adds each record's
+    Kafka timestamp under `KAFKA_TIMESTAMP`, as a UTC datetime (None if the record has none).
     """
     from confluent_kafka import OFFSET_BEGINNING, Consumer, KafkaError, KafkaException, TopicPartition
     from confluent_kafka.schema_registry import SchemaRegistryClient
@@ -96,6 +102,11 @@ def read_topic(
                 continue
             value = deserialize(msg.value(), ctx)
             if value is not None:
+                if timestamps:
+                    _, ts_ms = msg.timestamp()
+                    value[KAFKA_TIMESTAMP] = (
+                        datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc) if ts_ms and ts_ms > 0 else None
+                    )
                 rows.append(value)
         return rows
     finally:
