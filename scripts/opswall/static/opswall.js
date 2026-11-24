@@ -8,8 +8,10 @@
  *  detail slot on the right, then the charts the snapshot names in svc.charts over one time
  *  axis) and its Issues panel (svc.issues: injected, detected of injected with the missed
  *  line, the median times to detect and to remediate), which moves below the row on a
- *  narrow screen. Latency and Traffic for payments, Errors for web-gateway (D-067), none for
- *  checkout, which has no metrics (D-068): its main panel is a header and a status.
+ *  narrow screen. svc.row says which kind of row: "metrics" draws the charts, Latency and
+ *  Traffic for payments, Errors for web-gateway (D-067); "tickets" (checkout, D-068) draws
+ *  the ticket sources, the list and the timeline of tickets and agent runs instead (see
+ *  "Ticket row" below).
  *  A chart, back to front (D-066):
  *  - a translucent box per injected incident on that metric, the full plot height, from its
  *    start to its end (to the right edge while open); a missed one is dashed
@@ -91,6 +93,7 @@ const dur = sec => {
   return m ? (r ? `${m}m ${r}s` : `${m}m`) : `${r}s`;
 };
 let AXIS = 600;
+let UPDATED = 0;  // the snapshot's updatedAt, epoch seconds
 const ago = sec => sec >= AXIS ? "now" : `−${dur(AXIS - sec)}`;
 const range = (a, b) => `${ago(a)} to ${ago(b)}, ${dur(Math.min(b, AXIS) - a)}`;
 const human = t => ({
@@ -438,7 +441,7 @@ function createRow() {
           <span class="stat-label">Median time to detect</span>
           <span class="stat-value" data-k="medianTimeToDetect"></span>
         </div>
-        <div class="stat" title="Measured from the incident's start to the agent's answer">
+        <div class="stat remediate">
           <span class="stat-label">Median time to remediate</span>
           <span class="stat-value" data-k="medianTimeToRemediate"></span>
         </div>
@@ -450,6 +453,7 @@ function createRow() {
     name: row.querySelector("h2"), status, statusText: status.lastElementChild,
     stat: Object.fromEntries([...row.querySelectorAll(".stat-value")].map(n => [n.dataset.k, n])),
     of: row.querySelector(".stat-of"), missed: row.querySelector(".stat-missed"),
+    remediate: row.querySelector(".stat.remediate"),
     charts: [], chartsKey: null,
   };
   const axis = row.querySelector(".axis");
@@ -486,8 +490,8 @@ function ensureCharts(row, kinds) {
 }
 
 function updateRow(row, svc) {
-  const ui = row._ui, status = svc.status || "healthy";
-  ensureCharts(row, svc.charts || ["latency", "traffic"]);
+  const ui = row._ui, status = svc.status || "healthy", tickets = svc.row === "tickets";
+  ensureCharts(row, tickets ? [] : svc.charts || ["latency", "traffic"]);
   setClass(row, `svc-row ${status}`);
   setText(ui.name, svc.name);
   setAttr(ui.main, "aria-label", svc.name);
@@ -495,7 +499,238 @@ function updateRow(row, svc) {
   setClass(ui.status, `status ${status}`);
   setText(ui.statusText, svc.statusText || "");
   renderIssues(ui, svc.issues || {});
+  setAttr(ui.remediate, "title", tickets ? "Measured from the ticket's creation to the responder's answer"
+    : "Measured from the incident's start to the agent's answer");
+  if (tickets) updateTicketRow(row, svc);
   for (const c of ui.charts) { c.host._m = metricModel(svc, c.kind); c.host._draw(); }
+}
+
+// ---------- Ticket row ----------
+// A row whose snapshot says row: "tickets" (checkout, D-068). Three columns, as in the target
+// design: the two sources, whose curved paths merge and run on to the list; the list of the
+// newest tickets; and "Tickets and agent runs", the last 2 minutes (svc.timelineSeconds) with
+// a mark per ticket and one lane per agent. The state did the matching and the counting: the
+// runs come with their positions, labels and words. A ticket id the page hasn't seen before
+// lights its source, sends a dot down the path and into the list, and fades its row in; the
+// ones on the first snapshot don't. Under prefers-reduced-motion nothing moves (CSS).
+const SOURCES = [
+  { key: "ZENDESK", name: "Zendesk", top: 70, labelTop: 72, path: "M40 90 H70 C105 90 110 140 145 140 H170",
+    icon: '<path d="M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-4z"></path><path d="M14 6v2M14 11v2M14 16v1"></path>' },
+  { key: "SERVICENOW", name: "ServiceNow", top: 170, labelTop: 196, path: "M40 190 H70 C105 190 110 140 145 140 H170",
+    icon: '<path d="M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15z"></path><path d="M10 20.5a2 2 0 0 0 4 0"></path>' },
+];
+const SOURCE_NAME = Object.fromEntries(SOURCES.map(x => [x.key, x.name]));
+const LANES = [
+  { key: "classifier", name: "Classifier", top: 30 },
+  { key: "responder", name: "Responder", top: 86 },
+];
+const LANE_NAME = Object.fromEntries(LANES.map(l => [l.key, l.name]));
+const FRESH_SECONDS = 10;  // a new id this old or younger animates; an older one (a backread) doesn't
+const pad2 = n => String(n).padStart(2, "0");
+const ticketTime = sec => {  // "24.11.2026 09:26", local time
+  const d = new Date(sec * 1000);
+  return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+};
+const prioClass = p => (p === "P1" || p === "P2" ? p.toLowerCase() : "p3");
+// Replay a CSS animation: the class flips between its -a and -b twins, which run the same
+// keyframes, so the animation starts again (the design's way).
+function replay(el, base) {
+  const next = el.classList.contains(`${base}-a`) ? `${base}-b` : `${base}-a`;
+  el.classList.remove(`${base}-a`, `${base}-b`);
+  el.classList.add(next);
+}
+
+function createTicketBody(row) {
+  const body = document.createElement("div");
+  body.className = "tk-body";
+  const flowDots = (n, cls, delays) => delays.slice(0, n).map(d => `<span class="${cls}" style="animation-delay: ${d}"></span>`).join("");
+  body.innerHTML = `
+    <div class="tk-flow">
+      <div class="tk-sources">
+        <svg width="170" height="280" viewBox="0 0 170 280" aria-hidden="true">
+          ${SOURCES.map(x => `<path d="${x.path}" class="tk-path"></path>`).join("")}
+          <circle cx="145" cy="140" r="3.5" class="tk-node"></circle>
+        </svg>
+        ${SOURCES.map((x, k) => `
+          <span class="tk-src-label" style="top: ${x.labelTop}px">${x.name}</span>
+          ${flowDots(3, `flowc path-${k}`, k ? [".23s", ".7s", "1.17s"] : ["0s", ".47s", ".93s"])}
+          <span class="tk-packet path-${k}" data-src="${x.key}"></span>
+          <div class="tk-src" data-src="${x.key}" title="${x.name}" style="top: ${x.top}px">
+            <svg role="img" aria-label="${x.name}" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${x.icon}</svg>
+          </div>`).join("")}
+      </div>
+      <div class="tk-line" aria-hidden="true">
+        ${flowDots(4, "flow", [".1s", ".5s", ".9s", "1.3s"])}
+        <span class="tk-merge"></span>
+        <svg width="7" height="9" viewBox="0 0 7 9" class="tk-arrow"><path d="M1 1l4.5 3.5L1 8"></path></svg>
+      </div>
+      <div class="tk-list">
+        <div class="tk-list-head"><span class="tk-list-title">Tickets</span><span class="tk-received"></span></div>
+        <div class="tk-view" aria-live="polite"><div class="tk-rows"></div></div>
+      </div>
+    </div>
+    <div class="tk-timeline">
+      <div class="tk-tl-head"><span class="tk-tl-title">Tickets and agent runs</span><span class="tk-agents"></span></div>
+      <div class="tk-plot" role="group" aria-label="Tickets over the last 2 minutes, with the runs of the two agents P1 tickets start">
+        <div class="tk-floor"></div>
+        ${LANES.map(l => `<div class="tk-band" style="top: ${l.top}px"></div>`).join("")}
+        <div class="tk-marks"></div>
+        <div class="tk-runs"></div>
+        ${LANES.map(l => `
+          <div class="tk-chip ${l.key}" style="top: ${l.top + 9}px">
+            <span class="tk-square"></span><span class="tk-lane-name">${l.name}</span><span class="tk-lane-state"></span>
+          </div>`).join("")}
+      </div>
+      <div class="tk-axis" aria-hidden="true"><span>−2m</span><span>−90s</span><span>−60s</span><span>−30s</span><span>now</span></div>
+    </div>`;
+  row.querySelector(".row-main").appendChild(body);
+  const q = sel => body.querySelector(sel);
+  row._tk = {
+    body, rows: q(".tk-rows"), received: q(".tk-received"), agents: q(".tk-agents"),
+    plot: q(".tk-plot"), marks: q(".tk-marks"), runs: q(".tk-runs"),
+    chips: Object.fromEntries(LANES.map(l => [l.key, q(`.tk-chip.${l.key}`)])),
+    sources: Object.fromEntries(SOURCES.map(x => [x.key, q(`.tk-src[data-src="${x.key}"]`)])),
+    packets: Object.fromEntries(SOURCES.map(x => [x.key, q(`.tk-packet[data-src="${x.key}"]`)])),
+    merge: q(".tk-merge"), seen: null,  // the ids on the previous snapshot; null before the first
+  };
+  const detail = row.querySelector(".detail");
+  detail.innerHTML = '<span>Open P1 <span class="open-p1"></span></span>';
+  row._tk.openP1 = detail.querySelector(".open-p1");
+}
+
+function updateTicketRow(row, svc) {
+  if (!row._tk) createTicketBody(row);
+  const tk = row._tk, T = svc.timelineSeconds || 120, list = (svc.tickets && svc.tickets.newest) || [];
+  const pct = t => `${(Math.max(0, Math.min(t, T)) / T * 100).toFixed(3)}%`;
+
+  // Header: open P1 tickets, in the accent above 0.
+  const openP1 = svc.openP1 || 0;
+  setText(tk.openP1, String(openP1));
+  setClass(tk.openP1, openP1 ? "open-p1 some" : "open-p1");
+
+  // The ids this snapshot brings that the page hasn't seen: they animate (not on the first).
+  const fresh = tk.seen ? list.filter(t => !tk.seen.has(t.id) && UPDATED - t.eventTime <= FRESH_SECONDS) : [];
+  tk.seen = new Set(list.map(t => t.id));
+
+  // The list: the newest tickets, by id.
+  setText(tk.received, `${(svc.tickets && svc.tickets.received) || 0} received`);
+  sync(tk.rows, list, t => t.id, t => {
+    const r = document.createElement("div");
+    r.innerHTML = '<span class="tk-badge"></span><div class="tk-text"><span class="tk-title"></span>' +
+      '<span class="tk-sub"><span class="tk-id"></span><span class="tk-from"></span></span></div>';
+    if (fresh.includes(t)) {  // the design's fade, once
+      r._fresh = true;
+      setTimeout(() => { r._fresh = false; r.classList.remove("fresh"); }, 4200);
+    }
+    return r;
+  }, (r, t) => {
+    setClass(r, `tk-row ${prioClass(t.priority)}${r._fresh ? " fresh" : ""}`);
+    const [badge, text] = r.children, [title, sub] = text.children;
+    setText(badge, t.priority || "");
+    setText(title, t.subject || "");
+    setAttr(title, "title", t.subject || "");
+    setText(sub.firstChild, t.id);
+    setText(sub.lastChild, ` from ${SOURCE_NAME[t.source] || t.source || "?"} at ${ticketTime(t.eventTime)}`);
+  });
+  if (fresh.length) replay(tk.rows, "push");
+  for (const t of fresh.slice().reverse()) {  // oldest first, so the newest colours last
+    const box = tk.sources[t.source], packet = tk.packets[t.source], cls = prioClass(t.priority);
+    if (box) {
+      box.dataset.prio = cls;
+      box.classList.add("busy");
+      replay(box, "ring");
+      clearTimeout(box._busy);
+      box._busy = setTimeout(() => box.classList.remove("busy"), 1000);
+    }
+    if (packet) { packet.dataset.prio = cls; replay(packet, "pkt"); }
+    tk.merge.dataset.prio = cls;
+    replay(tk.merge, "merge");
+  }
+
+  // The timeline: a mark per ticket (a P1 a full-height line with its id, a P2 or P3 a short
+  // tick at the bottom), then the runs, each a bar in its agent's lane, by key.
+  sync(tk.marks, svc.marks || [], m => m.id, () => {
+    const n = document.createElement("div");
+    n.appendChild(document.createElement("span"));
+    return n;
+  }, (n, m) => {
+    setClass(n, `tk-mark ${prioClass(m.priority)}`);
+    setAttr(n, "style", `left: ${pct(m.t)}`);
+    setText(n.firstChild, m.priority === "P1" ? `P1 ${m.id}` : "");
+  });
+  const top = Object.fromEntries(LANES.map(l => [l.key, l.top + 9]));
+  sync(tk.runs, svc.runs || [], r => r.key, () => {
+    const bar = document.createElement("div");
+    bar.tabIndex = 0;
+    bar.innerHTML = '<span class="tk-cap"></span><span class="tk-run-label"></span>';
+    return bar;
+  }, (bar, r) => {
+    setClass(bar, `tk-run ${r.lane}${r.open ? " open" : ""}`);
+    setAttr(bar, "style", `left: ${pct(r.start)}; width: ${pct(r.end - r.start)}; top: ${top[r.lane] ?? top.classifier}px`);
+    setText(bar.lastChild, r.label || "");
+    bar.setAttribute("data-tip", runTip(r));
+  });
+
+  // The lanes' chips, and the words above the chart.
+  const working = new Set((svc.runs || []).filter(r => r.open).map(r => r.lane));
+  for (const l of LANES) {
+    const chip = tk.chips[l.key], on = working.has(l.key);
+    setClass(chip, `tk-chip ${l.key}${on ? " working" : ""}`);
+    setText(chip.lastElementChild, on ? "Working" : "Idle");
+  }
+  const n = svc.agentsWorking || 0;
+  setText(tk.agents, n ? `${n} of 2 agents working` : "Both agents idle");
+  setClass(tk.agents, n ? "tk-agents working" : "tk-agents");
+  placeLabels(tk);
+}
+
+// Two tickets a second apart put their labels on top of each other, and a lane's chip covers
+// a label near the left edge. The newest label wins: an older one that would cover it, the
+// chip or the plot's edge moves to the right of its bar if there is room, or else hides (its
+// tooltip still says it). A P1 mark's label hides the same way.
+const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+function placeLabels(tk) {
+  const plot = tk.plot.getBoundingClientRect();
+  const fits = (r, taken) => r.left >= plot.left && r.right <= plot.right && !taken.some(t => overlaps(r, t));
+  for (const l of LANES) {
+    const bars = [...tk.runs.children].filter(b => b.classList.contains(l.key));
+    const barBoxes = bars.map(b => b.getBoundingClientRect());
+    const taken = [tk.chips[l.key].getBoundingClientRect()];
+    for (let i = bars.length - 1; i >= 0; i--) {  // newest first
+      const bar = bars[i], label = bar.lastChild;
+      if (!label.textContent) continue;
+      let box = label.getBoundingClientRect();
+      if (!fits(box, taken)) {
+        bar.classList.add("label-right");
+        box = label.getBoundingClientRect();
+        if (!fits(box, [...taken, ...barBoxes.filter((_, j) => j !== i)])) {
+          bar.classList.replace("label-right", "label-hidden");
+          continue;
+        }
+      }
+      taken.push(box);
+    }
+  }
+  const taken = [];
+  for (const mark of [...tk.marks.children].reverse()) {
+    const label = mark.firstChild;
+    if (!label.textContent) continue;
+    const box = label.getBoundingClientRect();
+    if (fits(box, taken)) taken.push(box);
+    else mark.classList.add("label-hidden");
+  }
+}
+
+// A run's tooltip: the ticket, the agent's verdict or action, and its reason.
+function runTip(r) {
+  const agent = LANE_NAME[r.lane] || r.lane;
+  const what = r.lane === "classifier" ? "Verdict" : "Action";
+  const answer = r.outcome != null ? `${what}: ${esc(r.outcome)}.`
+    : r.open ? `Waiting for the ${agent.toLowerCase()}.` : `The ${agent.toLowerCase()} gave no answer.`;
+  return `<strong>${esc(r.subject || r.ticketId)}</strong>${esc(r.priority || "")} ${esc(r.ticketId)} · ${agent} · ${esc(r.label)}` +
+    `<em>${answer}</em>` +
+    (r.reason ? `<span class="reason">${esc(clip(String(r.reason), 180))}</span>` : "");
 }
 
 // ---------- Issues ----------
@@ -577,6 +812,7 @@ function clockText(sec) {
 
 function render(D) {
   AXIS = D.axisSeconds || 600;
+  UPDATED = D.updatedAt || Date.now() / 1000;
   THRESHOLD = D.errorThresholdPct ?? THRESHOLD;
   sync(document.getElementById("rows"), D.services || [], svc => svc.name, createRow, updateRow);
   setText(document.getElementById("updated"), clockText(D.updatedAt || Date.now() / 1000));
