@@ -6,7 +6,7 @@
 -- Reads both sources from the earliest offset, so it replays the history ops-sim has built
 -- (up to 24 hours) and trains on it: no reset needed.
 -- Running it twice writes every window twice. To change the query and start clean, run
--- `uv run reset-health`, then Run the new INSERT.
+-- `uv run reset-health`, then run the new INSERT.
 INSERT INTO `service_health`
 WITH enriched AS (
   SELECT

@@ -25,9 +25,11 @@
 -- Action line when the call succeeded and that line is one of the three actions, and INVALID
 -- otherwise, so it is never null. raw_response always keeps the full answer.
 -- The input ends with the classifier's reason, so the responder starts from why the ticket
--- was called HIGH. That reason is null when the classifier's answer had no Reason line, and
--- CONCAT returns null when any argument is null, so it falls back to N/A, as the subject and
--- the description do in 5.2.
+-- was called HIGH. Its label, "Classifier said:", holds no "Reason:": the Reason regex takes
+-- the first match, so if the model echoed its input, a label with "Reason:" in it would be
+-- parsed instead of its own Reason line. That reason is null when the classifier's answer had
+-- no Reason line, and CONCAT returns null when any argument is null, so it falls back to N/A,
+-- as the subject and the description do in 5.2.
 INSERT INTO `remediation_decisions`
 SELECT
   tr.`event_time`,
@@ -57,6 +59,6 @@ LATERAL TABLE(AI_RUN_AGENT(
     'Priority: ', tr.`priority`, '\n',
     'Subject: ', COALESCE(tr.`subject`, 'N/A'), '\n',
     'Description: ', COALESCE(tr.`description`, 'N/A'), '\n',
-    'Triage Reason: ', COALESCE(tr.`reason`, 'N/A')
+    'Classifier said: ', COALESCE(tr.`reason`, 'N/A')
   )
 )) AS a(`agent_status`, `agent_response`);

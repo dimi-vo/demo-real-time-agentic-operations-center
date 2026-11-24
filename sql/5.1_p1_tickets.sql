@@ -14,7 +14,7 @@
 -- read from the latest offset: start 5.2's INSERT once this one has caught up, and the replay
 -- costs no model call.
 -- Running it twice copies every P1 twice. To start clean, run `uv run reset-health`, then
--- Run this INSERT again.
+-- run this INSERT again.
 INSERT INTO `p1_tickets`
 SELECT `event_time`, `ticket_id`, `source`, `service_name`, `priority`, `subject`, `description`
 FROM `support_tickets`

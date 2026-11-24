@@ -221,7 +221,7 @@ def test_the_classifier_calls_high_only_when_many_customers_cannot_buy_right_now
 _EXAMPLE_TICKET = re.compile(
     r"\nTICKET (?:ZD-\d{5}|INC\d{7}) from (?:ZENDESK|SERVICENOW)\nPriority: P1\n"
     r"Subject: (?P<subject>[^\n]+)\nDescription: (?P<description>[^\n]+)\n"
-    r"(?:Triage Reason: (?P<triage>[^\n]+)\n)?Answer:\n"
+    r"(?:Classifier said: (?P<triage>[^\n]+)\n)?Answer:\n"
 )
 
 
@@ -236,8 +236,8 @@ def _filled(text: str) -> re.Pattern:
 
 
 def _ticket_examples(agent: str) -> list[tuple[str, Template, str | None, str]]:
-    """(answer, the approved template its ticket fills in, Triage Reason or None, the answer's
-    Reason) for each example of a ticket agent."""
+    """(answer, the approved template its ticket fills in, what the classifier said or None, the
+    answer's Reason) for each example of a ticket agent."""
     found = []
     for answer, text in _examples(read(AGENT_FILES[agent])):
         ticket = _EXAMPLE_TICKET.match(text)
@@ -368,9 +368,9 @@ def test_the_responder_rolls_back_a_release_then_scales_out_a_load_then_looks_up
         assert cue in prompt[scale_out:upstream], cue
     assert "payments fail at a payment provider or a payment gateway" in prompt[upstream:strict]
     assert "stop at the first one that matches" in prompt
-    assert "already been classified high severity by the triage agent" in prompt
+    assert "already been classified high severity by the classifier" in prompt
     assert "Recommend the one action that fixes it fastest." in prompt
-    assert "Use only what the ticket and the triage reason say" in prompt[strict:]
+    assert "Use only what the ticket and the classifier say" in prompt[strict:]
 
 
 def test_the_responder_examples_are_approved_high_tickets_filled_in():
@@ -388,7 +388,7 @@ def test_each_responder_example_carries_a_triage_reason_the_classifier_would_giv
     examples = _ticket_examples(TICKET_RESPONDER)
     assert examples
     for action, _, triage, _ in examples:
-        assert triage, f"the {action} example has no Triage Reason line"
+        assert triage, f"the {action} example has no Classifier said line"
         assert "customers" in triage and re.search(r"\b(buy|pay)\b", triage), (action, triage)
 
 
@@ -456,9 +456,22 @@ def test_the_responder_input_is_the_ticket_and_the_triage_reason():
              "'Priority: ', tr.`priority`, '\\n',",
              "'Subject: ', COALESCE(tr.`subject`, 'N/A'), '\\n',",
              "'Description: ', COALESCE(tr.`description`, 'N/A'), '\\n',",
-             "'Triage Reason: ', COALESCE(tr.`reason`, 'N/A')\n")  # fmt: skip
+             "'Classifier said: ', COALESCE(tr.`reason`, 'N/A')\n")  # fmt: skip
     positions = [concat.index(line) for line in lines]
     assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize("name", INSERTS)
+def test_no_input_label_holds_a_label_the_answer_is_parsed_by(name):
+    """Each INSERT parses the answer with REGEXP_EXTRACT on its labels (`Action:`, `Reason:`, ...),
+    which takes the first match. An input label that holds one, as `Triage Reason:` holds
+    `Reason:`, would be parsed instead whenever the model echoes its input."""
+    sql = read(name)
+    concat = sql[sql.index("AI_RUN_AGENT(") : sql.index(")) AS a(")]
+    labels = re.findall(r"[A-Z][A-Za-z ]*:", " ".join(re.findall(r"'([^']*)'", concat)))
+    assert labels, name
+    parsed = {line for lines in OUTPUT_LINES.values() for line in lines}
+    assert [(label, line) for label in labels for line in parsed if line in label] == [], name
 
 
 def test_only_the_responder_insert_writes_the_ticket_trigger():
