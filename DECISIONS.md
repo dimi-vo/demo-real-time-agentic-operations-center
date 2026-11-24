@@ -2821,5 +2821,57 @@ payments). `uv run ops-sim --dry-run --simulate 15 --seed 1`: no checkout line; 
 and deploy lines are the same as issue 01's run for that seed, and only the traffic values
 differ.
 
+Issue 03 (the ticket generator: templates, the ticket clock, the answer key, the two source
+tables): `opsgen/ticket_templates.py` (new; 40 templates as data, each with a priority, a true
+severity, an expected action for HIGH and a `shouting` flag: 12 really-HIGH P1s, 4 per action,
+12 really-LOW P1s, 4 of them shouting, and 8 each of P2 and P3; the placeholder pools and
+`fill`), `opsgen/tickets.py` (new; `TicketClock`: Poisson(1/15) a tick, the mix drawn in a
+fixed order, one id counter per source from `ZD-48215` and `INC0041872`, a `support_tickets`
+record and a `ticket_answer_key` record per ticket, both stamped with the tick; off with
+`--no-incidents`), `opsgen/simulation.py` (the clock on `Random(seed + 3)`; `tick` returns a
+fourth list, the tickets; `state_snapshot` saves `next_ticket_numbers`, and a state file
+without it starts at the defaults; the class docstring lists the four generators),
+`opsgen/driver.py` (tickets go to the sink; a tick with a ticket saves the state, so a
+generator killed between two 5 s saves never reuses an id; `--show-records checkout` prints
+each ticket and its answer-key record as produced; `--simulate` prints a line per ticket and
+ends with the tickets by priority × true severity and the HIGH ones by expected action; the
+banner names the ticket clock, and reads `no incidents, no tickets` with `--no-incidents`),
+`opsgen/sinks.py` (`DryRunSink.emit_tickets`: the `support_tickets` and `ticket_answer_key`
+stream tags and the console line `TICKET  P1  ZD-48215  Zendesk  "…"  [truth: HIGH,
+SCALE_OUT]`; `format_record` takes the answer key's `ticket_id` key), `opsgen/kafka_io.py`
+(`TICKETS_TOPIC` and `ANSWER_KEY_TOPIC`, their serializer contexts, `emit_ticket`,
+`emit_answer_key` and `emit_tickets`; raw-string keys, `service_name` and `ticket_id`; schemas
+looked up, never registered), `opsgen/cli.py` (`--show-records` takes all three services; the
+live start line names the two topics; the docstring), docstrings in
+`opsgen/{__init__,state}.py`. The tables: `sql/source_support_tickets.sql` and
+`sql/source_ticket_answer_key.sql` (new; the columns of spec decisions 13 and 14 and
+`service_incidents`' options; the answer key's header says it is for the wall and `evaluate`
+only), `schemas/support_tickets.avsc` and `schemas/ticket_answer_key.avsc` (new),
+`platform-team/modules/developer/statements.tf` (two statements byte-identical to the SQL,
+chained after `service_incidents` and before `service_error_rate`; the header's count),
+`outputs.tf` (both in `flink_statements`), `main.tf` (the header's count). The lists:
+`SOURCE_TOPICS` in `scripts/common/topics.py`, so `uv run reset` empties both topics, and
+`SOURCE_TABLES` in `scripts/preprovisioned/provision.py` (eight tables), with the counts in
+their docstrings and `scripts/reset.py`'s. `scripts/tuning/sweep.py` takes the fourth list.
+Tests: `opsgen/tests/test_tickets.py` (new: every placeholder has a pool; 12/12/8/8 and 4 per
+action; at least 4 shouting LOW P1s; each template's labels, by keyword: a HIGH one has a
+start time, many customers and exactly its action's cue, and a LOW one never says many
+customers; one to three sentences; the rate and mix over 20 hours; an answer key on the same
+tick, null action exactly when LOW; the ids, through a restart and from a state file without
+counters; a save on every tick with a ticket; tickets on, off or 30 times as many leave every
+other record the same; same seed, same tickets; no quiet period; none with `--no-incidents`),
+`test_output.py` (the dry-run line, `--show-records checkout`, the summary, the banner),
+`test_simulation.py`, `test_engine.py`, `test_deploy_clock.py`, `test_determinism.py` and
+`test_incident_records.py` (the fourth list), `tests/test_kafka_io_and_rtce.py` (the Kafka
+sink against fake clients: topics, raw keys, timestamps, no registration),
+`tests/test_schema_vs_ddl.py` (both pairs; the spec's columns in order; `service_incidents`'
+options), `tests/test_platform_team_sync.py` (eight tables), `tests/test_reset.py`,
+`tests/test_preprovisioned_readiness.py`, `tests/test_tuning.py`, and
+`platform-team/tests/developer_module.tftest.hcl` (both keys; a plan run on both tables'
+options). `uv run ops-sim --dry-run --simulate 15 --seed 1`: 63 tickets, the first at 00:54
+(P1 7 HIGH and 8 LOW, P2 24, P3 24; ROLLBACK 2, SCALE_OUT 2, INVESTIGATE_UPSTREAM 3). Leaving
+out the ticket lines, the banner (which now names the ticket clock) and the closing summary,
+the output is the same as issue 02's for that seed line for line, metric values included.
+
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.
