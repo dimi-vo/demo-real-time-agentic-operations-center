@@ -25,11 +25,11 @@ CREATE TABLE IF NOT EXISTS `service_incidents` (
   `event_time` TIMESTAMP(3) COMMENT 'When this record was emitted; also the Kafka record timestamp',
   `incident_id` STRING COMMENT 'Stable id for this incident across its start and end records',
   `service_name` STRING COMMENT 'Service the incident affects (foreign key to service_deployments)',
-  `incident_type` STRING COMMENT 'BAD_DEPLOY, TRAFFIC_SURGE or UPSTREAM_DROP',
-  `started_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation began (for BAD_DEPLOY, the same tick as the deploy)',
+  `incident_type` STRING COMMENT 'BAD_DEPLOY or UPSTREAM_DROP on payments, BAD_DEPLOY_ERRORS on web-gateway',
+  `started_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation began (for BAD_DEPLOY and BAD_DEPLOY_ERRORS, the same tick as the deploy)',
   `ended_at` TIMESTAMP(3) COMMENT 'Wall-clock time degradation ended; NULL on the start record, set on the end record',
-  `expected_trigger` STRING COMMENT 'What service_health should flag: LATENCY_HIGH, TRAFFIC_HIGH or TRAFFIC_LOW',
-  `expected_action` STRING COMMENT 'What the agent should pick: ROLLBACK, SCALE_OUT or INVESTIGATE_UPSTREAM',
+  `expected_trigger` STRING COMMENT 'What should flag it: LATENCY_HIGH or TRAFFIC_LOW in service_health, ERROR_RATE_HIGH in service_error_rate',
+  `expected_action` STRING COMMENT 'What the agent should pick: ROLLBACK or INVESTIGATE_UPSTREAM',
   WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
 )
 DISTRIBUTED INTO 1 BUCKETS

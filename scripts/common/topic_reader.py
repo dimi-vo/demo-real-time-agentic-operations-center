@@ -6,7 +6,7 @@ the card's Kafka key, manual partition assignment from the beginning, no committ
 offsets, and `read_committed` isolation (Flink's sink is transactional, so this skips
 anything a failed checkpoint aborted). It stops when every partition reports EOF.
 
-These topics are small (`service_health` is 6 rows per 10 s, about 2,200 rows an hour),
+These topics are small (`service_health` is one row per 10 s for payments, 360 rows an hour),
 so reading from the beginning is cheap and gives callers the topic's head too, which
 `evaluate` needs for its fresh-start measurement.
 """

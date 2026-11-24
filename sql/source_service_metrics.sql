@@ -1,4 +1,4 @@
--- Source table: service_metrics (append-only, one metrics sample per service per second)
+-- Source table: service_metrics (append-only, one metrics sample per metric service per second)
 --
 -- SINGLE SOURCE OF TRUTH for the service_metrics schema. The platform team's
 -- Terraform (platform-team/modules/developer/statements.tf) creates this table;
@@ -7,9 +7,10 @@
 -- .avsc copy in schemas/ is for --dry-run and the schema-vs-DDL drift test only
 -- (tests/test_schema_vs_ddl.py), never for live serialization.
 --
--- One immutable row per River Shop service per second, whatever the traffic: each row
--- sums up its one-second slice of time (D-058). An incident changes the values, never
--- the number of rows. There is no primary key and no version/replica columns here on
+-- One immutable row per metric service per second, whatever the traffic: two rows a
+-- second, web-gateway's and payments' (checkout produces support tickets, not metrics,
+-- D-068). Each row sums up its one-second slice of time (D-058). An incident changes the
+-- values, never the number of rows. There is no primary key and no version/replica columns here on
 -- purpose: a metrics sample does not know which deployment served the requests it
 -- counts. That is why the walkthrough joins this to service_deployments (temporal join).
 -- event_time is the end of the second (tick + 999 ms), after a deploy record on the

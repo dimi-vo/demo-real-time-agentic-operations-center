@@ -7,7 +7,7 @@
 --
 -- Current deployment state of each service, as a CI/CD system or orchestrator
 -- would report it: one upsert row per service, keyed by service_name. The
--- generator re-emits every service's current state every 5 seconds (a controller
+-- generator re-emits every metric service's current state every 5 seconds (a controller
 -- reconciliation loop) so the versioned side's watermark keeps advancing between
 -- changes; without it the event-time temporal join against service_metrics would
 -- stall. The watermark trails event_time by 1 ms (Flink's ascending-timestamps strategy:
