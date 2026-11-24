@@ -2875,6 +2875,60 @@ options). `uv run ops-sim --dry-run --simulate 15 --seed 1`: 63 tickets, the fir
 out the ticket lines, the banner (which now names the ticket clock) and the closing summary,
 the output is the same as issue 02's for that seed line for line, metric values included.
 
+Issue 04 (the ticket output tables, `remediation_decisions.ticket_id`, the lists, reset and
+readiness): `sql/sink_p1_tickets.sql` (new; `support_tickets`' seven columns and options, the
+5 s watermark included; the header says lab 5.1 writes it, lab 5.2 reads it, and that
+read-uncommitted spares the classifier a wait of about a minute for each Flink commit, D-063),
+`sql/sink_ticket_triage.sql` (new; the seven ticket columns, then `severity` STRING NOT NULL,
+`HIGH`, `LOW` or `INVALID`, `reason` and `raw_response`, with the same options; lab 5.2 writes
+it and lab 5.3 reads its HIGH rows), `sql/sink_remediation_decisions.sql` (`ticket_id` STRING,
+nullable, as the last column; the comments of `window_end`, or the ticket's `event_time` for a
+ticket decision, `agent_name` (`release_agent`, `capacity_agent` or `ticket_responder`),
+`trigger` (`HIGH_SEVERITY_TICKET` added), `action` (`SCALE_OUT` from the responder only) and
+`target` (a `ROLLBACK`'s version from the release agent, otherwise null); the header: three
+agents in four INSERTs, three in 4.3 and one in 5.3, and what a ticket decision holds), the
+three `sql/4.3_insert_*.sql` (`CAST(NULL AS STRING)` as the last value, and a header line
+saying so). Terraform: `platform-team/modules/developer/statements.tf` (both statements,
+byte-identical to the SQL, chained after `remediation_decisions`, `p1_tickets` then
+`ticket_triage`, with the model's `depends_on` moved to `ticket_triage`; the
+`remediation_decisions` copy; the header's counts and order), its `outputs.tf` (both keys) and
+`main.tf` (ten tables), `platform-team/main.tf` (ten tables), `variables.tf` (`flink_max_cfu`
+stays 10, and its description names the eight long-running statements: 2.2, 2.5, the three
+4.3 legs, 5.1, 5.2 and 5.3), `outputs.tf` (the validation heading said "the two source
+tables"), `README.md` (the pool's eight statements, the ten tables, 17 resources per person
+and their list, eleven statements `COMPLETED`, 17 to add per new person, the readiness row and
+the files table; a new "Updating stacks you built earlier": stop the 4.3 INSERTs, `DROP TABLE
+remediation_decisions`, apply again). The lists: `OUTPUT_TOPICS` in `scripts/common/topics.py`
+gains `p1_tickets` and `ticket_triage`, so `uv run reset` empties both and `uv run
+reset-health` deletes whatever writes them (lab 5.1 and 5.2's INSERTs; the responder's goes
+with the other `remediation_decisions` writers) and empties both; `OUTPUT_TABLES` in
+`scripts/preprovisioned/provision.py` (ten tables); `scripts/reset.py` (`LAB_AGENTS` gains
+`ticket_classifier` and `ticket_responder`; the docstring and next steps name 5.1–5.3),
+`scripts/reset_health.py` (the docstring, the help, and a third next step: 5.1, then 5.2's
+INSERT once 5.1 has caught up, since it reads from the latest offset, then 5.3's). The checks:
+`sql/checks/remediation_routing.sql` (one query, two kinds of row: a window that reached two
+metric agents, and a decision that breaks the ticket leg's rules, so `HIGH_SEVERITY_TICKET`
+only from `ticket_responder`, with a `ticket_id` and no target, and no `ticket_id` from a
+metric agent), `remediation_call_rate.sql` (metric decisions apart from ticket decisions;
+`p1_tickets` rows, `ticket_triage` rows and their HIGH verdicts), and their README. ops-sim:
+`opsgen/decisions.py` (docstrings only: a ticket decision has every field the engine needs,
+so it decodes and matches nothing). Tests: `tests/test_agent_sql.py` (nine columns; each 4.3
+INSERT's arity and its null `ticket_id`; the new column and the comments),
+`tests/test_schema_vs_ddl.py` (the two tables' columns in order, `support_tickets`' options and
+watermark, `severity` NOT NULL with its three values), `tests/test_platform_team_sync.py` (ten
+tables; the `depends_on` chain: the five sources, the five outputs in lab order, the model
+last), `tests/test_reset.py` (ten topics, four agents, the next steps),
+`tests/test_reset_health.py` (five topics; the matcher and the three section 5 INSERTs; the
+next steps in lab order), `tests/test_preprovisioned_readiness.py` (ten tables; a missing
+`ticket_triage` names the platform team), `opsgen/tests/test_decisions.py` (the registered
+schema gains `ticket_id`; a responder row, through the feed, decodes to a checkout
+`HIGH_SEVERITY_TICKET` decision and leaves a payments drop expecting the same action
+unresolved; a capacity decision with a null `ticket_id` resolves it as before),
+`platform-team/tests/developer_module.tftest.hcl` (both keys and 11 statements; a plan run on
+both tables' options and on `remediation_decisions`' `ticket_id`). `IF NOT EXISTS` never
+changes a table, so `remediation_decisions` is dropped before the apply that recreates it; the
+user does both.
+
 Issue 08 (the design's frame and the Issues panels): `scripts/opswall/state.py` (each service
 in the snapshot gets `issues`, over the incidents that *started* in the last 10 minutes, so an
 incident cut by the chart's left edge is drawn but not counted: `injected`; `detected`, an
