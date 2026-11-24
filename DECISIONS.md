@@ -2976,6 +2976,49 @@ writes `ticket_triage`'s columns in order, parses the severity as the capacity l
 action and the reason as every leg does, and its input carries the five ticket columns; no
 `ESCALATE` in any agent file; the module docstring names section 5).
 
+Issue 07 (lab 5.3, the ticket responder): `sql/5.3_ticket_responder.sql` (new; `CREATE AGENT
+ticket_responder` on `llm_textgen_model`, with no tools and the existing `WITH` options; the
+prompt in the existing order: two labelled lines, `Action: [ROLLBACK | SCALE_OUT |
+INVESTIGATE_UPSTREAM]` and `Reason:`, and the sentence that there is no Target line because
+there is never a version or a replica count to give; three examples, each a really-HIGH P1
+template filled in and shown the way the INSERT shows a ticket, with a Triage Reason line as
+the classifier would write it, then its answer: a ROLLBACK from "Blank checkout page after the
+release" (template 2), a SCALE_OUT from "Checkout times out during the flash sale" (5) and an
+INVESTIGATE_UPSTREAM from "Payment provider rejecting every payment" (10), each Reason naming
+its cue, the release, the load or the provider; none of the classifier's templates (6, 13,
+17) is reused; the role, checkout's incident commander, told that every ticket was already
+classified high severity by the triage agent, whose reason comes with it, and asked for the
+one action that fixes it fastest; rules 1 to 3, ROLLBACK for a release, an update, a deploy or
+a new version, SCALE_OUT for slowness or timeouts under heavy load (a sale, a campaign, a peak
+or a rush), INVESTIGATE_UPSTREAM for payments failing at a payment provider or gateway;
+strict values, from the ticket and the triage reason only; no apostrophe),
+`sql/5.3_insert_ticket_responder.sql` (new; `ticket_triage` from the latest offset, `WHERE
+severity = 'HIGH'` in a derived table below the LATERAL join, as the error-rate leg reads
+`error_status = 'HIGH'`, since 5.2 writes every verdict and there is no high-severity topic;
+into `remediation_decisions` with spec decision 17's columns: the ticket's `event_time` as
+`window_end`, its `service_name`, `ticket_responder`, `HIGH_SEVERITY_TICKET`, the action
+parsed with 4.3's regex and `agent_status` handling, `ROLLBACK`, `SCALE_OUT` or
+`INVESTIGATE_UPSTREAM` and otherwise `INVALID`, a null target, the reason with 4.3's regex,
+the raw answer and the `ticket_id` last; the input is the classifier's five ticket lines, then
+`Triage Reason:`, with the reason, the subject and the description in `COALESCE(…, 'N/A')`;
+the header says the decisions table is the 4.3 legs' fan-in table and that the simulator
+takes no action on a ticket decision, since D-065 resolves incidents and checkout has none).
+`sql/checks/` name 5.3 since issue 04 (`remediation_routing.sql` and the responder's line in
+`remediation_call_rate.sql`), and `reset`, `reset-health` and `evaluate` name its agent and
+file, so nothing else changed. Tests: `tests/test_agent_sql.py` (the responder joins the
+per-agent rules: its Action and Reason lines with no Target or Severity line, an example for
+each of its three actions, its allowed answers and no apostrophe; its examples are really-HIGH
+P1 templates from `opsgen/ticket_templates.py` filled from their pools, each expecting its
+example's action, each with a Triage Reason naming many customers who cannot buy or pay, and
+each Reason naming its cue; the three rules in order on their cues; the INSERT joins the rules
+keyed by INSERT file, so the latest offset, the agent called by name and written as
+`agent_name`, `INVALID` for a failed or out-of-set answer, and the arity, and the filter below
+the join now covers the 4.3 legs and 5.3; it is one statement from `ticket_triage` into
+`remediation_decisions` whose only filter is the HIGH verdict, its values are spec decision
+17's, its action is parsed as the capacity leg's with its three actions, and its input carries
+the ticket and the triage reason; only this INSERT writes `HIGH_SEVERITY_TICKET`, and it
+writes no other trigger; the module docstring names 5.3).
+
 Issue 08 (the design's frame and the Issues panels): `scripts/opswall/state.py` (each service
 in the snapshot gets `issues`, over the incidents that *started* in the last 10 minutes, so an
 incident cut by the chart's left edge is drawn but not counted: `injected`; `detected`, an
