@@ -11,7 +11,7 @@ This Terraform module builds **each developer's workshop stack**:
 - **a new, empty environment**, named after their email (see [Environment names](#environment-names)), with the Stream Governance Advanced package, and a role binding that makes the developer **EnvironmentAdmin** on it through their own user account;
 - **a Standard, single-zone Kafka cluster**, `RIVER-OOPS-DEMO-CLUSTER`, on AWS in `region` (default `us-east-1`, the same for everyone). The environment's Schema Registry comes up with it;
 - **a Flink compute pool**, `RIVER-OOPS-DEMO-pool`, that scales on demand up to `flink_max_cfu` CFUs (default 10), sized for the eight long-running statements of the workshop (the `INSERT`s of labs 2.2 and 2.5, the three agent legs of 4.3, and 5.1, 5.2 and 5.3) and ad-hoc queries;
-- **the workshop's tables and AI model:** five source tables, `service_metrics` (append-only, one metrics sample per service per second), `service_deployments` (upsert, keyed by `service_name`), `service_incidents` (the simulator's answer key), `support_tickets` (checkout's support tickets) and `ticket_answer_key` (their answer key), all empty until the developer runs `uv run ops-sim`; five output tables, `service_error_rate`, `service_health`, `remediation_decisions`, `p1_tickets` and `ticket_triage`, which the developer fills with `INSERT` statements in the labs (so the developer never writes a `CREATE TABLE`, and the ops wall can read all of its topics from the start); and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`).
+- **the workshop's tables and AI model:** five source tables, `service_metrics` (append-only, one metrics sample a second each for web-gateway and payments), `service_deployments` (upsert, keyed by `service_name`), `service_incidents` (the simulator's answer key), `support_tickets` (checkout's support tickets) and `ticket_answer_key` (their answer key), all empty until the developer runs `uv run ops-sim`; five output tables, `service_error_rate`, `service_health`, `remediation_decisions`, `p1_tickets` and `ticket_triage`, which the developer fills with `INSERT` statements in the labs (so the developer never writes a `CREATE TABLE`, and the ops wall can read all of its topics from the start); and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`).
 
 There is **no static/seed table**: unlike some workshops, this one builds all of its
 data live from the generator, so there is nothing to seed and nothing to count.
@@ -118,7 +118,7 @@ confluent rtce region list
 ```
 
 - **Flink:** the first command must list your region.
-- **Real-Time Context Engine and Lightning Tables** (sections 5–7 of the workshop) are **AWS-only and in a subset of regions.** If `confluent rtce region list` doesn't list your region, developers skip those sections. As of late 2026 the supported AWS regions are roughly: `us-east-1`, `us-east-2`, `us-west-2`, `ap-northeast-1`, `ap-northeast-2`, `ap-southeast-1`, `ap-southeast-2`, `ap-south-1`, `eu-central-1`, `eu-west-1`, `eu-west-2`.
+- **Real-Time Context Engine and Lightning Tables** (sections 6–8 of the workshop) are **AWS-only and in a subset of regions.** If `confluent rtce region list` doesn't list your region, developers skip those sections. As of late 2026 the supported AWS regions are roughly: `us-east-1`, `us-east-2`, `us-west-2`, `ap-northeast-1`, `ap-northeast-2`, `ap-southeast-1`, `ap-southeast-2`, `ap-south-1`, `eu-central-1`, `eu-west-1`, `eu-west-2`.
 - **The Confluent-hosted model** `anthropic.claude-sonnet-4-6` (or the `csp_hosted_model` you set) must be offered there. No CLI command shows it; confirm with your Confluent account team, and the rehearsal ([step 8](#8-rehearse-the-developer-flow)) confirms it in practice.
 
 ## 6. Check networking and access
@@ -222,7 +222,7 @@ ahead: the [pre-provisioned walkthrough](../docs/tracks/PRE-PROVISIONED.md)'s de
 generator, pipeline and agents.
 
 The agents call a Confluent-hosted model. **Confirm with your Confluent account team
-how that inference is billed** in your organization. Sections 5–7 (Real-Time Context
+how that inference is billed** in your organization. Sections 6–8 (Real-Time Context
 Engine, Lightning Queries) depend on the region check in [step 5](#5-check-the-region).
 
 ## 9. Add everyone else
@@ -308,7 +308,7 @@ environments, cluster or pool** — the deploy matches them by name.
 
 ### Cost
 
-- **Per developer, apply → destroy:** a Standard Kafka cluster and Flink compute (CFUs on demand, up to `flink_max_cfu`). Developers' own statements keep running — and can keep using compute — until you destroy their stack, even after they run `uv run destroy`. Plus the agents' AI model calls (they fire only on anomalies, so cost tracks incidents, not time).
+- **Per developer, apply → destroy:** a Standard Kafka cluster and Flink compute (CFUs on demand, up to `flink_max_cfu`). Developers' own statements keep running — and can keep using compute — until you destroy their stack, even after they run `uv run destroy`. Plus the agents' AI model calls, while the developer's generator runs. The release and capacity agents fire only on anomalies, so their calls track incidents (about 45 an hour per developer). The ticket classifier fires on every P1 ticket and the responder on the ones the classifier calls high severity, so their calls track tickets (about 72 and 36, or 108 an hour per developer).
 - **Per environment, until destroyed:** Stream Governance Advanced (billed per environment, can't be downgraded).
 
 ### Terraform state
