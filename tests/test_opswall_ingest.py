@@ -40,7 +40,7 @@ from scripts.opswall.consumer import (
     decode_record,
     make_deserializer,
 )
-from scripts.opswall.state import OpsWallState, _to_seconds
+from scripts.opswall.state import CHART_SECONDS, OpsWallState, _to_seconds
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "opswall"
@@ -127,7 +127,7 @@ def test_the_first_rollback_closes_the_real_detection():
     st = _live_payments_wall()
     payments = _service(st, "payments", NOW)
     first, second = payments["blocks"]
-    left = NOW - st.axis_seconds
+    left = NOW - CHART_SECONDS
     first_flag = next(r for r in HEALTH if r["latency_status"] == "HIGH")
     assert first["start"] == pytest.approx(_to_seconds(first_flag["detected_at"]) - left)
     assert first["end"] == pytest.approx(_written_at(DECISIONS[0]) - left)
@@ -159,27 +159,29 @@ def _produce(sr, topic: str, field: MessageField, record: dict) -> bytes:
     return ser(record, SerializationContext(topic, field))
 
 
-def test_a_live_deployment_record_updates_its_tile(registry):
+def test_a_live_deployment_record_reaches_the_running_version_and_the_releases(registry):
     from opsgen.services import METRIC_SERVICES_BY_NAME
     from opsgen.simulation import Simulation
 
     sim = Simulation(1, start=1_800_000_000.0)
-    sim.deployments["payments"].deploy(1_800_000_000.0)
-    record = sim._dep_record("payments", 1_800_000_000.0)  # what ops-sim produces
-    key = _produce(registry, DEPLOYMENTS_TOPIC, MessageField.KEY, {"service_name": "payments"})
+    sim.deployments["web-gateway"].deploy(1_800_000_000.0)
+    record = sim._dep_record("web-gateway", 1_800_000_000.0)  # what ops-sim produces
+    key = _produce(registry, DEPLOYMENTS_TOPIC, MessageField.KEY, {"service_name": "web-gateway"})
     value = _produce(registry, DEPLOYMENTS_TOPIC, MessageField.VALUE, record)
 
     deser = make_deserializer(registry)
     decoded = decode_record(value, key, DEPLOYMENTS_TOPIC, deser, key_deserializer=deser)
     assert isinstance(decoded["deployed_at"], datetime), "the decoder hands over datetimes"
-    assert decoded["service_name"] == "payments", "service_name comes from the key"
+    assert decoded["service_name"] == "web-gateway", "service_name comes from the key"
 
     st = OpsWallState()
     st.apply_deployment(decoded)
-    tile = _service(st, "payments", 1_800_000_030.0)
-    initial = METRIC_SERVICES_BY_NAME["payments"].initial_version
-    assert (tile["previousVersion"], tile["lastChange"]) == (initial, "DEPLOY")
-    assert tile["secondsSinceDeploy"] == pytest.approx(30.0)
+    row = _service(st, "web-gateway", 1_800_000_030.0)
+    initial = METRIC_SERVICES_BY_NAME["web-gateway"].initial_version
+    assert row["version"] == record["version"] != initial
+    [release] = row["releases"]["newest"]
+    assert (release["version"], release["deployedAt"], release["rolledBackAfter"]) == (
+        record["version"], pytest.approx(1_800_000_000.0), None)
 
 
 def test_a_live_incident_record_draws_its_ground_truth(registry):
@@ -198,7 +200,7 @@ def test_a_live_incident_record_draws_its_ground_truth(registry):
         st.apply_incident(decoded)
     now = 1_800_000_060.0
     [truth] = _service(st, "payments", now)["groundTruth"]
-    axis_left = now - st.axis_seconds
+    axis_left = now - CHART_SECONDS
     assert truth["start"] == pytest.approx(1_800_000_000.0 - axis_left)
     assert truth["end"] == pytest.approx(1_800_000_040.0 - axis_left)
     assert truth["open"] is False
@@ -221,7 +223,7 @@ def test_live_metrics_records_reach_the_charts_and_the_rail(registry):
     now = start + 10
     payments = _service(st, "payments", now)
     mine = [r for r in sent if r["service_name"] == "payments"]
-    left = now - st.axis_seconds
+    left = now - CHART_SECONDS
     assert [m["t"] for m in payments["metrics"]] == pytest.approx([start + k + 0.999 - left for k in range(10)])
     assert [m["traffic"] for m in payments["metrics"]] == [r["traffic_count"] for r in mine]
     assert [m["latency"] for m in payments["metrics"]] == [round(r["latency_ms"], 1) for r in mine]
@@ -404,5 +406,5 @@ def test_detected_at_is_read_as_an_instant_through_the_avro_path():
     st.apply_health(decoded)
     now = detected + 2.0
     [block] = _service(st, "payments", now)["blocks"]
-    assert block["start"] == pytest.approx(detected - (now - st.axis_seconds))
+    assert block["start"] == pytest.approx(detected - (now - CHART_SECONDS))
     assert block["open"] is True

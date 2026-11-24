@@ -58,12 +58,12 @@ def test_websocket_sends_a_snapshot_on_connect(client):
     with c.websocket_connect("/ws") as ws:
         payload = ws.receive_text()
         snap = json.loads(payload)
-        assert snap["axisSeconds"] == 600
+        assert snap["chartSeconds"] == 120  # every row's time axis, checkout's timeline included
         assert isinstance(snap["services"], list) and len(snap["services"]) == 3
         assert "summary" not in snap  # each row has its own Issues panel (D-068)
         assert snap["actionWords"]["ROLLBACK"] == "Roll back"
         for s in snap["services"]:
-            assert ("blocks" in s and "groundTruth" in s) == (s["row"] == "metrics")
+            assert ("blocks" in s and "groundTruth" in s) == (s["row"] != "tickets")
             assert s["issues"] == {"injected": 0, "detected": 0, "missed": 0,
                                    "medianTimeToDetect": None, "medianTimeToRemediate": None,
                                    "medianTimeToDetectText": "—", "medianTimeToRemediateText": "—"}
@@ -74,4 +74,3 @@ def test_websocket_sends_a_snapshot_on_connect(client):
         assert (checkout["marks"], checkout["runs"], checkout["openP1"], checkout["agentsWorking"]) == ([], [], 0, 0)
         assert [lane["state"] for lane in checkout["lanes"]] == ["Idle", "Idle"]
         assert checkout["agentsText"] == "Both agents idle"
-        assert checkout["timelineSeconds"] == 120

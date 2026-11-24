@@ -16,10 +16,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from scripts.opswall.state import AXIS_SECONDS, ERROR_RATE_THRESHOLD_PCT, OpsWallState
+from scripts.opswall.state import CHART_SECONDS, ERROR_RATE_THRESHOLD_PCT, HISTORY_SECONDS, OpsWallState
 
 NOW = 1_800_000_000.0  # fixed epoch so snapshots are deterministic; a multiple of 10
-T0 = NOW - 300         # incidents start here, on a window boundary
+T0 = NOW - 100         # incidents start here, on a window boundary, on the 2-minute chart
 DETECT = 6.0           # a window's verdict lands this long after window_end
 ANSWER = 8.0           # an agent's decision is written this long after the detection
 
@@ -65,8 +65,8 @@ def _svc(st, name, now=NOW):
 
 
 def _pos(t, now=NOW):
-    """Where absolute time `t` sits on the axis of a snapshot taken at `now`."""
-    return t - (now - AXIS_SECONDS)
+    """Where absolute time `t` sits on the chart of a snapshot taken at `now`."""
+    return t - (now - CHART_SECONDS)
 
 
 # --- plumbing -----------------------------------------------------------------
@@ -80,15 +80,29 @@ def test_services_are_preseeded():
     assert "maxReplicas" not in names["payments"]  # D-043: no ceiling
 
 
-def test_deployment_upsert_keeps_latest():
+def test_the_running_version_is_the_latest_deployment_records_the_heartbeat_included():
     st = OpsWallState()
-    st.apply_deployment({"service_name": "payments", "version": "1.0.0", "previous_version": "0.9.0",
-                         "ready_replicas": 3, "deployed_at": _dt(NOW - 300)})
-    st.apply_deployment({"service_name": "payments", "version": "1.0.1", "previous_version": "1.0.0",
-                         "ready_replicas": 4})
-    s = _svc(st, "payments")
-    assert s["previousVersion"] == "1.0.0"
-    assert 299 <= s["secondsSinceDeploy"] <= 301
+    assert _svc(st, "web-gateway")["version"] is None  # before the first record
+    # The wall started after the last deploy: the 5-s heartbeat alone says what runs.
+    st.apply_deployment({"service_name": "web-gateway", "version": "3.4.2", "previous_version": None,
+                         "last_change": "INITIAL", "deployed_at": _dt(NOW - 500)})
+    assert _svc(st, "web-gateway")["version"] == "3.4.2"
+    _deployment(st, "web-gateway", T0, "DEPLOY", "3.4.3", "3.4.2")
+    assert _svc(st, "web-gateway")["version"] == "3.4.3"
+    _deployment(st, "web-gateway", T0 + 11, "ROLLBACK", "3.4.2", "3.4.3")
+    _deployment(st, "web-gateway", T0 + 11, "ROLLBACK", "3.4.2", "3.4.3")  # its heartbeat
+    assert _svc(st, "web-gateway")["version"] == "3.4.2"
+
+
+def test_a_metric_row_carries_none_of_the_deployment_leftovers():
+    # Nothing on the page read them (opswall-redesign issue 01); the version and the Releases
+    # list are what the design shows, on the releases row alone.
+    st = OpsWallState()
+    _deployment(st, "web-gateway", T0, "DEPLOY", "3.4.3", "3.4.2")
+    _deployment(st, "payments", T0, "DEPLOY", "2.9.5", "2.9.4")
+    for name in ("web-gateway", "payments"):
+        assert not {"previousVersion", "lastChange", "secondsSinceDeploy"} & set(_svc(st, name))
+    assert not {"version", "releases"} & set(_svc(st, "payments"))
 
 
 def test_unknown_service_is_silently_ignored():
@@ -127,13 +141,13 @@ def test_a_sample_in_the_future_shows_once_its_second_is_over():
     assert len(_svc(st, "payments", now=NOW + 1)["metrics"]) == 1
 
 
-def test_trim_drops_the_samples_older_than_the_axis_plus_the_margin():
+def test_trim_drops_the_samples_older_than_the_history_plus_the_margin():
     st = OpsWallState()
     _sample(st, "payments", NOW - 670, traffic=1)
     _sample(st, "payments", NOW - 650, traffic=2)
     st.trim(NOW)  # keeps the last 600 + 60 s
-    # A snapshot whose chart still reaches back 700 s would show the dropped one.
-    assert [m["traffic"] for m in _svc(st, "payments", now=NOW - 100)["metrics"]] == [2]
+    # A snapshot whose chart still reaches back 680 s would show the dropped one.
+    assert [m["traffic"] for m in _svc(st, "payments", now=NOW - 560)["metrics"]] == [2]
 
 
 def test_health_rows_alone_draw_no_line():
@@ -156,15 +170,15 @@ def test_the_wall_knows_the_chart_of_every_incident_type_the_simulator_starts_an
 
 def test_start_record_opens_the_box_end_record_closes_it():
     st = OpsWallState()
-    _incident(st, "payments", NOW - 200)
+    _incident(st, "payments", NOW - 100)
     [gt] = _svc(st, "payments")["groundTruth"]
     assert gt["open"] is True and gt["metric"] == "latency"
 
-    _incident(st, "payments", NOW - 200, NOW - 160)
+    _incident(st, "payments", NOW - 100, NOW - 60)
     [gt] = _svc(st, "payments")["groundTruth"]
     assert gt["open"] is False
-    assert gt["start"] == pytest.approx(AXIS_SECONDS - 200)
-    assert gt["end"] == pytest.approx(AXIS_SECONDS - 160)
+    assert gt["start"] == pytest.approx(CHART_SECONDS - 100)
+    assert gt["end"] == pytest.approx(CHART_SECONDS - 60)
 
 
 def test_start_record_after_end_is_ignored():
@@ -236,7 +250,7 @@ def test_a_block_before_its_answer_is_open_and_grows_with_now():
     [early], [later] = (_svc(st, "payments", now)["blocks"] for now in (T0 + 18, T0 + 25))
     for block, now in ((early, T0 + 18), (later, T0 + 25)):
         assert block["open"] is True and block["action"] is None and block["timeToAnswer"] is None
-        assert block["end"] == AXIS_SECONDS  # at the right edge, i.e. now
+        assert block["end"] == CHART_SECONDS  # at the right edge, i.e. now
         assert block["start"] == pytest.approx(_pos(T0 + 16, now))
     assert later["end"] - later["start"] == pytest.approx(9.0)
     assert early["end"] - early["start"] == pytest.approx(2.0)
@@ -320,9 +334,9 @@ def test_a_row_without_detected_at_opens_no_block():
 
 def test_a_replayed_window_off_the_chart_opens_no_block():
     """A restarted INSERT replays old windows with detected_at = now; only windows whose
-    window_end is on the chart count."""
+    window_end is in the history count."""
     st = OpsWallState()
-    old = NOW - AXIS_SECONDS - 60
+    old = NOW - HISTORY_SECONDS - 60
     for k in range(4):
         _health(st, "payments", old + 10 * k, lat="HIGH", detected_at=NOW - 2)
         _decide(st, "payments", old + 10 * k, at=NOW - 1)
@@ -462,9 +476,9 @@ def test_time_to_remediate_runs_from_the_incidents_start_to_its_answer():
     _health(st, "payments", T0 + 10, lat="HIGH")
     _decide(st, "payments", T0 + 10, at=T0 + 24)
     # a drop detected 26 s after the start, answered 12 s later: 38 s
-    _incident(st, "payments", T0 + 100, T0 + 140, incident_type="UPSTREAM_DROP", iid="INC-B")
-    _health(st, "payments", T0 + 120, trf="LOW")
-    _decide(st, "payments", T0 + 120, at=T0 + 138, action="INVESTIGATE_UPSTREAM", trigger="TRAFFIC_LOW",
+    _incident(st, "payments", T0 + 50, T0 + 90, incident_type="UPSTREAM_DROP", iid="INC-B")
+    _health(st, "payments", T0 + 70, trf="LOW")
+    _decide(st, "payments", T0 + 70, at=T0 + 88, action="INVESTIGATE_UPSTREAM", trigger="TRAFFIC_LOW",
             target=None, agent="capacity_agent")
     # detected, not answered yet: counted, but in neither median
     _incident(st, "payments", NOW - 20, iid="INC-C")
@@ -531,16 +545,16 @@ def test_an_open_incident_counts_as_injected_but_neither_detected_nor_missed():
 
 def test_only_incidents_that_started_in_the_last_10_minutes_count():
     st = OpsWallState()
-    # ended before the window: off the chart
+    # ended before the window
     _incident(st, "payments", NOW - 700, NOW - 660, iid="OLD")
-    # started 10 s before the window and still on the chart, answered: not in the last 10 minutes
+    # started 10 s before the window and ended in it, answered: not in the last 10 minutes
     _incident(st, "payments", NOW - 610, NOW - 575, iid="EDGE")
     _health(st, "payments", NOW - 590, lat="HIGH")
     _decide(st, "payments", NOW - 590, at=NOW - 580)
     # started in the window: counted
     _incident(st, "payments", T0, T0 + 40, incident_type="UPSTREAM_DROP", iid="IN")
     s = _svc(st, "payments")
-    assert [g["incidentId"] for g in s["groundTruth"]] == ["EDGE", "IN"]  # both drawn
+    assert [g["incidentId"] for g in s["groundTruth"]] == ["IN"]  # the one on the 2-minute chart
     assert s["issues"] == {"injected": 1, "detected": 0, "missed": 1,
                            "medianTimeToDetect": None, "medianTimeToRemediate": None,
                            "medianTimeToDetectText": "—", "medianTimeToRemediateText": "—"}
@@ -578,9 +592,9 @@ def test_the_issues_durations_come_in_words_as_the_design_writes_them():
 # --- trim --------------------------------------------------------------------
 
 
-def test_trim_drops_entries_older_than_the_axis():
+def test_trim_drops_entries_older_than_the_history():
     st = OpsWallState()
-    old = NOW - AXIS_SECONDS * 2
+    old = NOW - HISTORY_SECONDS * 2
     _incident(st, "payments", old, old + 40, incident_type="UPSTREAM_DROP")
     _health(st, "payments", old, trf="LOW")
     _decide(st, "payments", old, at=old + 10, action="INVESTIGATE_UPSTREAM", trigger="TRAFFIC_LOW")
@@ -644,7 +658,7 @@ def _deployment(st, service, deployed_at, last_change, version, previous_version
 
 
 def test_each_metric_row_names_its_charts():
-    charts = {s["name"]: s["charts"] for s in OpsWallState().snapshot(now=NOW)["services"] if s["row"] == "metrics"}
+    charts = {s["name"]: s["charts"] for s in OpsWallState().snapshot(now=NOW)["services"] if s["row"] != "tickets"}
     assert charts == {"web-gateway": ["errors"], "payments": ["latency", "traffic"]}
 
 
@@ -654,7 +668,7 @@ def test_checkouts_row_carries_what_a_ticket_row_draws_and_nothing_of_a_metric_r
     st = OpsWallState()
     _health(st, "payments", NOW - 10, lat="HIGH")
     s = _svc(st, "checkout")
-    assert set(s) == {"name", "row", "status", "statusText", "issues", "sources", "tickets", "timelineSeconds",
+    assert set(s) == {"name", "row", "status", "statusText", "issues", "sources", "tickets",
                       "marks", "runs", "lanes", "agentsText", "agentsWorking", "openP1"}
     assert (s["status"], s["statusText"]) == ("healthy", "Healthy")
 
@@ -745,7 +759,7 @@ def test_deploys_and_rollbacks_become_marks_and_heartbeats_do_not():
 
 def test_trim_drops_old_error_rate_rows_and_deploy_marks():
     st = OpsWallState()
-    old = NOW - AXIS_SECONDS - 120
+    old = NOW - HISTORY_SECONDS - 120
     _error_rate(st, old, "HIGH")
     _deployment(st, "web-gateway", old, "DEPLOY", "3.4.3", "3.4.2")
     st.trim(NOW)
@@ -762,6 +776,74 @@ def test_the_threshold_line_is_lab_2_2s_rule():
     (share,) = re.findall(r"error_count >= ([\d.]+) \* traffic_count", sql)
     assert ERROR_RATE_THRESHOLD_PCT == pytest.approx(100 * float(share))
     assert OpsWallState().snapshot(now=NOW)["errorThresholdPct"] == ERROR_RATE_THRESHOLD_PCT
+
+
+# --- the 2-minute charts and web-gateway's Releases list (D-068) -----------------------
+
+
+def test_the_charts_show_the_last_2_minutes_and_the_issues_panel_the_last_10():
+    st = OpsWallState()
+    assert st.snapshot(now=NOW)["chartSeconds"] == CHART_SECONDS == 120
+    for iid, start in (("OLD", NOW - 300), ("NEW", NOW - 60)):  # both answered, one off the chart
+        _incident(st, "payments", start, start + 35, incident_type="UPSTREAM_DROP", iid=iid)
+        _health(st, "payments", start + 10, trf="LOW")
+        _health(st, "payments", start + 20)  # back to normal: the run ends
+        _decide(st, "payments", start + 10, at=start + 10 + DETECT + ANSWER, action="INVESTIGATE_UPSTREAM",
+                trigger="TRAFFIC_LOW")
+    _sample(st, "payments", NOW - 130.001, traffic=1)
+    _sample(st, "payments", NOW - 1.001, traffic=2)
+    _deployment(st, "web-gateway", NOW - 130, "DEPLOY", "3.4.3", "3.4.2")
+    _deployment(st, "web-gateway", NOW - 50, "DEPLOY", "3.4.4", "3.4.3")
+
+    s = _svc(st, "payments")
+    assert [g["incidentId"] for g in s["groundTruth"]] == ["NEW"]
+    assert [b["incidentId"] for b in s["blocks"]] == ["NEW"]
+    assert s["groundTruth"][0]["start"] == pytest.approx(60)
+    assert [m["traffic"] for m in s["metrics"]] == [2]
+    assert (s["issues"]["injected"], s["issues"]["detected"]) == (2, 2)
+    assert [(d["version"], d["t"]) for d in _svc(st, "web-gateway")["deploys"]] == [("3.4.4", pytest.approx(70))]
+
+
+def test_a_block_open_since_before_the_chart_stays_on_it():
+    st = OpsWallState()
+    for w in range(int(NOW) - 150, int(NOW) + 1, 10):  # flagged for 2.5 minutes, unanswered
+        _health(st, "payments", w, lat="HIGH", detected_at=w + DETECT if w + DETECT <= NOW else None)
+    [block] = _svc(st, "payments")["blocks"]
+    assert block["open"] and (block["start"], block["end"]) == (0.0, CHART_SECONDS)
+
+
+def test_the_releases_list_has_the_newest_5_deploys_of_the_last_10_minutes_and_their_count():
+    st = OpsWallState()
+    _deployment(st, "web-gateway", NOW - 610, "DEPLOY", "3.4.3", "3.4.2")  # before the last 10 minutes
+    for i, t in enumerate((NOW - 590, NOW - 500, NOW - 420, NOW - 340, NOW - 260, NOW - 180)):
+        _deployment(st, "web-gateway", t, "DEPLOY", f"3.4.{4 + i}", f"3.4.{3 + i}")
+    releases = _svc(st, "web-gateway")["releases"]
+    assert releases["count"] == 6
+    assert [r["version"] for r in releases["newest"]] == ["3.4.9", "3.4.8", "3.4.7", "3.4.6", "3.4.5"]
+    assert releases["newest"][0]["deployedAt"] == NOW - 180  # absolute: the list prints the date
+    assert len({r["key"] for r in releases["newest"]}) == 5
+
+
+def test_a_rolled_back_release_says_how_long_it_ran_and_the_version_it_went_back_to_says_nothing():
+    st = OpsWallState()
+    _deployment(st, "web-gateway", NOW - 200, "DEPLOY", "3.4.3", "3.4.2")
+    _deployment(st, "web-gateway", NOW - 120, "DEPLOY", "3.4.4", "3.4.3")
+    _deployment(st, "web-gateway", NOW - 98, "ROLLBACK", "3.4.3", "3.4.4")
+    _deployment(st, "web-gateway", NOW - 98, "ROLLBACK", "3.4.3", "3.4.4")  # its heartbeat
+    releases = _svc(st, "web-gateway")["releases"]
+    assert [(r["version"], r["rolledBackAfter"], r["rolledBackAfterText"]) for r in releases["newest"]] == [
+        ("3.4.4", 22.0, "22s"),
+        ("3.4.3", None, None),  # 3.4.4's rollback went back to it: it was never rolled back
+    ]
+    assert releases["count"] == 2  # a rollback is no release
+
+
+def test_a_rollback_whose_deploy_is_older_than_the_list_marks_nothing():
+    st = OpsWallState()
+    _deployment(st, "web-gateway", NOW - 590, "ROLLBACK", "3.4.2", "3.4.3")  # 3.4.3 was deployed before
+    _deployment(st, "web-gateway", NOW - 100, "DEPLOY", "3.4.4", "3.4.2")
+    releases = _svc(st, "web-gateway")["releases"]
+    assert [(r["version"], r["rolledBackAfter"]) for r in releases["newest"]] == [("3.4.4", None)]
 
 
 # --- checkout's row: tickets and agent runs (D-068) ------------------------------------
@@ -783,7 +865,7 @@ def _row(st, now=NOW):
 def test_the_snapshot_says_which_kind_of_row_each_service_gets():
     # From opsgen.services' split (issue 02), so the page holds no service names.
     rows = {s["name"]: s["row"] for s in OpsWallState().snapshot(now=NOW)["services"]}
-    assert rows == {"web-gateway": "metrics", "checkout": "tickets", "payments": "metrics"}
+    assert rows == {"web-gateway": "releases", "checkout": "tickets", "payments": "metrics"}
 
 
 def test_the_list_has_the_newest_5_tickets_and_the_count_of_the_last_10_minutes():
@@ -811,7 +893,7 @@ def test_every_ticket_of_the_last_2_minutes_is_a_mark_on_the_timeline():
     _ticket(st, "INC0041872", NOW - 30, priority="P3", source=SN)
     _ticket(st, "ZD-48203", NOW - 5)
     row = _row(st)
-    assert row["timelineSeconds"] == 120
+    assert st.snapshot(now=NOW)["chartSeconds"] == 120  # the timeline is the charts' 2 minutes
     # t is the position on the timeline: 0 at its left edge, 120 at now
     assert row["marks"] == [
         {"id": "ZD-48202", "priority": "P2", "t": pytest.approx(0.0)},

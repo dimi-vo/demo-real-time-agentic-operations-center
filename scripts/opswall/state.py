@@ -16,8 +16,8 @@ transaction wrote comes again when the statement replays, D-063).
 
 - A **run** is consecutive flagged windows of one service for one trigger (latency
   high, traffic high, traffic low from ``service_health``; error rate high from
-  ``service_error_rate``, D-067), counting only windows whose ``window_end`` is on the
-  chart. One window without that flag ends the run.
+  ``service_error_rate``, D-067), counting only windows whose ``window_end`` is in the
+  history (the last 10 minutes). One window without that flag ends the run.
 - Its **block** opens at the ``detected_at`` of the run's first window and closes at
   the Kafka write time of the first decision for any window of the run, whatever the
   action. Still unanswered 30 s after the run's last ``detected_at``, it is removed.
@@ -37,7 +37,7 @@ transaction wrote comes again when the statement replays, D-063).
   the page draws ``issues`` whatever it was counted from, the medians in the words it shows
   ("6s", "1m 05s", "—" with none). There is no global summary.
 - The **samples** are the raw ``service_metrics`` records, one per metric service per
-  second (D-058, D-068), kept for the axis plus a margin (``trim()``). The snapshot
+  second (D-058, D-068), kept for the history plus a margin (``trim()``). The snapshot
   carries the ones on the chart; the page draws them as the latency and traffic lines
   (D-061), and, for a row with the errors chart, the share of each second's requests
   that failed (null for a second without requests, D-067).
@@ -46,10 +46,18 @@ transaction wrote comes again when the statement replays, D-063).
   metrics, has none (D-068). A row with the errors chart
   also gets a **deploy mark** per DEPLOY and ROLLBACK of its service, good deploys
   included, keyed by ``deployed_at`` so the 5-s heartbeat adds nothing.
+- The **chart** of every row shows the last 2 minutes (``CHART_SECONDS``, the design's, D-068);
+  what has left it still counts in the Issues panel and the status, worked out over the
+  history.
+- A **releases** row (web-gateway, the design's deploy row, D-068) also carries its running
+  version (the latest ``service_deployments`` record's, heartbeat included) and its Releases
+  list: the newest 5 DEPLOYs of the last 10 minutes, each with how long it ran before the
+  ROLLBACK that left its version, and their count.
 - The **row kind** (``row``): ``"tickets"`` for the ticket services of ``opsgen.services``
-  (checkout), ``"metrics"`` for the others, so the page holds no service names (D-068). Each
-  kind is built by its own function and carries only what the page draws for it: a metric row
-  its charts, samples, deploys, blocks and incidents; a ticket row its sources, list and
+  (checkout), ``"releases"`` for a row with the errors chart (web-gateway), ``"metrics"`` for
+  the others, so the page holds no service names (D-068). Each kind carries only what the
+  page draws for it: a metric row its charts, samples, deploys, blocks and incidents, a
+  releases row its version and Releases list as well; a ticket row its sources, list and
   timeline. The words the page shows come with the snapshot too: ``actionWords`` for every
   action, a ticket source's name, a lane's state.
 - A **ticket** is one record per ``ticket_id``, filled in from five topics in any order: its
@@ -59,7 +67,7 @@ transaction wrote comes again when the statement replays, D-063).
   and reason and when it gave them (a ``remediation_decisions`` record with a ``ticket_id``).
   Such a decision goes to its ticket and nowhere else: it never closes a metric block,
   counts as a false alarm or sets a metric row's status.
-- A ticket row's **runs** (the last 2 minutes): the classifier's, from the ``p1_tickets``
+- A ticket row's **runs** (the chart's last 2 minutes): the classifier's, from the ``p1_tickets``
   record to the verdict ("High in 4s"), and for a HIGH verdict the responder's, from the
   verdict to the decision ("Scale out in 6s"). A run with no answer is open ("Working 3s")
   until 30 s after it started, then ends there ("No answer"). The row is "Agent resolving
@@ -72,8 +80,8 @@ transaction wrote comes again when the statement replays, D-063).
   marks are the tickets of the last 2 minutes.
 
 State stores absolute epoch seconds everywhere. The snapshot turns positions into the
-axis-relative seconds the page draws with: ``t - (now - axis_seconds)``, clipped to
-``[0, axis_seconds]``. Durations stay plain seconds.
+axis-relative seconds the page draws with: ``t - (now - CHART_SECONDS)``, clipped to
+``[0, CHART_SECONDS]``. Durations stay plain seconds; the Releases list's dates stay absolute.
 """
 
 from __future__ import annotations
@@ -89,15 +97,16 @@ from datetime import datetime, timezone
 from opsgen.services import SERVICES, TICKET_SERVICES
 from opsgen.tickets import HIGH, LOW, SOURCES, SOURCES_BY_CODE
 
-AXIS_SECONDS = 600
+HISTORY_SECONDS = 600  # what the state keeps and the Issues panel counts over: the last 10 minutes
+CHART_SECONDS = 120    # every row's chart, checkout's timeline included: the last 2 minutes (D-068)
 WINDOW_SECONDS = 10.0
 ANSWER_WAIT_SECONDS = 30.0      # an unanswered block goes this long after its run's last detection
 OWNERSHIP_GRACE_SECONDS = 30.0  # a run starting this long after its incident ended still belongs to it
 MISSED_AFTER_SECONDS = 30.0     # an incident nobody answered is missed this long after it ended
 FIX_RECENT_SECONDS = 120.0      # the tile shows a fix this long
 FIX_ACTIONS = ("ROLLBACK", "SCALE_OUT", "INVESTIGATE_UPSTREAM")
-# Keep this long past the axis: a run straddling the left edge stays whole, and a sample
-# stays until well after it scrolled off.
+# Keep this long past the history: a run straddling its start stays whole, and a sample stays
+# until well after it left.
 RETAIN_MARGIN_SECONDS = 60.0
 
 
@@ -123,8 +132,10 @@ INCIDENT_METRIC = {  # no TRAFFIC_SURGE: surges are retired (D-068)
     "UPSTREAM_DROP": "traffic",
     "BAD_DEPLOY_ERRORS": "errors",
 }
-# The rows whose only chart is the errors chart: the services lab 2.2 reads (D-067).
+# The rows whose only chart is the errors chart: the services lab 2.2 reads (D-067). Each is a
+# "releases" row: the design's deploy row, with its running version and Releases list (D-068).
 ERRORS_CHART_SERVICES = ("web-gateway",)
+RELEASES_LISTED = 5  # the newest deploys a Releases list shows
 # Lab 2.2's rule (sql/2.2_error_rate.sql), drawn as a line on the errors chart; a test keeps
 # the two in step.
 ERROR_RATE_THRESHOLD_PCT = 25.0
@@ -211,9 +222,7 @@ class Ticket:
 @dataclass
 class ServiceState:
     name: str
-    previous_version: str | None = None
-    last_change: str | None = None
-    deployed_at: float | None = None
+    version: str | None = None  # the running version, from the latest service_deployments record
     health: list[HealthRow] = field(default_factory=list)
     error_rates: list[ErrorRateRow] = field(default_factory=list)
     deploys: list[DeployMark] = field(default_factory=list)  # by at
@@ -244,8 +253,8 @@ class _Block:
 class OpsWallState:
     """Thread-safe collector + snapshotter for the dashboard."""
 
-    def __init__(self, axis_seconds: int = AXIS_SECONDS) -> None:
-        self.axis_seconds = axis_seconds
+    def __init__(self, history_seconds: int = HISTORY_SECONDS) -> None:
+        self.history_seconds = history_seconds
         self._lock = threading.RLock()
         self._services = _seeded_services()
         self._tickets: dict[str, Ticket] = {}  # by ticket_id
@@ -259,10 +268,7 @@ class OpsWallState:
             return
         with self._lock:
             s = self._services[name]
-            s.previous_version = record.get("previous_version") or s.previous_version
-            s.last_change = record.get("last_change") or s.last_change
-            if record.get("deployed_at") is not None:
-                s.deployed_at = _to_seconds(record["deployed_at"])
+            s.version = record.get("version") or s.version
             # A version change is a mark, once: the heartbeat repeats the record every 5 s.
             at = _to_seconds(record.get("deployed_at"))
             change = record.get("last_change")
@@ -457,10 +463,10 @@ class OpsWallState:
     # ---- housekeeping ---------------------------------------------------------
 
     def trim(self, now: float) -> None:
-        """Drop entries whose anchor time is older than ``now - axis_seconds - margin``: an
+        """Drop entries whose anchor time is older than ``now - history_seconds - margin``: an
         incident by its end, or by its start while it is open (an incident whose end record
         never came leaves the wall here). The feed calls this every 10 s."""
-        cutoff = now - self.axis_seconds - RETAIN_MARGIN_SECONDS
+        cutoff = now - self.history_seconds - RETAIN_MARGIN_SECONDS
         with self._lock:
             for s in self._services.values():
                 s.health = [h for h in s.health if h.window_end >= cutoff]
@@ -477,10 +483,11 @@ class OpsWallState:
 
     def snapshot(self, now: float | None = None) -> dict:
         now = now if now is not None else time.time()
-        left = now - self.axis_seconds
+        left = now - self.history_seconds
+        chart_left = now - CHART_SECONDS
 
         def rel(t: float) -> float:
-            return max(0.0, min(self.axis_seconds, t - left))
+            return max(0.0, min(CHART_SECONDS, t - chart_left))
 
         with self._lock:
             services = []
@@ -489,9 +496,9 @@ class OpsWallState:
                     tickets = [t for t in self._tickets.values() if t.service_name in (None, s.name)]
                     services.append(_ticket_row(s.name, tickets, now))
                 else:
-                    services.append(_metric_row(s, now, left, rel))
+                    services.append(_metric_row(s, now, left, chart_left, rel))
             return {
-                "axisSeconds": self.axis_seconds,
+                "chartSeconds": CHART_SECONDS,  # every row's time axis
                 "errorThresholdPct": ERROR_RATE_THRESHOLD_PCT,
                 "actionWords": dict(ACTION_WORDS),  # how the page names an action, in every tooltip
                 "updatedAt": now,
@@ -502,8 +509,11 @@ class OpsWallState:
 
 # ---- snapshot helpers ---------------------------------------------------------
 
-def _metric_row(s: ServiceState, now: float, left: float, rel) -> dict:
-    """A metric service's row: its charts and what they draw, its status and Issues numbers."""
+def _metric_row(s: ServiceState, now: float, left: float, chart_left: float, rel) -> dict:
+    """A metric service's row: its charts and what they draw, its status and Issues numbers. The
+    blocks, the incidents and the status are worked out over the history (``left``), the chart
+    shows what reaches its last 2 minutes (``chart_left``). A "releases" row adds its running
+    version and its Releases list."""
     rows = {source: sorted((r for r in getattr(s, source) if r.window_end >= left), key=lambda r: r.window_end)
             for source in ("health", "error_rates")}
     incidents = sorted((i for i in s.incidents if _incident_end(i, now) >= left),
@@ -514,22 +524,24 @@ def _metric_row(s: ServiceState, now: float, left: float, rel) -> dict:
         b.incident = _owner(b, incidents, now)
 
     status, status_text = _status(blocks, now)
-    return {
+    kind = "releases" if s.name in ERRORS_CHART_SERVICES else "metrics"
+    row = {
         "name": s.name,
-        "row": "metrics",  # which kind of row the page builds (D-068)
-        "previousVersion": s.previous_version,
-        "lastChange": s.last_change,
-        "secondsSinceDeploy": (now - s.deployed_at) if s.deployed_at else None,
+        "row": kind,  # which kind of row the page builds (D-068)
         "status": status,
         "statusText": status_text,
         "issues": _incident_issues(incidents, blocks, left, now),  # the page draws it whatever it counts
         "groundTruth": [_incident_json(i, [b for b in blocks if b.incident is i], now, rel)
-                        for i in incidents],
-        "blocks": [_block_json(b, now, rel) for b in blocks],
+                        for i in incidents if _incident_end(i, now) >= chart_left],
+        "blocks": [_block_json(b, now, rel) for b in blocks if (b.end if b.closer else now) >= chart_left],
         "charts": charts,
-        "metrics": _samples_json(s.samples, left, now, errors="errors" in charts),
-        "deploys": [_deploy_json(d, rel) for d in s.deploys if d.at >= left] if "errors" in charts else [],
+        "metrics": _samples_json(s.samples, chart_left, now, errors="errors" in charts),
+        "deploys": [_deploy_json(d, rel) for d in s.deploys if d.at >= chart_left] if "errors" in charts else [],
     }
+    if kind == "releases":
+        row["version"] = s.version
+        row["releases"] = _releases_json(s.deploys, left, now)
+    return row
 
 
 def _charts(name: str) -> list[str]:
@@ -558,6 +570,26 @@ def _samples_json(samples: list[MetricSample], left: float, now: float, errors: 
 def _deploy_json(d: DeployMark, rel) -> dict:
     return {"key": f"{d.kind}@{_ms(d.at)}", "t": rel(d.at), "kind": d.kind,
             "version": d.version, "previousVersion": d.previous_version}
+
+
+def _releases_json(deploys: list[DeployMark], left: float, now: float) -> dict:
+    """A Releases list (D-068): the newest DEPLOYs of the last 10 minutes, newest first, and
+    their count. A deploy's rollback is the first ROLLBACK after it that leaves its version
+    (versions are never reused); the list says how long the deploy ran before it, in seconds
+    and in the words the page shows."""
+    recent = [d for d in deploys if d.kind == "DEPLOY" and left <= d.at <= now]
+
+    def rolled_back_after(d: DeployMark) -> float | None:
+        back = next((r for r in deploys if r.kind == "ROLLBACK" and r.at >= d.at
+                     and r.previous_version == d.version), None)
+        return back.at - d.at if back else None
+
+    newest = []
+    for d in reversed(recent[-RELEASES_LISTED:]):
+        after = rolled_back_after(d)
+        newest.append({"key": f"{d.kind}@{_ms(d.at)}", "version": d.version, "deployedAt": d.at,
+                       "rolledBackAfter": after, "rolledBackAfterText": None if after is None else _dur_words(after)})
+    return {"count": len(recent), "newest": newest}
 
 
 def _blocks(rows: dict[str, list], decisions: list[DecisionMark], now: float) -> list[_Block]:
@@ -677,15 +709,14 @@ def _incident_issues(incidents: list[IncidentEvent], blocks: list[_Block], left:
 
 LIST_LENGTH = 5           # the newest tickets the list shows
 RECEIVED_SECONDS = 600.0  # "N received" counts the tickets created this long ago or since
-TIMELINE_SECONDS = 120    # "Tickets and agent runs" covers the last 2 minutes
 LANES = (("classifier", "Classifier"), ("responder", "Responder"))  # the timeline's, top to bottom
 
 
 def _ticket_row(name: str, tickets: list[Ticket], now: float) -> dict:
     """A ticket service's row: its status and Issues numbers, its two sources, the list, and the
     timeline with each lane's state. Timeline positions are seconds from its left edge,
-    ``now - TIMELINE_SECONDS``."""
-    left = now - TIMELINE_SECONDS
+    ``now - CHART_SECONDS``."""
+    left = now - CHART_SECONDS
     listed = sorted((t for t in tickets if t.event_time is not None and t.priority is not None),
                     key=lambda t: t.event_time, reverse=True)
     runs = sorted((r for t in tickets for r in _agent_runs(t, now) if r.end >= left), key=lambda r: r.start)
@@ -704,7 +735,6 @@ def _ticket_row(name: str, tickets: list[Ticket], now: float) -> dict:
                         "priority": t.priority, "subject": t.subject, "eventTime": t.event_time}
                        for t in listed[:LIST_LENGTH]],
         },
-        "timelineSeconds": TIMELINE_SECONDS,
         "marks": [{"id": t.ticket_id, "priority": t.priority, "t": t.event_time - left}
                   for t in reversed(listed) if left <= t.event_time <= now],
         "runs": [_run_json(r, left) for r in runs],
@@ -795,7 +825,7 @@ def _words(code: str | None, words: dict[str, str]) -> str | None:
 
 def _run_json(run: _Run, left: float) -> dict:
     def pos(t: float) -> float:
-        return max(0.0, min(TIMELINE_SECONDS, t - left))
+        return max(0.0, min(CHART_SECONDS, t - left))
 
     return {
         "key": f"{run.lane}@{run.ticket.ticket_id}",  # who the bar is from one snapshot to the next (D-062)

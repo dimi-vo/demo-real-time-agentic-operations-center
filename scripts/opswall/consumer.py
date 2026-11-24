@@ -33,7 +33,7 @@ from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroDeserializer
 from confluent_kafka.serialization import MessageField, SerializationContext
 
-from scripts.opswall.state import AXIS_SECONDS, RETAIN_MARGIN_SECONDS, OpsWallState
+from scripts.opswall.state import HISTORY_SECONDS, RETAIN_MARGIN_SECONDS, OpsWallState
 
 logger = logging.getLogger("ops-wall.consumer")
 
@@ -48,8 +48,8 @@ P1_TICKETS_TOPIC = "p1_tickets"
 TRIAGE_TOPIC = "ticket_triage"
 ANSWER_KEY_TOPIC = "ticket_answer_key"
 
-STARTUP_BACKREAD_SECONDS = AXIS_SECONDS  # read ~10 minutes of history on connect
-METRICS_BACKREAD_SECONDS = AXIS_SECONDS + RETAIN_MARGIN_SECONDS  # ~11 minutes
+STARTUP_BACKREAD_SECONDS = HISTORY_SECONDS  # read ~10 minutes of history on connect
+METRICS_BACKREAD_SECONDS = HISTORY_SECONDS + RETAIN_MARGIN_SECONDS  # ~11 minutes
 POLL_TIMEOUT_SEC = 0.5
 
 IGNORED_ERROR_CODES = frozenset({

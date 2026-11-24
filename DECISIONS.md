@@ -2733,13 +2733,12 @@ gave 0.05 per service with or without the fix (D-065's row C) and 42 opposite fl
 everything else is the same. They moved because issue 02 took checkout out of the metric
 services, so for a given seed payments' traffic draws change (from the same distribution).
 **Open.**
-- The web-gateway and payments rows of the target design (the releases list, the payments
-  cluster, aggregated records) come with the full redesign. The design's payments row shows
-  5 s windows, p95 latency and sub-services, none of which exist in our data, so it needs its
-  own grilling. Until then checkout's timeline covers 2 minutes and the other rows' charts 10.
+- payments' row of the target design is `opswall-redesign` issue 03. The design's row shows 5 s
+  windows, p95 latency and sub-services, none of which exist in our data; the grilling of
+  2026-11-24 settled it: one "payments" node, Flink's 10 s `service_health` windows as the
+  aggregated records, the mean latency, and its deploy lines. web-gateway's row came with issue
+  02 (below), and every row's chart now covers 2 minutes.
 - From D-067: the windowing-only step (`2.3_window_metrics.sql`) may be redundant. Kept.
-- `opswall-redesign` issue 01 (what the wall reads from `service_deployments`) is still open.
-  The new frame shows no versions; web-gateway's deploy marks still need the consumer.
 **Pending (live check, `.scratch/checkout-tickets/issues/12-live-check.md`).**
 - The pool's CFU use with eight long-running statements (2.2, 2.5, the three 4.3 legs, 5.1,
   5.2 and 5.3), against the ceiling of 10.
@@ -3243,6 +3242,41 @@ web-gateway's "Rolled back" green and payments' "Healthy" grey as before; the ch
 working", the sources' names and a bar's tooltip come from the snapshot, and hover and keyboard
 focus work. `uv run evaluate` on `research/issue09-dumps/`: classifier 62/65, responder 29/29, 2
 unexpected answers, no leaks, as before.
+
+`opswall-redesign` issue 02 (web-gateway's row: the design's deploy row), decided with the user in
+a grilling session on 2026-11-24 (Q1–Q16, which also settled issue 03), resolving issue 01:
+`scripts/opswall/state.py` (every row's chart, checkout's timeline included, shows the last
+2 minutes, `CHART_SECONDS`, which the snapshot carries once as `chartSeconds` in place of
+`axisSeconds` and checkout's `timelineSeconds`; `AXIS_SECONDS` is now `HISTORY_SECONDS`, the
+10 minutes the state keeps, the Issues panel counts and the consumer reads back, and the blocks,
+incidents and status are still worked out over it, so what has left the chart still counts; a
+metric row's kind is `"releases"` for the row with the errors chart; `ServiceState.version` is
+kept again from every `service_deployments` record, heartbeat included, and a releases row
+carries it and `releases`, the newest 5 DEPLOYs of the last 10 minutes with their `deployedAt` and,
+once a ROLLBACK left their version, `rolledBackAfter` and its words, and their `count`;
+`previousVersion`, `lastChange`, `secondsSinceDeploy` and the three `ServiceState` fields behind
+them are gone, since nothing read them), `scripts/opswall/consumer.py` (the renamed constant),
+`static/opswall.js` (web-gateway's row: the laptop, the line with its ambient flow and the Releases
+list on the left, "Running v 3.4.2" in the header, the errors chart on the right; a new release
+lights the laptop, sends a packet down the line and pushes its row in with the design's fade, and
+a rollback replays the fade on its row, which turns accent with "rolled back after 12s" on a second
+line; every chart takes the design's chrome: a title with the latest second's value, plots of
+200, 112 and 64 px, the dashed grid, `#ECEDEE` lines over a 5 % area, traffic in blue, "Latency,
+mean" for the design's "p95"; the errors chart labels 100 %, 50 % and lab 2.2's 25 % on the plot,
+a log chart its range in its title line; a deploy line is the design's deploy marker, accent and
+dashed with its version, a rollback grey with "rollback" on its other side, versions placed first
+and a label that fits nowhere hidden; one axis, "−2m … now", for every row), `static/opswall.css`
+(the design's shared pieces, `flow-body`, `src-box`, `flow-line`, `list`, under checkout's row
+too, and the releases row's styles; a hidden chart body stays hidden). Tests:
+`tests/test_opswall_state.py` (the running version, heartbeat included; no leftovers; the 2-minute
+chart against the 10-minute Issues panel; an open block from before the chart; the Releases list,
+its count, a rollback's match and one whose deploy is older than the list; the incident scenarios
+moved onto the 2-minute chart), `tests/test_opswall_ingest.py` (a live deployment record reaches
+the version and the releases) and `tests/test_opswall_server.py`. Offline render at 1440 and
+820 px with checkout's feeder (`.scratch/opswall-redesign/research/issue02-wall-*.png`):
+web-gateway's row lands on the design's columns, two rolled-back releases read in accent, the
+chart shows the bad deploy's box, its version and the answer, checkout's row is as before, and
+hover and keyboard focus work.
 
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.

@@ -40,11 +40,9 @@
   --dots: #171A1F;        /* the page's dot grid */
   --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
-  /* The tokens web-gateway's and payments' charts use (D-066, D-067), each on the nearest
-     new colour until the charts' own redesign. Every chart mark stays OKLab ΔE >= 15 from
-     the others (closest: --metric 15.7 from --cyan, --amber 18.5 from --crit). */
+  /* The tokens of the marks the design has no equivalent for (D-066, D-067), each on the
+     nearest colour of the design's palette. The lines and the grid are the design's own. */
   --midnight: var(--surface);  /* the ground the hollow marks are cut out of */
-  --metric: var(--text-2);     /* the raw line (D-061); ΔE 3.8 from D-066's #969AAE */
   --cyan: var(--blue);         /* detection; ΔE 9.1 from D-066's #38CCED */
   --amber: var(--accent);      /* the agents' answers */
   --good: var(--green);
@@ -136,18 +134,25 @@ body {
   100% { box-shadow: 0 0 0 9px rgba(255, 107, 107, 0); }
 }
 
-.row-body { min-width: 0; }
-.charts { display: grid; gap: 6px; }
+/* A row's charts, each the design's title line over its plot, then the time axis */
+.row-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.row-body[hidden] { display: none; }
+.charts { display: grid; gap: 8px; }
+.chart-box { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.chart-title { font-size: 12px; color: var(--text-soft); }
+.chart-range { margin-left: 10px; font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+.chart-range:empty { display: none; }
+.chart-now { font-family: var(--mono); font-size: 13px; color: var(--text); white-space: nowrap; }
+.chart-box.traffic .chart-now { color: var(--blue); }
 .chart-host { min-width: 0; }
 
+/* Every row's time axis, the design's: −2m … now */
 .axis {
-  position: relative; height: 18px; margin-top: 4px;
-  border-top: 1px solid var(--hairline);
+  display: flex; justify-content: space-between; padding-top: 2px;
   font-family: var(--mono); font-size: 11px; color: var(--text-3);
 }
-.axis span { position: absolute; top: 4px; transform: translateX(-50%); white-space: nowrap; }
-.axis span:first-child { transform: none; }
-.axis span:last-child { transform: translateX(-100%); color: var(--text-soft); }
+.axis span:last-child { color: var(--text-soft); }
 
 /* The Issues panel: four numbers, stacked beside the row, side by side below it */
 .issues { padding: 20px 20px 8px; display: flex; flex-direction: column; gap: 12px; }
@@ -166,22 +171,35 @@ body {
 .stat-missed { font-size: 12px; min-height: 16px; color: var(--text-3); }
 .stat-missed.some { color: var(--accent); }
 
-/* Chart marks */
-.series   { fill: none; stroke: var(--metric); stroke-width: 1.25; stroke-linejoin: round; stroke-linecap: round; }
+/* Chart marks: the line, its area and the grid are the design's */
+.series   { fill: none; stroke: var(--text); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.series.traffic { stroke: var(--blue); }
+.area     { fill: rgba(236, 237, 238, 0.05); }
+.chart .grid { stroke: #1A1D22; stroke-width: 1; stroke-dasharray: 3 3; }
 .box      { fill: rgba(255, 107, 107, 0.22); }
 .box.missed { stroke: var(--truth); stroke-width: 1.25; stroke-dasharray: 4 3; }
 .det      { fill: var(--cyan); }
 .false-alarm .det { fill: var(--midnight); stroke: var(--cyan); stroke-width: 1.5; }
 .link     { fill: none; stroke: var(--cyan); stroke-width: 1.25; opacity: 0.75; }
 .ans      { fill: var(--amber); stroke: var(--midnight); stroke-width: 1; }
-/* D-067, web-gateway's errors chart */
+/* D-067, web-gateway's errors chart: lab 2.2's threshold; a deploy is the design's deploy
+   marker (accent, dashed, its version at the top), a rollback the same in grey */
 .threshold { stroke: var(--crit); stroke-width: 1; stroke-dasharray: 4 3; opacity: 0.85; }
-.deploy-line { stroke: var(--text); stroke-width: 1.25; opacity: 0.6; }
-.rollback .deploy-line { stroke-dasharray: 3 2; }
+.chart .threshold-label { fill: var(--crit); }
+.deploy-line { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 3 3; }
+.rollback .deploy-line { stroke: var(--text-soft); }
+.deploy-label {
+  fill: var(--accent); font-family: var(--mono); font-size: 11px; font-weight: 500;
+  paint-order: stroke; stroke: var(--surface); stroke-width: 6px; stroke-linejoin: round;
+}
+.rollback .deploy-label { fill: var(--text-soft); }
 
 .chart { display: block; overflow: visible; }
-.chart .scale     { fill: var(--text-3); font-family: var(--mono); font-size: 11px; }
-.chart .metric-name { fill: var(--text); font-family: "Geist", system-ui, sans-serif; font-weight: 600; }
+/* The scale's labels sit on the plot with a halo of the panel's colour, the design's padded label */
+.chart .scale {
+  fill: var(--text-3); font-family: var(--mono); font-size: 11px;
+  paint-order: stroke; stroke: var(--surface); stroke-width: 6px; stroke-linejoin: round;
+}
 .chart .baseline  { stroke: var(--line); stroke-width: 1; }
 .chart .cross     { stroke: var(--text-2); stroke-width: 1; }
 .chart .cross-dot { fill: var(--text); stroke: var(--midnight); stroke-width: 2; }
@@ -189,7 +207,7 @@ body {
 .chart .mark-hit  { fill: transparent; }
 .chart [data-tip] { cursor: default; outline: none; }
 .chart .box:focus-visible { stroke: var(--text); stroke-width: 2; stroke-dasharray: none; }
-.chart .deploy:focus-visible .deploy-line { opacity: 1; stroke-width: 2.5; }
+.chart .deploy:focus-visible .deploy-line { stroke-width: 2.5; stroke-dasharray: none; }
 .chart .mark:focus-visible .det,
 .chart .mark:focus-visible .ans { stroke: var(--text); stroke-width: 2; }
 
@@ -202,12 +220,39 @@ body {
 .status.working .dot { background: var(--accent); }
 .open-p1 { font-family: var(--mono); font-weight: 700; color: var(--text-2); }
 .open-p1.some { color: var(--accent); }
+/* A releases row's header: "Running v 3.4.2" */
+.running { font-family: var(--mono); color: var(--text); }
 
-.tk-body {
+/* What the design's rows share (checkout, web-gateway): the body's two columns, a source's
+   box, the line with its ambient flow on to a list, and the list itself */
+.flow-body {
   display: grid; grid-template-columns: 600px minmax(0, 1fr); column-gap: 28px; row-gap: 24px;
   align-items: center;
 }
-.tk-flow { min-width: 0; display: flex; align-items: center; }
+.flow-left { min-width: 0; display: flex; align-items: center; }
+.chart-col { min-width: 0; }
+.src-box {
+  --pc: var(--text-soft); --ring: color-mix(in srgb, var(--pc) 30%, transparent);
+  flex: 0 0 auto; width: 40px; height: 40px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+  display: flex; align-items: center; justify-content: center; color: var(--text-soft);
+  transition: border-color .3s, color .3s;
+}
+.src-box.busy { border-color: var(--pc); color: var(--pc); }
+.flow-line { flex: 1 1 64px; min-width: 48px; height: 1px; background: var(--line); position: relative; }
+.flow-arrow { position: absolute; right: -1px; top: -4px; }
+.flow-arrow path { fill: none; stroke: var(--corner); stroke-width: 1.2; }
+.list {
+  flex: 0 1 300px; min-width: 0; border: 1px solid var(--line); background: var(--bg);
+  border-radius: 12px; overflow: hidden;
+}
+.list-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 10px 14px;
+  border-bottom: 1px solid var(--hairline); font-size: 12px;
+}
+.list-title { font-weight: 500; color: var(--text-soft); }
+.list-count { color: var(--text-2); }
+.list-view { overflow: hidden; }
 
 /* Sources: two boxes, curved paths that merge into a node, a line on to the list */
 .tk-sources { flex: 0 0 auto; position: relative; width: 170px; height: 280px; }
@@ -215,19 +260,11 @@ body {
 .tk-path { fill: none; stroke: var(--line); stroke-width: 1; }
 .tk-node { fill: var(--surface); stroke: var(--corner); stroke-width: 1; }
 .tk-src-label { position: absolute; left: 48px; font-size: 11px; color: var(--text-2); white-space: nowrap; }
-.tk-src {
-  --pc: var(--text-soft);
-  position: absolute; left: 0; width: 40px; height: 40px;
-  border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
-  display: flex; align-items: center; justify-content: center; color: var(--text-soft);
-  transition: border-color .3s, color .3s;
-}
-.tk-src.busy { border-color: var(--pc); color: var(--pc); }
+.tk-src { position: absolute; left: 0; }
 /* The priority colours of a new ticket's dot (the design's prio table: packet) */
 [data-prio="p1"] { --pc: var(--accent); }
 [data-prio="p2"] { --pc: var(--text); }
 [data-prio="p3"] { --pc: var(--text-2); }
-.tk-src { --ring: color-mix(in srgb, var(--pc) 30%, transparent); }
 .path-0 { offset-path: path('M40 90 H70 C105 90 110 140 145 140 H170'); offset-rotate: 0deg; }
 .path-1 { offset-path: path('M40 190 H70 C105 190 110 140 145 140 H170'); offset-rotate: 0deg; }
 .flowc, .flow {
@@ -241,23 +278,10 @@ body {
   background: var(--pc, var(--text-2)); opacity: 0;
 }
 .tk-merge { top: -4px; }
-.tk-line { flex: 1 1 64px; min-width: 48px; height: 1px; background: var(--line); position: relative; }
-.tk-arrow { position: absolute; right: -1px; top: -4px; }
-.tk-arrow path { fill: none; stroke: var(--corner); stroke-width: 1.2; }
 
 /* The list: the newest tickets, styled by priority */
-.tk-list {
-  flex: 0 1 300px; min-width: 0; border: 1px solid var(--line); background: var(--bg);
-  border-radius: 12px; overflow: hidden;
-}
-.tk-list-head {
-  display: flex; align-items: center; justify-content: space-between; padding: 10px 14px;
-  border-bottom: 1px solid var(--hairline); font-size: 12px;
-}
-.tk-list-title { font-weight: 500; color: var(--text-soft); }
-.tk-received { color: var(--text-2); }
 .tk-view {
-  height: 240px; overflow: hidden;
+  height: 240px;
   -webkit-mask-image: linear-gradient(#000 72%, transparent); mask-image: linear-gradient(#000 72%, transparent);
 }
 .tk-row {
@@ -337,11 +361,30 @@ body {
 .tk-lane-state { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
 .tk-chip.working .tk-lane-state { color: var(--accent); }
 .tk-chip.responder.working .tk-lane-state { color: var(--blue); }
-.tk-axis {
-  display: flex; justify-content: space-between; padding-top: 2px;
-  font-family: var(--mono); font-size: 11px; color: var(--text-3);
+
+/* A releases row (web-gateway, D-068): the laptop, the line and the Releases list, the
+   design's deploy row. A rolled-back release takes the accent. */
+.rl-laptop { --pc: var(--accent); }
+.rl-packet {
+  position: absolute; top: -4px; left: 0; width: 8px; height: 8px; border-radius: 2px;
+  background: var(--accent); opacity: 0;
 }
-.tk-axis span:last-child { color: var(--text-soft); }
+.rl-view {
+  height: 192px;
+  -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent);
+}
+.rl-row {
+  height: 48px; padding: 0 14px; display: flex; flex-wrap: wrap; align-items: baseline; align-content: center;
+  column-gap: 10px; border-bottom: 1px solid var(--raised);
+}
+.rl-version { font-family: var(--mono); font-size: 14px; font-weight: 500; color: var(--text); }
+.rl-at, .rl-back { font-size: 12px; color: var(--text-2); }
+.rl-back { flex-basis: 100%; }
+.rl-back:empty { display: none; }
+.rl-row.rolled-back .rl-version, .rl-row.rolled-back .rl-at, .rl-row.rolled-back .rl-back { color: var(--accent); }
+/* A new release waits for its packet (about a second down the line), then fades in as the
+   rows slide down to make room. */
+.rl-row.fresh { animation: rfresh 3s ease-out .95s backwards; }
 
 /* The design's animations: the ambient flow, a new ticket's dot, ring, push and fade. Each
    comes in -a/-b twins so the page can start it again. */
@@ -367,6 +410,23 @@ body {
   0% { opacity: 0; box-shadow: inset 0 0 0 1px var(--fresh); } 20% { opacity: 1; }
   100% { box-shadow: inset 0 0 0 1px transparent; }
 }
+/* A release's: the design's fresh fade; a rollback replays it on its row without the fade-in */
+@keyframes rfresh {
+  0% { opacity: 0; background: rgba(245, 181, 68, 0.18); color: var(--accent); } 20% { opacity: 1; }
+  100% { background: transparent; }
+}
+@keyframes rbackA { 0% { background: rgba(245, 181, 68, 0.18); } 100% { background: transparent; } }
+@keyframes rbackB { 0% { background: rgba(245, 181, 68, 0.18); } 100% { background: transparent; } }
+.rback-a { animation: rbackA 3s ease-out; }
+.rback-b { animation: rbackB 3s ease-out; }
+@keyframes travelA { 0% { left: 0; opacity: 0; } 12% { opacity: 1; } 88% { opacity: 1; } 100% { left: calc(100% - 8px); opacity: 0; } }
+@keyframes travelB { 0% { left: 0; opacity: 0; } 12% { opacity: 1; } 88% { opacity: 1; } 100% { left: calc(100% - 8px); opacity: 0; } }
+.travel-a { animation: travelA .95s cubic-bezier(.55, 0, .3, 1) forwards; }
+.travel-b { animation: travelB .95s cubic-bezier(.55, 0, .3, 1) forwards; }
+@keyframes rpushA { from { transform: translateY(-48px); } to { transform: translateY(0); } }
+@keyframes rpushB { from { transform: translateY(-48px); } to { transform: translateY(0); } }
+.rpush-a { animation: rpushA .7s cubic-bezier(.2, .8, .2, 1) .95s backwards; }
+.rpush-b { animation: rpushB .7s cubic-bezier(.2, .8, .2, 1) .95s backwards; }
 
 /* Tooltip */
 .tip {
@@ -390,9 +450,9 @@ body {
 @media (max-width: 1000px) {
   .svc-row { grid-template-columns: minmax(0, 1fr); }
 }
-/* A ticket row's timeline moves below its sources and list at the design's 1320 px. */
+/* A row's charts or timeline move below its sources and list at the design's 1320 px. */
 @media (max-width: 1320px) {
-  .tk-body { grid-template-columns: minmax(0, 1fr); }
+  .flow-body { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 640px) {
   .axis span:nth-child(2), .axis span:nth-child(4) { display: none; }
@@ -401,6 +461,7 @@ body {
   .conn.live .lamp, .status.anomaly .dot { animation: none; }
   .tip { transition: none; }
   .flow, .flowc, .pkt-a, .pkt-b, .merge-a, .merge-b, .ring-a, .ring-b, .push-a, .push-b, .tk-row.fresh,
-  .tk-run.open .tk-cap, .tk-chip.working .tk-square { animation: none; }
-  .tk-src { transition: none; }
+  .tk-run.open .tk-cap, .tk-chip.working .tk-square,
+  .travel-a, .travel-b, .rpush-a, .rpush-b, .rl-row.fresh, .rback-a, .rback-b { animation: none; }
+  .src-box { transition: none; }
 }

@@ -5,29 +5,36 @@
  *  The wall's state does all the counting; this page only draws what the snapshot says.
  *  The frame is the target design's (D-068): a header, then one full-width row per service
  *  in the snapshot's order. A row is its main panel (name and status chip on the left, a
- *  detail slot on the right, then the charts the snapshot names in svc.charts over one time
- *  axis) and its Issues panel (svc.issues: injected, detected of injected with the missed
- *  line, the median times to detect and to remediate), which moves below the row on a
- *  narrow screen. svc.row says which kind of row: "metrics" draws the charts, Latency and
- *  Traffic for payments, Errors for web-gateway (D-067); "tickets" (checkout, D-068) draws
- *  the ticket sources, the list and the timeline of tickets and agent runs instead (see
- *  "Ticket row" below).
- *  A chart, back to front (D-066):
+ *  detail slot on the right, then its body) and its Issues panel (svc.issues: injected,
+ *  detected of injected with the missed line, the median times to detect and to remediate),
+ *  which moves below the row on a narrow screen. svc.row says which kind of row:
+ *  - "metrics" draws the charts the snapshot names in svc.charts (Latency and Traffic for
+ *    payments) over the time axis;
+ *  - "releases" (web-gateway, the design's deploy row) draws the laptop, the line and the
+ *    Releases list on the left and its Errors chart (D-067) on the right, with "Running v…"
+ *    in the header (see "Releases row" below);
+ *  - "tickets" (checkout) draws the ticket sources, the list and the timeline of tickets
+ *    and agent runs instead (see "Ticket row" below).
+ *  Every row's time axis is the last 2 minutes (D.chartSeconds), the design's "−2m … now".
+ *  A chart is the design's: a title with the current value (the latest complete second),
+ *  then the plot, back to front (D-066):
  *  - a translucent box per injected incident on that metric, the full plot height, from its
  *    start to its end (to the right edge while open); a missed one is dashed
- *  - on the errors chart, a thin mark at every deploy and rollback (svc.deploys): solid for a
- *    deploy, dashed for a rollback, good deploys included (D-067)
- *  - the raw service_metrics line (D-061): one point per second on a log y scale fitted to
- *    what's visible; on the errors chart, the share of each second's requests that failed on
- *    a fixed linear 0-100 % scale, with lab 2.2's threshold as a dashed line, and a gap for a
- *    second without requests
+ *  - the design's dashed grid lines and their labels
+ *  - a line at every deploy and rollback (svc.deploys), good deploys included (D-067): a
+ *    deploy is the design's deploy marker, accent and dashed with its version at the top; a
+ *    rollback is grey, labelled "rollback"
+ *  - the raw service_metrics line (D-061) over its area: one point per second on a log y
+ *    scale fitted to what's visible; on the errors chart, the share of each second's
+ *    requests that failed on a fixed linear 0-100 % scale, with lab 2.2's threshold as a
+ *    dashed line, and a gap for a second without requests
  *  - under the plot, a marker strip with one set of marks per detection block: a dot where
  *    the detector flagged it (hollow when no incident owns it: a false alarm), a line from it
  *    to the agent's first decision (to "now" while it waits), and an amber diamond at that
  *    decision, one row below the dot so the two never cover each other
  *  The rows' status and Issues numbers come ready-made as well; what each mark means is in
  *  its tooltip.
- *  All positions are axis-relative seconds (0 = left edge, axisSeconds = now). The DOM is
+ *  All positions are axis-relative seconds (0 = left edge, chartSeconds = now). The DOM is
  *  made once and updated in place by every snapshot (D-062): a row per service, a box per
  *  incident and a mark group per block, kept by key; a ResizeObserver redraws a chart whose
  *  width changes.
@@ -92,7 +99,7 @@ const dur = sec => {
   const m = Math.floor(sec / 60), r = sec % 60;
   return m ? (r ? `${m}m ${r}s` : `${m}m`) : `${r}s`;
 };
-let AXIS = 600;
+let AXIS = 120;  // D.chartSeconds: every row's time axis, the last 2 minutes
 let UPDATED = 0;  // the snapshot's updatedAt, epoch seconds
 const ago = sec => sec >= AXIS ? "now" : `−${dur(AXIS - sec)}`;
 const range = (a, b) => `${ago(a)} to ${ago(b)}, ${dur(Math.min(b, AXIS) - a)}`;
@@ -128,7 +135,8 @@ function metricModel(svc, kind) {
 }
 
 // ---------- Words ----------
-const METRIC = { latency: "Latency", traffic: "Traffic", errors: "Errors" };
+// A chart's title, as the design writes it ("p95" becomes "mean": the samples are each second's mean).
+const METRIC = { latency: "Latency, mean", traffic: "Traffic", errors: "Error rate, failed requests over total requests" };
 const TRIGGER = {
   LATENCY_HIGH: "Latency high", TRAFFIC_HIGH: "Traffic high", TRAFFIC_LOW: "Traffic low",
   ERROR_RATE_HIGH: "Error rate high",
@@ -227,8 +235,21 @@ function floorNice(v) {
   return Math.floor(v / step + 1e-9) * step;
 }
 
+// The value in a chart's title: the latest second with a value, in the design's words.
+function nowText(kind, recs, value) {
+  for (let i = recs.length - 1; i >= 0; i--) {
+    const v = value(recs[i]);
+    if (v == null) continue;
+    return kind === "errors" ? `${v.toFixed(1)}%` : kind === "latency" ? `${Math.round(v)} ms` : `${v} req/s`;
+  }
+  return "—";
+}
+
+// The errors scale labels its top and middle grid lines on the plot, as the design does, and
+// the threshold; a log scale names its range in the chart's title line instead (the design's
+// latency and traffic plots carry no labels, and a label on the plot would cover its marks).
 function errorScale() {
-  return { frac: v => Math.max(0, Math.min(1, v / 100)), label: `0–100 % · threshold ${num(THRESHOLD)} %` };
+  return { frac: v => Math.max(0, Math.min(1, v / 100)), labels: [[100, "100%"], [50, "50%"]], range: "" };
 }
 
 // y as a fraction of the plot height (0 = bottom, 1 = top), and the range's label.
@@ -240,16 +261,22 @@ function logScale(kind, values) {
   const span = Math.log(hi / lo);
   return {
     frac: v => Math.max(0, Math.log(Math.max(v, lo) / lo) / span),
-    label: `${num(lo)}–${num(hi)} ${UNIT[kind]} · log`,
+    labels: [],
+    range: `${num(lo)}–${num(hi)} ${UNIT[kind]} · log`,
   };
 }
 
 // ---------- Chart ----------
-// A label band, the plot, then the marker strip: detection dots on one row, answer diamonds
-// on the next (an answer lands about a second after its detection, two pixels apart).
-const PLOT_TOP = 18, PLOT_BOTTOM = 68;
-const DET_Y = PLOT_BOTTOM + 9, ANS_Y = PLOT_BOTTOM + 20, CHART_H = PLOT_BOTTOM + 26;
+// The title line (HTML), then the plot at the design's height, then the marker strip:
+// detection dots on one row, answer diamonds on the next (an answer lands about a second
+// after its detection, two pixels apart). The design's grid lines: top and middle on the
+// errors chart, the middle on latency, none on traffic.
+const PLOT_H = { errors: 200, latency: 112, traffic: 64 };
+const GRID = { errors: [1, 0.5], latency: [0.5], traffic: [] };
+const STRIP_H = 26;
+const chartHeight = kind => (PLOT_H[kind] || 112) + STRIP_H;
 const DOT_R = 3.5, DIAMOND_R = 4.5;
+const LABEL_CHAR = 6.6;  // about the width of one Geist Mono character at 11 px
 const diamond = (x, y, r) => `M ${x} ${y - r} L ${x + r} ${y} L ${x} ${y + r} L ${x - r} ${y} Z`;
 
 // The pointer over a plot. The data moves under a still pointer every second, so each
@@ -278,7 +305,7 @@ function hostWidth(host) {
 function chartLayers(host) {
   if (!host._svg) {
     host._svg = s("svg", { class: "chart" }, host);
-    host._layers = Object.fromEntries(["boxes", "deploys", "plot", "hover", "marks"].map(n => [n, s("g", {}, host._svg)]));
+    host._layers = Object.fromEntries(["boxes", "plot", "deploys", "labels", "hover", "marks"].map(n => [n, s("g", {}, host._svg)]));
   }
   return host._layers;
 }
@@ -290,10 +317,13 @@ function drawChart(host) {
   const X = t => (Math.max(0, Math.min(t, AXIS)) / AXIS) * w;
   const recs = m.records.filter(r => r.t >= 0 && r.t <= AXIS);
   const scale = m.kind === "errors" ? errorScale() : logScale(m.kind, recs.map(m.value));
-  const plotH = PLOT_BOTTOM - PLOT_TOP;
+  const PLOT_TOP = 0, plotH = PLOT_H[m.kind] || 112, PLOT_BOTTOM = PLOT_TOP + plotH, CHART_H = PLOT_BOTTOM + STRIP_H;
+  const DET_Y = PLOT_BOTTOM + 9, ANS_Y = PLOT_BOTTOM + 20;
   const Y = v => PLOT_TOP + plotH * (1 - scale.frac(v));
+  if (host._now) setText(host._now, nowText(m.kind, recs, m.value));
+  if (host._range) setText(host._range, recs.length ? scale.range : "");
 
-  const { boxes, deploys, plot, hover, marks } = chartLayers(host);
+  const { boxes, deploys, plot, labels, hover, marks } = chartLayers(host);
   attrs(host._svg, { width: w, height: CHART_H, viewBox: `0 0 ${w} ${CHART_H}` });
 
   // The injected incidents on this metric (INCIDENT_METRIC in the state), by incident id.
@@ -306,39 +336,85 @@ function drawChart(host) {
     });
   });
 
-  // The version changes (D-067): a thin line across the plot at each deploy and rollback,
-  // a keyboard stop with its own tooltip; the pointer gets the same words on the line's.
+  // The grid lines, the baseline, the threshold (errors chart), the area and the line. A
+  // missing second (the simulator stopped), or one without requests on the errors chart,
+  // breaks the line and its area instead of bridging them.
+  plot.replaceChildren();
+  for (const f of GRID[m.kind] || []) {
+    const y = PLOT_TOP + Math.round(plotH * (1 - f)) + 0.5;
+    s("line", { class: "grid", x1: 0, x2: w, y1: y, y2: y }, plot);
+  }
+  s("line", { class: "baseline", x1: 0, x2: w, y1: PLOT_BOTTOM + 0.5, y2: PLOT_BOTTOM + 0.5 }, plot);
+  labels.replaceChildren();  // the scale's labels, over the deploy lines
+  if (m.kind === "errors") {
+    const y = Y(THRESHOLD);
+    s("line", { class: "threshold", x1: 0, x2: w, y1: y, y2: y }, plot);
+    s("text", { class: "scale threshold-label", x: 0, y: y + 4, "dominant-baseline": "hanging" }, labels)
+      .textContent = `${num(THRESHOLD)}%`;
+  }
+  const segments = [];
+  let prev = null;
+  for (const r of recs) {
+    const v = m.value(r);
+    if (v == null) { prev = null; continue; }
+    if (prev == null || r.t - prev > 1.5) segments.push([]);
+    segments[segments.length - 1].push([X(r.t), Y(v)]);
+    prev = r.t;
+  }
+  const xy = ([x, y]) => `${x.toFixed(1)} ${y.toFixed(1)}`;
+  const line = segments.map(seg => `M ${seg.map(xy).join(" L ")}`).join(" ");
+  if (line && m.kind !== "traffic") {
+    const area = segments.map(seg => `M ${seg[0][0].toFixed(1)} ${PLOT_BOTTOM} L ${seg.map(xy).join(" L ")} ` +
+      `L ${seg[seg.length - 1][0].toFixed(1)} ${PLOT_BOTTOM} Z`).join(" ");
+    s("path", { class: "area", d: area }, plot);
+  }
+  if (line) s("path", { class: `series ${m.kind}`, d: line }, plot);
+  // The scale's labels, the design's way: at the left, just under their grid line.
+  for (const [v, text] of recs.length ? scale.labels : []) {
+    s("text", { class: "scale", x: 0, y: Y(v) + 4, "dominant-baseline": "hanging" }, labels).textContent = text;
+  }
+  if (!recs.length) {
+    s("text", { class: "scale", x: 0, y: PLOT_TOP + 4, "dominant-baseline": "hanging" }, labels).textContent = "No records yet";
+  }
+
+  // The version changes (D-067): a line across the plot at each deploy and rollback, a
+  // keyboard stop with its own tooltip; the pointer gets the same words on the line's. A
+  // deploy's version sits at the top just left of its line, as the design's markers do; a
+  // rollback's label just right of it, so the two of a bad deploy, seconds apart, stay clear
+  // of each other. The versions are placed first, then the rollbacks, newest first: a label
+  // that would cover one already placed moves to the other side of its line, or hides if it
+  // fits there neither (its tooltip still says it).
+  const deployLabel = d => (d.kind === "ROLLBACK" ? "rollback" : `v ${d.version ?? "?"}`);
   sync(deploys, m.deploys, d => d.key, () => {
     const g = s("g", { tabindex: 0 });
     s("line", { class: "deploy-line" }, g);
+    s("text", { class: "deploy-label", "dominant-baseline": "hanging" }, g);
     return g;
   }, (g, d) => {
     const x = X(d.t);
     setClass(g, d.kind === "ROLLBACK" ? "deploy rollback" : "deploy");
     g.setAttribute("data-tip", deployTip(d));
     attrs(g.firstChild, { x1: x, x2: x, y1: PLOT_TOP, y2: PLOT_BOTTOM });
+    attrs(g.lastChild, { y: PLOT_TOP + 4 });
+    setText(g.lastChild, deployLabel(d));
   });
-
-  // The label band, the baseline, the threshold (errors chart) and the line. A missing second
-  // (the simulator stopped), or one without requests on the errors chart, breaks the line
-  // instead of bridging it.
-  plot.replaceChildren();
-  const label = s("text", { class: "scale", x: 0, y: PLOT_TOP - 6 }, plot);
-  s("tspan", { class: "metric-name" }, label).textContent = METRIC[m.kind];
-  s("tspan", {}, label).textContent = ` · ${recs.length ? scale.label : "No records yet"}`;
-  s("line", { class: "baseline", x1: 0, x2: w, y1: PLOT_BOTTOM + 0.5, y2: PLOT_BOTTOM + 0.5 }, plot);
-  if (m.kind === "errors") {
-    const y = Y(THRESHOLD);
-    s("line", { class: "threshold", x1: 0, x2: w, y1: y, y2: y }, plot);
+  const topLabel = recs.length ? scale.labels.find(([v]) => Y(v) <= PLOT_TOP + 1) : null;
+  const minX = topLabel ? topLabel[1].length * LABEL_CHAR + 8 : 0;  // the scale's label has the top left
+  const taken = [], newest = m.deploys.map((d, i) => i).reverse();
+  const order = [...newest.filter(i => m.deploys[i].kind !== "ROLLBACK"), ...newest.filter(i => m.deploys[i].kind === "ROLLBACK")];
+  for (const i of order) {
+    const d = m.deploys[i], x = X(d.t), width = deployLabel(d).length * LABEL_CHAR;
+    const sides = d.kind === "ROLLBACK" ? ["right", "left"] : ["left", "right"];
+    const fits = side => {
+      const [x0, x1] = side === "left" ? [x - 6 - width, x - 6] : [x + 6, x + 6 + width];
+      return x0 >= minX && x1 <= w && !taken.some(([a, b]) => x0 < b + 8 && a < x1 + 8) && [x0, x1];
+    };
+    const side = sides.find(fits), label = deploys.children[i].lastChild;
+    label.setAttribute("visibility", side ? "inherit" : "hidden");
+    if (!side) continue;
+    taken.push(fits(side));
+    attrs(label, { x: side === "left" ? x - 6 : x + 6, "text-anchor": side === "left" ? "end" : "start" });
   }
-  let d = "", prev = null;
-  for (const r of recs) {
-    const v = m.value(r);
-    if (v == null) { prev = null; continue; }
-    d += `${prev == null || r.t - prev > 1.5 ? "M" : "L"} ${X(r.t).toFixed(1)} ${Y(v).toFixed(1)} `;
-    prev = r.t;
-  }
-  if (d) s("path", { class: "series", d }, plot);
 
   // Hover: a hit area over the label band and the plot; the crosshair snaps to the nearest
   // second, and inside an incident's box the tooltip tells that incident as well.
@@ -349,7 +425,8 @@ function drawChart(host) {
     s("rect", { class: "hit", x: 0, y: 0, height: PLOT_BOTTOM }, hover);
   }
   const [cross, hit] = hover.children, [cl, cd] = cross.children;
-  hit.setAttribute("width", w);
+  attrs(cl, { y1: PLOT_TOP, y2: PLOT_BOTTOM });
+  attrs(hit, { width: w, height: PLOT_BOTTOM });
   hit._key = m.key;
   hit._show = (clientX, clientY) => {
     if (!recs.length) return;
@@ -400,6 +477,15 @@ function drawChart(host) {
 }
 
 // ---------- Rows ----------
+// Every row's time axis, the design's: the last 2 minutes (AXIS seconds) in five steps.
+function axisHTML() {
+  const label = i => {
+    const sec = AXIS * (4 - i) / 4;
+    return i === 4 ? "now" : sec >= 120 && sec % 60 === 0 ? `−${sec / 60}m` : `−${sec}s`;
+  };
+  return `<div class="axis" aria-hidden="true">${[0, 1, 2, 3, 4].map(i => `<span>${label(i)}</span>`).join("")}</div>`;
+}
+
 // A service's row: made once, then updated by every snapshot. Each chart host gets its
 // height before anything in the row is drawn or measured: a host at 0 px would shrink the
 // page for one layout, and the browser would clamp the scroll position to that.
@@ -416,7 +502,7 @@ function createRow() {
       </header>
       <div class="row-body">
         <div class="charts"></div>
-        <div class="axis" aria-hidden="true"></div>
+        ${axisHTML()}
       </div>
     </section>
     <aside class="panel frame issues">
@@ -450,14 +536,6 @@ function createRow() {
     remediate: row.querySelector(".stat.remediate"),
     charts: [], chartsKey: null,
   };
-  const axis = row.querySelector(".axis");
-  for (let i = 0; i <= 5; i++) {
-    const sec = i * AXIS / 5;
-    const span = document.createElement("span");
-    span.style.left = `${(sec / AXIS) * 100}%`;
-    span.textContent = i === 5 ? "now" : `−${Math.round((AXIS - sec) / 60)}m`;
-    axis.appendChild(span);
-  }
   return row;
 }
 
@@ -473,20 +551,26 @@ function ensureCharts(row, kinds) {
   const charts = row.querySelector(".charts");
   charts.replaceChildren();
   ui.charts = kinds.map(kind => {
-    const host = document.createElement("div");
-    host.className = "chart-host";
-    host.style.height = `${CHART_H}px`;
+    const box = document.createElement("div");
+    box.className = `chart-box ${kind}`;
+    box.innerHTML = `<div class="chart-head"><span class="chart-title">${esc(METRIC[kind] || kind)}` +
+      `<span class="chart-range"></span></span><span class="chart-now"></span></div><div class="chart-host"></div>`;
+    const host = box.lastChild;
+    host.style.height = `${chartHeight(kind)}px`;
+    host._now = box.querySelector(".chart-now");
+    host._range = box.querySelector(".chart-range");
     host._draw = () => drawChart(host);
     ro.observe(host);
-    charts.appendChild(host);
+    charts.appendChild(box);
     return { kind, host };
   });
 }
 
 function updateRow(row, svc) {
   const ui = row._ui, status = svc.status || "healthy", tickets = svc.row === "tickets";
+  const releases = svc.row === "releases";
   ensureCharts(row, tickets ? [] : svc.charts || ["latency", "traffic"]);
-  setClass(row, `svc-row${tickets ? " ticket-row" : ""} ${status}`);
+  setClass(row, `svc-row${tickets ? " ticket-row" : releases ? " releases-row" : ""} ${status}`);
   setText(ui.name, svc.name);
   setAttr(ui.main, "aria-label", svc.name);
   setAttr(ui.issues, "aria-label", `${svc.name} issues in the last 10 minutes`);
@@ -496,13 +580,96 @@ function updateRow(row, svc) {
   setAttr(ui.remediate, "title", tickets ? "Measured from the ticket's creation to the responder's answer"
     : "Measured from the incident's start to the agent's answer");
   if (tickets) updateTicketRow(row, svc);
+  if (releases) updateReleaseRow(row, svc);
   for (const c of ui.charts) { c.host._m = metricModel(svc, c.kind); c.host._draw(); }
+}
+
+// ---------- Releases row ----------
+// A row whose snapshot says row: "releases" (web-gateway, the design's deploy row, D-068):
+// the laptop, a line with the ambient flow on to the Releases list, and the row's charts on
+// the right; "Running v…" in the header. The state picked the releases and counted them:
+// the newest deploys of the last 10 minutes, each with its date and, once the agent rolled it
+// back, how long it ran. A release key the page hasn't seen (not on the first snapshot, and
+// at most FRESH_SECONDS old) lights the laptop, sends a packet down the line and pushes its
+// row in with the design's fade; a rollback replays the fade on the row it changes. Under
+// prefers-reduced-motion nothing moves (CSS).
+const LAPTOP = '<rect x="4" y="5" width="16" height="11" rx="1.5"></rect><path d="M2 19h20"></path>';
+const ARROW = '<svg width="7" height="9" viewBox="0 0 7 9" class="flow-arrow"><path d="M1 1l4.5 3.5L1 8"></path></svg>';
+const flowDots = (cls, delays) => delays.map(d => `<span class="${cls}" style="animation-delay: ${d}"></span>`).join("");
+
+function createReleaseBody(row) {
+  const body = document.createElement("div");
+  body.className = "flow-body rl-body";
+  body.innerHTML = `
+    <div class="flow-left">
+      <div class="src-box rl-laptop">
+        <svg role="img" aria-label="Developer laptop" width="18" height="18" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${LAPTOP}</svg>
+      </div>
+      <div class="flow-line rl-line" aria-hidden="true">
+        ${flowDots("flow", ["0s", ".4s", ".8s", "1.2s"])}
+        <span class="rl-packet"></span>
+        ${ARROW}
+      </div>
+      <div class="list">
+        <div class="list-head"><span class="list-title">Releases</span><span class="list-count"></span></div>
+        <div class="list-view rl-view" aria-live="polite"><div class="rl-rows"></div></div>
+      </div>
+    </div>
+    <div class="chart-col"></div>`;
+  row.querySelector(".row-main").appendChild(body);
+  body.querySelector(".chart-col").appendChild(row.querySelector(".row-body"));
+  const q = sel => body.querySelector(sel);
+  row._rl = { body, laptop: q(".rl-laptop"), packet: q(".rl-packet"), rows: q(".rl-rows"), count: q(".list-count"),
+              seen: null };  // the release keys on the previous snapshot; null before the first
+  const detail = row.querySelector(".detail");
+  detail.innerHTML = '<span>Running <span class="running"></span></span>';
+  row._rl.running = detail.querySelector(".running");
+}
+
+function updateReleaseRow(row, svc) {
+  if (!row._rl) createReleaseBody(row);
+  const rl = row._rl, releases = svc.releases || {}, list = releases.newest || [];
+  setText(rl.running, svc.version ? `v ${svc.version}` : "—");
+  setText(rl.count, `${releases.count || 0} in 10 min`);
+
+  // The keys this snapshot brings that the page hasn't seen: they animate (not on the first).
+  const first = rl.seen === null;
+  const fresh = first ? [] : list.filter(r => !rl.seen.has(r.key) && UPDATED - r.deployedAt <= FRESH_SECONDS);
+  rl.seen = new Set(list.map(r => r.key));
+
+  sync(rl.rows, list, r => r.key, r => {
+    const n = document.createElement("div");
+    n.innerHTML = '<span class="rl-version"></span><span class="rl-at"></span><span class="rl-back"></span>';
+    if (fresh.includes(r)) {  // the design's fade, once, as the packet lands
+      n._fresh = true;
+      setTimeout(() => { n._fresh = false; n.classList.remove("fresh"); }, 4200);
+    }
+    return n;
+  }, (n, r) => {
+    const back = r.rolledBackAfter != null;
+    setClass(n, `rl-row${back ? " rolled-back" : ""}${n._fresh ? " fresh" : ""}`);
+    if (back && n._back === false && !n._fresh) replay(n, "rback");  // rolled back since the last snapshot
+    n._back = back;
+    const [version, at, rolled] = n.children;
+    setText(version, `v ${r.version ?? "?"}`);
+    setText(at, `deployed at ${ticketTime(r.deployedAt)}`);
+    setText(rolled, back ? `rolled back after ${r.rolledBackAfterText}` : "");
+  });
+  if (fresh.length) {
+    replay(rl.rows, "rpush");
+    rl.laptop.classList.add("busy");
+    replay(rl.laptop, "ring");
+    clearTimeout(rl.laptop._busy);
+    rl.laptop._busy = setTimeout(() => rl.laptop.classList.remove("busy"), 1000);
+    replay(rl.packet, "travel");
+  }
 }
 
 // ---------- Ticket row ----------
 // A row whose snapshot says row: "tickets" (checkout, D-068). Three columns, as in the target
 // design: the two sources, whose curved paths merge and run on to the list; the list of the
-// newest tickets; and "Tickets and agent runs", the last 2 minutes (svc.timelineSeconds) with
+// newest tickets; and "Tickets and agent runs", the last 2 minutes (D.chartSeconds) with
 // a mark per ticket and one lane per agent. The state did the matching and the counting: the
 // runs come with their positions, labels and words, the sources and the lanes with their names,
 // and each lane with its state. A ticket id the page hasn't seen before lights its source, sends
@@ -539,10 +706,9 @@ function replay(el, base) {
 function createTicketBody(row, svcSources) {
   const SOURCES = SOURCE_LAYOUT.map((at, k) => ({ ...at, key: svcSources[k]?.key ?? "", name: esc(svcSources[k]?.name ?? "") }));
   const body = document.createElement("div");
-  body.className = "tk-body";
-  const flowDots = (n, cls, delays) => delays.slice(0, n).map(d => `<span class="${cls}" style="animation-delay: ${d}"></span>`).join("");
+  body.className = "flow-body tk-body";
   body.innerHTML = `
-    <div class="tk-flow">
+    <div class="flow-left">
       <div class="tk-sources">
         <svg width="170" height="280" viewBox="0 0 170 280" aria-hidden="true">
           ${SOURCES.map(x => `<path d="${x.path}" class="tk-path"></path>`).join("")}
@@ -550,21 +716,21 @@ function createTicketBody(row, svcSources) {
         </svg>
         ${SOURCES.map((x, k) => `
           <span class="tk-src-label" style="top: ${x.labelTop}px">${x.name}</span>
-          ${flowDots(3, `flowc path-${k}`, k ? [".23s", ".7s", "1.17s"] : ["0s", ".47s", ".93s"])}
+          ${flowDots(`flowc path-${k}`, k ? [".23s", ".7s", "1.17s"] : ["0s", ".47s", ".93s"])}
           <span class="tk-packet path-${k}" data-src="${x.key}"></span>
-          <div class="tk-src" data-src="${x.key}" title="${x.name}" style="top: ${x.top}px">
+          <div class="src-box tk-src" data-src="${x.key}" title="${x.name}" style="top: ${x.top}px">
             <svg role="img" aria-label="${x.name}" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${x.icon}</svg>
           </div>`).join("")}
       </div>
-      <div class="tk-line" aria-hidden="true">
-        ${flowDots(4, "flow", [".1s", ".5s", ".9s", "1.3s"])}
+      <div class="flow-line" aria-hidden="true">
+        ${flowDots("flow", [".1s", ".5s", ".9s", "1.3s"])}
         <span class="tk-merge"></span>
-        <svg width="7" height="9" viewBox="0 0 7 9" class="tk-arrow"><path d="M1 1l4.5 3.5L1 8"></path></svg>
+        ${ARROW}
       </div>
-      <div class="tk-list">
-        <div class="tk-list-head"><span class="tk-list-title">Tickets</span><span class="tk-received"></span></div>
-        <div class="tk-view" aria-live="polite"><div class="tk-rows"></div></div>
+      <div class="list">
+        <div class="list-head"><span class="list-title">Tickets</span><span class="list-count"></span></div>
+        <div class="list-view tk-view" aria-live="polite"><div class="tk-rows"></div></div>
       </div>
     </div>
     <div class="tk-timeline">
@@ -579,12 +745,12 @@ function createTicketBody(row, svcSources) {
             <span class="tk-square"></span><span class="tk-lane-name"></span><span class="tk-lane-state"></span>
           </div>`).join("")}
       </div>
-      <div class="tk-axis" aria-hidden="true"><span>−2m</span><span>−90s</span><span>−60s</span><span>−30s</span><span>now</span></div>
+      ${axisHTML()}
     </div>`;
   row.querySelector(".row-main").appendChild(body);
   const q = sel => body.querySelector(sel);
   row._tk = {
-    body, rows: q(".tk-rows"), received: q(".tk-received"), agents: q(".tk-agents"),
+    body, rows: q(".tk-rows"), received: q(".list-count"), agents: q(".tk-agents"),
     plot: q(".tk-plot"), marks: q(".tk-marks"), runs: q(".tk-runs"),
     chips: Object.fromEntries(LANES.map(l => [l.key, q(`.tk-chip.${l.key}`)])),
     sources: Object.fromEntries(SOURCES.map(x => [x.key, q(`.tk-src[data-src="${x.key}"]`)])),
@@ -598,7 +764,7 @@ function createTicketBody(row, svcSources) {
 
 function updateTicketRow(row, svc) {
   if (!row._tk) createTicketBody(row, svc.sources || []);
-  const tk = row._tk, T = svc.timelineSeconds || 120, list = (svc.tickets && svc.tickets.newest) || [];
+  const tk = row._tk, T = AXIS, list = (svc.tickets && svc.tickets.newest) || [];
   const pct = t => `${(Math.max(0, Math.min(t, T)) / T * 100).toFixed(3)}%`;
 
   // Header: open P1 tickets, in the accent above 0.
@@ -803,7 +969,7 @@ function clockText(sec) {
 }
 
 function render(D) {
-  AXIS = D.axisSeconds || 600;
+  AXIS = D.chartSeconds || 120;
   UPDATED = D.updatedAt || Date.now() / 1000;
   THRESHOLD = D.errorThresholdPct ?? THRESHOLD;
   ACTION = D.actionWords || ACTION;
