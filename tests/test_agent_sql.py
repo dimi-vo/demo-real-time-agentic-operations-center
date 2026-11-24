@@ -1,9 +1,15 @@
-"""The section 4 files must keep the contract the agents, the table and the scorer share.
+"""The agent files must keep the contract the agents, the tables and the scorer share.
 
-`remediation_decisions` is written by three INSERT statements and read by
+`remediation_decisions` is written by three INSERT statements (section 4) and read by
 `uv run evaluate`, so the column list, the allowed actions, the output format and the
 routing rules exist in several places at once (two prompts, three INSERTs, one DDL, one
 scorer). These tests fail when they drift apart.
+
+Section 5 (D-068) adds the ticket classifier (5.2). Its prompt answers a Severity and a
+Reason, with a HIGH, a plain LOW and a shouting LOW example filled in from the approved
+ticket templates. Its INSERT writes every P1 ticket's verdict to `ticket_triage`, parsed the
+way the 4.3 legs parse an action. The rules each INSERT follows are keyed by its file, and
+the output lines and allowed answers by its agent.
 """
 
 import re
@@ -31,13 +37,17 @@ AGENT_FILES = {
     TICKET_CLASSIFIER: "5.2_ticket_classifier.sql",
 }
 # Each INSERT: the agent it calls and the table it reads. The release agent has two legs:
-# error-rate breaches (lab 2.2's table, D-067) and latency anomalies.
+# error-rate breaches (lab 2.2's table, D-067) and latency anomalies. The classifier reads
+# lab 5.1's P1 tickets (D-068).
 INSERTS = {
     "4.3_insert_release_agent_errors.sql": (RELEASE_AGENT, "service_error_rate"),
     "4.3_insert_release_agent.sql": (RELEASE_AGENT, "service_health"),
     "4.3_insert_capacity_agent.sql": (CAPACITY_AGENT, "service_health"),
+    "5.2_insert_ticket_classifier.sql": (TICKET_CLASSIFIER, "p1_tickets"),
 }
-ERRORS_INSERT, LATENCY_INSERT, CAPACITY_INSERT = INSERTS
+ERRORS_INSERT, LATENCY_INSERT, CAPACITY_INSERT, CLASSIFIER_INSERT = INSERTS
+# The 4.3 legs: one decision per flagged window, into remediation_decisions.
+METRIC_INSERTS = (ERRORS_INSERT, LATENCY_INSERT, CAPACITY_INSERT)
 TABLE_FILE = "sink_remediation_decisions.sql"
 
 # Each agent's answer, line by line: brief section 5.5, cut down in D-034, for the metric
@@ -58,6 +68,27 @@ DECISION_COLUMNS = (
 
 def read(name: str) -> str:
     return (SQL / name).read_text()
+
+
+def _written_columns(sql: str) -> list[str]:
+    """The columns of the table an INSERT writes, from that table's DDL."""
+    table = re.search(r"INSERT INTO `(\w+)`", sql).group(1)
+    return re.findall(r"^\s+`(\w+)`", read(f"sink_{table}.sql"), re.MULTILINE)
+
+
+def _select_items(sql: str) -> list[str]:
+    """An INSERT's values, split at the select list's top-level commas."""
+    head = sql[sql.index("INSERT INTO") : sql.index("FROM (")]
+    body = head[head.index("SELECT") + len("SELECT") :]
+    items, depth, item = [], 0, ""
+    for ch in body:
+        depth += (ch == "(") - (ch == ")")
+        if ch == "," and depth == 0:
+            items.append(item.strip())
+            item = ""
+        else:
+            item += ch
+    return [*items, item.strip()]
 
 
 @pytest.fixture(scope="module")
@@ -193,9 +224,11 @@ def _classifier_examples() -> list[tuple[str, Template, str]]:
         ticket = _EXAMPLE_TICKET.match(text)
         assert ticket, text
         [template] = [
-            t for t in TEMPLATES
-            if _filled(t.subject).fullmatch(ticket["subject"]) and _filled(t.description).fullmatch(ticket["description"])
-        ]  # fmt: skip
+            t
+            for t in TEMPLATES
+            if _filled(t.subject).fullmatch(ticket["subject"])
+            and _filled(t.description).fullmatch(ticket["description"])
+        ]
         found.append((severity, template, _reason(text).strip()))
     return found
 
@@ -222,6 +255,65 @@ def test_the_shouting_example_is_low_for_one_customer_while_checkout_works():
     [reason] = [reason for _, template, reason in _classifier_examples() if template.shouting]
     assert reason.startswith("One customer ") and "checkout works" in reason
     assert "capitals" in reason.lower() and "urgen" in reason.lower(), "why the wording does not count"
+
+
+def test_the_classifier_insert_writes_every_p1_ticket_to_ticket_triage():
+    """One statement; every P1 is classified and written, LOW ones included, so the wall and
+    `evaluate` see each verdict. The latest offset is checked with the other INSERTs."""
+    sql = read(CLASSIFIER_INSERT)
+    body = sql[sql.index("INSERT INTO") :]
+    assert body.startswith("INSERT INTO `ticket_triage`\nSELECT\n")
+    assert "FROM `p1_tickets` /*+" in body and "WHERE" not in body
+    assert body.count(";") == 1 and body.rstrip().endswith(");")
+
+
+def test_the_classifier_insert_writes_the_ticket_triage_columns_in_order():
+    """The seven ticket columns as they came, then the verdict, the reason and the raw answer
+    (spec decision 16)."""
+    sql = read(CLASSIFIER_INSERT)
+    columns, items = _written_columns(sql), _select_items(sql)
+    assert columns[7:] == ["severity", "reason", "raw_response"]
+    assert items[:7] == [f"t.`{c}`" for c in columns[:7]]
+    assert items[7].startswith("CASE") and "Severity:" in items[7]
+    assert items[8].startswith("TRIM(") and "Reason:" in items[8]
+    assert items[9] == "a.`agent_response`"
+
+
+def _severity_or_action(sql: str) -> str:
+    """The multi-line CASE that turns the answer's first line into a value or INVALID."""
+    return sql[sql.index("  CASE\n") : sql.index("  END,\n")]
+
+
+def test_the_classifier_parses_its_severity_as_the_metric_legs_parse_an_action():
+    """The same agent_status handling and the same regex, on the Severity line: HIGH and LOW
+    are the only values, and anything else is INVALID."""
+    capacity = _severity_or_action(read(CAPACITY_INSERT))
+    expected = capacity.replace("Action:", "Severity:").replace(
+        "IN ('INVESTIGATE_UPSTREAM', 'OBSERVE')", "IN ('HIGH', 'LOW')"
+    )
+    assert "Severity:" in expected and "IN ('HIGH', 'LOW')" in expected
+    assert _severity_or_action(read(CLASSIFIER_INSERT)) == expected
+
+
+def test_every_insert_parses_the_reason_the_same_way():
+    def reason(name):
+        [line] = [line for line in read(name).splitlines() if "REGEXP_EXTRACT" in line and "Reason:" in line]
+        return line.strip().rstrip(",")
+
+    assert len({reason(name) for name in INSERTS}) == 1
+
+
+def test_the_classifier_input_names_the_ticket_and_survives_a_null_text():
+    """Its id, source, priority, subject and description, labelled as in the prompt examples.
+    CONCAT returns null when any argument is null, so the two free-text columns fall back to
+    N/A, as Last Change does in 4.3."""
+    sql = read(CLASSIFIER_INSERT)
+    concat = sql[sql.index("  CONCAT(\n") : sql.index(")) AS a(")]
+    for line in ("'TICKET ', t.`ticket_id`, ' from ', t.`source`, '\\n',",
+                 "'Priority: ', t.`priority`, '\\n',",
+                 "'Subject: ', COALESCE(t.`subject`, 'N/A'), '\\n',",
+                 "'Description: ', COALESCE(t.`description`, 'N/A')\n"):  # fmt: skip
+        assert line in concat, line
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
@@ -260,13 +352,15 @@ def test_insert_calls_its_own_agent_by_name_as_a_string(name):
     agent, _ = INSERTS[name]
     sql = read(name)
     assert f"AI_RUN_AGENT(\n  '{agent}'," in sql
-    assert sql.count(f"'{agent}'") == 2, "once as the written agent_name, once as the call"
+    written = "agent_name" in _written_columns(sql)  # ticket_triage has no agent column
+    assert sql.count(f"'{agent}'") == 1 + written, "once as the call, and as the agent_name if written"
 
 
-@pytest.mark.parametrize("name", INSERTS)
+@pytest.mark.parametrize("name", METRIC_INSERTS)
 def test_insert_filters_below_the_lateral_join(name):
     """The agent must be called once per anomalous row, not once per window: the WHERE
-    sits in a derived table that is the left input of the LATERAL join."""
+    sits in a derived table that is the left input of the LATERAL join. (The classifier
+    has no filter: lab 5.1 already kept only the P1s.)"""
     _, table = INSERTS[name]
     sql = read(name)
     where = sql.index("WHERE")
@@ -287,9 +381,9 @@ def test_insert_maps_a_failed_or_out_of_set_answer_to_invalid(name):
     sql = read(name)
     assert "`agent_status` = 'SUCCESS'" in sql
     assert "ELSE 'INVALID'" in sql
-    for action in ALLOWED_ACTIONS[agent]:
-        assert f"'{action}'" in sql
-    for action in set(ACTIONS) - set(ALLOWED_ACTIONS[agent]):
+    for answer in ALLOWED_ANSWERS[agent]:
+        assert f"'{answer}'" in sql
+    for action in set(ACTIONS) - set(ALLOWED_ANSWERS[agent]):
         assert f"'{action}'" not in sql, "an agent must not accept another agent's action"
     assert "a.`agent_response`" in sql, "the raw answer is always written"
 
@@ -345,7 +439,7 @@ def test_table_is_created_by_the_platform_team_and_can_be_emptied(table_sql):
     assert "'kafka.cleanup-policy' = 'delete'" in table_sql
 
 
-@pytest.mark.parametrize("name", INSERTS)
+@pytest.mark.parametrize("name", METRIC_INSERTS)
 def test_inserts_start_with_the_four_identity_columns(name):
     """The INSERTs are positional: the first four values are the identity columns, in
     the DDL's order. The rest is checked by the arity test below."""
@@ -372,19 +466,13 @@ def test_escalate_is_gone_from_every_agent_file():
 
 
 @pytest.mark.parametrize("name", INSERTS)
-def test_inserts_select_exactly_as_many_values_as_the_table_has_columns(table_sql, name):
+def test_inserts_select_exactly_as_many_values_as_the_table_has_columns(name):
     """The INSERTs are positional: a missing or extra value shifts every column."""
     sql = read(name)
-    head = sql[sql.index("INSERT INTO") : sql.index("FROM (")]
-    body = head[head.index("SELECT") + len("SELECT") :]
-    depth, items = 0, 1
-    for ch in body:
-        depth += (ch == "(") - (ch == ")")
-        items += ch == "," and depth == 0
-    assert items == len(DECISION_COLUMNS)
+    assert len(_select_items(sql)) == len(_written_columns(sql))
 
 
-@pytest.mark.parametrize("name", INSERTS)
+@pytest.mark.parametrize("name", METRIC_INSERTS)
 def test_a_metric_decision_has_no_ticket(name):
     """D-068: ticket_id is the last column, and only the ticket responder (lab 5.3) sets it.
     Each 4.3 leg writes a typed null there, after the raw answer."""
