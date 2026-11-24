@@ -24,6 +24,8 @@ output "flink_statements" {
       service_error_rate    = confluent_flink_statement.create_service_error_rate_table
       service_health        = confluent_flink_statement.create_service_health_table
       remediation_decisions = confluent_flink_statement.create_remediation_decisions_table
+      p1_tickets            = confluent_flink_statement.create_p1_tickets_table
+      ticket_triage         = confluent_flink_statement.create_ticket_triage_table
       llm_textgen_model     = confluent_flink_statement.llm_textgen_model
     } :
     key => {

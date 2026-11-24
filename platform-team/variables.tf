@@ -40,7 +40,7 @@ variable "region" {
 }
 
 variable "flink_max_cfu" {
-  description = "Autoscaling ceiling for each developer's Flink compute pool; CFUs are consumed on demand, not reserved. Sized for the service_error_rate and service_health INSERTs, three agent statements and ad-hoc queries running the whole workshop."
+  description = "Autoscaling ceiling for each developer's Flink compute pool; CFUs are consumed on demand, not reserved. Sized for the eight statements that run the whole workshop (the INSERTs of labs 2.2 and 2.5, the three agent legs of 4.3, and 5.1, 5.2 and 5.3) and ad-hoc queries."
   type        = number
   default     = 10
 }

@@ -113,9 +113,16 @@ run "statements_signed_as_principal_in_the_developer_catalog" {
       contains(keys(output.flink_statements), "service_error_rate") &&
       contains(keys(output.flink_statements), "service_health") &&
       contains(keys(output.flink_statements), "remediation_decisions") &&
+      contains(keys(output.flink_statements), "p1_tickets") &&
+      contains(keys(output.flink_statements), "ticket_triage") &&
       contains(keys(output.flink_statements), "llm_textgen_model")
     )
-    error_message = "the module must create the five source tables, the three output tables and the model"
+    error_message = "the module must create the five source tables, the five output tables and the model"
+  }
+
+  assert {
+    condition     = length(output.flink_statements) == 11
+    error_message = "the module must create ten tables and the model, and nothing else"
   }
 }
 
@@ -150,6 +157,48 @@ run "the_ticket_source_tables_are_created" {
       can(regex("^CREATE TABLE IF NOT EXISTS `ticket_answer_key`", confluent_flink_statement.create_ticket_answer_key_table.statement))
     )
     error_message = "the two ticket source tables must be created"
+  }
+}
+
+# The outputs of labs 5.1 and 5.2 (D-068) take support_tickets' options: append-only and
+# read-uncommitted, so the agent reading each one never waits for a Flink commit (D-063).
+run "the_ticket_output_tables_are_created" {
+  command = plan
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in [
+        confluent_flink_statement.create_p1_tickets_table,
+        confluent_flink_statement.create_ticket_triage_table,
+        ] : (
+        can(regex("'changelog.mode' = 'append'", s.statement)) &&
+        can(regex("'kafka.consumer.isolation-level' = 'read-uncommitted'", s.statement)) &&
+        can(regex("'kafka.cleanup-policy' = 'delete'", s.statement)) &&
+        can(regex("'kafka.retention.time' = '24 h'", s.statement)) &&
+        can(regex("DISTRIBUTED INTO 1 BUCKETS", s.statement)) &&
+        can(regex("WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND", s.statement)) &&
+        !can(regex("PRIMARY KEY", s.statement))
+      )
+    ])
+    error_message = "p1_tickets and ticket_triage must be append-only, read-uncommitted, delete-cleanup tables in one bucket with a 5 s watermark and no key"
+  }
+
+  assert {
+    condition = (
+      can(regex("^CREATE TABLE IF NOT EXISTS `p1_tickets`", confluent_flink_statement.create_p1_tickets_table.statement)) &&
+      can(regex("^CREATE TABLE IF NOT EXISTS `ticket_triage`", confluent_flink_statement.create_ticket_triage_table.statement)) &&
+      can(regex("`severity` STRING NOT NULL", confluent_flink_statement.create_ticket_triage_table.statement))
+    )
+    error_message = "the two ticket output tables must be created, and ticket_triage must have a STRING NOT NULL severity"
+  }
+
+  assert {
+    condition     = can(regex("`ticket_id` STRING COMMENT", confluent_flink_statement.create_remediation_decisions_table.statement))
+    error_message = "remediation_decisions must have a nullable ticket_id for the ticket responder's decisions"
   }
 }
 

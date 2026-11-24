@@ -10,8 +10,8 @@ This Terraform module builds **each developer's workshop stack**:
 
 - **a new, empty environment**, named after their email (see [Environment names](#environment-names)), with the Stream Governance Advanced package, and a role binding that makes the developer **EnvironmentAdmin** on it through their own user account;
 - **a Standard, single-zone Kafka cluster**, `RIVER-OOPS-DEMO-CLUSTER`, on AWS in `region` (default `us-east-1`, the same for everyone). The environment's Schema Registry comes up with it;
-- **a Flink compute pool**, `RIVER-OOPS-DEMO-pool`, that scales on demand up to `flink_max_cfu` CFUs (default 10), sized for the statements that run the whole workshop (the `service_error_rate` and `service_health` `INSERT`s, three agent `INSERT`s, and ad-hoc queries);
-- **the workshop's tables and AI model:** three source tables, `service_metrics` (append-only, one metrics sample per service per second), `service_deployments` (upsert, keyed by `service_name`) and `service_incidents` (the simulator's answer key), all empty until the developer runs `uv run ops-sim`; three output tables, `service_error_rate`, `service_health` and `remediation_decisions`, which the developer fills with `INSERT` statements in the labs (so the developer never writes a `CREATE TABLE`, and the ops wall can read all of its topics from the start); and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`).
+- **a Flink compute pool**, `RIVER-OOPS-DEMO-pool`, that scales on demand up to `flink_max_cfu` CFUs (default 10), sized for the eight long-running statements of the workshop (the `INSERT`s of labs 2.2 and 2.5, the three agent legs of 4.3, and 5.1, 5.2 and 5.3) and ad-hoc queries;
+- **the workshop's tables and AI model:** five source tables, `service_metrics` (append-only, one metrics sample per service per second), `service_deployments` (upsert, keyed by `service_name`), `service_incidents` (the simulator's answer key), `support_tickets` (checkout's support tickets) and `ticket_answer_key` (their answer key), all empty until the developer runs `uv run ops-sim`; five output tables, `service_error_rate`, `service_health`, `remediation_decisions`, `p1_tickets` and `ticket_triage`, which the developer fills with `INSERT` statements in the labs (so the developer never writes a `CREATE TABLE`, and the ops wall can read all of its topics from the start); and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`).
 
 There is **no static/seed table**: unlike some workshops, this one builds all of its
 data live from the generator, so there is nothing to seed and nothing to count.
@@ -153,7 +153,7 @@ rm terraform.tfplan
 ```
 
 **`terraform plan`** ends with `Plan: N to add, 0 to change, 0 to destroy.`, where **N
-is 13 per person**:
+is 17 per person**:
 
 1. A random name suffix
 2. One environment
@@ -164,10 +164,14 @@ is 13 per person**:
 7. Flink statement: create the `service_metrics` table
 8. Flink statement: create the `service_deployments` table
 9. Flink statement: create the `service_incidents` table
-10. Flink statement: create the `service_error_rate` table
-11. Flink statement: create the `service_health` table
-12. Flink statement: create the `remediation_decisions` table
-13. Flink statement: create the `llm_textgen_model` model
+10. Flink statement: create the `support_tickets` table
+11. Flink statement: create the `ticket_answer_key` table
+12. Flink statement: create the `service_error_rate` table
+13. Flink statement: create the `service_health` table
+14. Flink statement: create the `remediation_decisions` table
+15. Flink statement: create the `p1_tickets` table
+16. Flink statement: create the `ticket_triage` table
+17. Flink statement: create the `llm_textgen_model` model
 
 It fails before creating anything if your key/secret is wrong, an email isn't a user,
 the same person appears twice, or an email's local part has nothing to name an
@@ -183,7 +187,7 @@ terraform output -raw handout        # each person's environment name, ID and Co
 confluent flink statement list --environment <env-id> --cloud aws --region <region>
 ```
 
-All six statements (named `tf-…`) should be `COMPLETED`.
+All eleven statements (named `tf-…`) should be `COMPLETED`.
 
 ### If the apply stops
 
@@ -191,6 +195,25 @@ On `Statement with name "tf-…" already exists`, or a statement that failed wit
 "technical difficulties on our end", re-run the same `plan -out` / `apply` / `rm`
 commands. Both are transient; the statements are `IF NOT EXISTS`, so a second run only
 adds what's missing.
+
+### Updating stacks you built earlier
+
+Re-running the apply on an existing stack adds the tables it doesn't have yet, but it
+never changes a table that is already there: every statement is `CREATE TABLE IF NOT
+EXISTS`. A table whose columns changed has to be dropped first, in every existing stack.
+
+`remediation_decisions` gained a `ticket_id` column for the ticket responder (D-068). In
+each stack applied before that:
+
+1. Stop the statements that write `remediation_decisions`: the developer's lab 4.3
+   `INSERT`s (`uv run reset-health` deletes them).
+2. In a Flink SQL workspace of that environment (database `RIVER-OOPS-DEMO-CLUSTER`), run
+   ``DROP TABLE `remediation_decisions`;``.
+3. Re-run the `plan -out` / `apply` / `rm` commands above. Its statement's SQL changed, so
+   the apply runs it again and creates the table with the new column, next to the four new
+   tables (`support_tickets`, `ticket_answer_key`, `p1_tickets`, `ticket_triage`).
+
+The developer then starts the lab 4.3 `INSERT`s again.
 
 ## 8. Rehearse the developer flow
 
@@ -212,7 +235,7 @@ terraform apply terraform.tfplan
 rm terraform.tfplan
 ```
 
-Check the plan says `0 to change, 0 to destroy`, with **13 to add per new person**.
+Check the plan says `0 to change, 0 to destroy`, with **17 to add per new person**.
 Each stack belongs to its exact email string, so **removing an email destroys that
 person's whole stack**, and **changing an entry (even its case) replaces it** with a
 new, empty one.
@@ -251,7 +274,7 @@ environment name and the Console URL; the deploy finds the environment by itself
 |---|---|
 | `Your platform team hasn't provisioned <name> (<id>) yet` | Their stack is incomplete, most likely a stopped apply. Re-run `plan -out` / `apply` / `rm` (see [If the apply stops](#if-the-apply-stops)). |
 | `Your Global key sees no environment you're directly bound to.` | Their email is missing from `developer_emails`, or they signed in with another account. Check the [handout](#11-developer-access). |
-| `✗ table <name> is missing — ask your platform team to re-run their apply` (or `✗ model llm_textgen_model …`), from the readiness check at the end of `uv run deploy`; `<name>` can be any of the six tables, including the output tables `service_error_rate`, `service_health` and `remediation_decisions` | A statement didn't complete; re-run the apply. |
+| `✗ table <name> is missing — ask your platform team to re-run their apply` (or `✗ model llm_textgen_model …`), from the readiness check at the end of `uv run deploy`; `<name>` can be any of the ten tables, including the output tables `service_error_rate`, `service_health`, `remediation_decisions`, `p1_tickets` and `ticket_triage` | A statement didn't complete; re-run the apply. |
 
 A developer who sees `Confluent Cloud refused a new Global key` already holds the 2
 Global keys a user may own — they delete one under **API keys → My account**.
@@ -303,7 +326,7 @@ or use an encrypted backend (add a `backend` block before the first `init`).
 | `variables.tf` | Key/secret, `developer_emails` + validations, `region`, `flink_max_cfu`, `csp_hosted_model` |
 | `main.tf` | User + key-owner lookups, name suffixes, one `modules/developer` per email |
 | `outputs.tf` | The `handout` table and the `validation` links |
-| `modules/developer/` | One developer's stack: environment, binding, cluster, pool, the three source tables, the three output tables and the model (`statements.tf`) |
+| `modules/developer/` | One developer's stack: environment, binding, cluster, pool, the five source tables, the five output tables and the model (`statements.tf`) |
 | `tests/` | Offline `terraform test` checks (every provider mocked) |
 
 </details>

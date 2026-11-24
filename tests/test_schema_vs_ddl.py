@@ -8,6 +8,9 @@ base types (ignoring nullability, which the DDL leaves implicit).
 As registered by Confluent Cloud (checked in Phase 3): TIMESTAMP(3) maps to
 `local-timestamp-millis`, and an upsert table's PRIMARY KEY columns are in the key
 subject only, not in the value.
+
+The two ticket output tables (D-068) have no .avsc (Flink writes them), but they copy
+support_tickets' columns and options, so their DDL is checked against it here too.
 """
 
 import json
@@ -136,3 +139,47 @@ def test_the_ticket_tables_take_service_incidents_options(table):
         return sql[sql.index("  WATERMARK") :]
 
     assert tail(table) == tail("service_incidents")
+
+
+TICKET_COLUMNS = [
+    ("event_time", "local-timestamp-millis"),
+    ("ticket_id", "string"),
+    ("source", "string"),
+    ("service_name", "string"),
+    ("priority", "string"),
+    ("subject", "string"),
+    ("description", "string"),
+]
+
+
+def test_the_ticket_output_tables_carry_the_ticket_then_the_verdict():
+    # D-068, spec decisions 15 and 16: p1_tickets is the ticket as it came in; ticket_triage
+    # adds the classifier's verdict, so the responder reads one table without a join.
+    p1 = _ddl_columns((ROOT / "sql/sink_p1_tickets.sql").read_text())
+    assert list(p1.items()) == TICKET_COLUMNS
+    triage = _ddl_columns((ROOT / "sql/sink_ticket_triage.sql").read_text())
+    assert list(triage.items()) == [
+        *TICKET_COLUMNS,
+        ("severity", "string"),
+        ("reason", "string"),
+        ("raw_response", "string"),
+    ]
+
+
+@pytest.mark.parametrize("table", ["p1_tickets", "ticket_triage"])
+def test_the_ticket_output_tables_take_support_tickets_options(table):
+    # The same WITH options, bucket and 5 s watermark as support_tickets: append-only and
+    # read-uncommitted, so the classifier never waits about a minute for a commit (D-063).
+    def tail(path):
+        sql = (ROOT / path).read_text()
+        return sql[sql.index("  WATERMARK") :]
+
+    assert tail(f"sql/sink_{table}.sql") == tail("sql/source_support_tickets.sql")
+
+
+def test_the_verdict_is_never_null_and_names_its_three_values():
+    sql = (ROOT / "sql/sink_ticket_triage.sql").read_text()
+    line = re.search(r"^\s+`severity` (.+)$", sql, re.MULTILINE).group(1)
+    assert line.startswith("STRING NOT NULL COMMENT ")
+    for value in ("HIGH", "LOW", "INVALID"):
+        assert value in line, value
