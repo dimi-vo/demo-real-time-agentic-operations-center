@@ -7,21 +7,29 @@ scorer). These tests fail when they drift apart.
 """
 
 import re
+import string
 from pathlib import Path
 
 import pytest
 
+from opsgen.ticket_templates import POOLS, TEMPLATES, Template
 from scripts.evaluation.decisions import (
     ACTIONS,
     ALLOWED_ACTIONS,
     CAPACITY_AGENT,
     RELEASE_AGENT,
 )
+from scripts.evaluation.tickets import HIGH, LOW
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL = ROOT / "sql"
 
-AGENT_FILES = {RELEASE_AGENT: "4.2_release_agent.sql", CAPACITY_AGENT: "4.2_capacity_agent.sql"}
+TICKET_CLASSIFIER = "ticket_classifier"  # lab 5.2 (D-068)
+AGENT_FILES = {
+    RELEASE_AGENT: "4.2_release_agent.sql",
+    CAPACITY_AGENT: "4.2_capacity_agent.sql",
+    TICKET_CLASSIFIER: "5.2_ticket_classifier.sql",
+}
 # Each INSERT: the agent it calls and the table it reads. The release agent has two legs:
 # error-rate breaches (lab 2.2's table, D-067) and latency anomalies.
 INSERTS = {
@@ -32,8 +40,15 @@ INSERTS = {
 ERRORS_INSERT, LATENCY_INSERT, CAPACITY_INSERT = INSERTS
 TABLE_FILE = "sink_remediation_decisions.sql"
 
-# Brief section 5.5, cut down in D-034.
-OUTPUT_LINES = ("Action:", "Target:", "Reason:")
+# Each agent's answer, line by line: brief section 5.5, cut down in D-034, for the metric
+# agents; a severity and a reason for the classifier (D-068).
+OUTPUT_LINES = {
+    RELEASE_AGENT: ("Action:", "Target:", "Reason:"),
+    CAPACITY_AGENT: ("Action:", "Target:", "Reason:"),
+    TICKET_CLASSIFIER: ("Severity:", "Reason:"),
+}
+# What the first line may say: a metric agent's action, or the classifier's verdict.
+ALLOWED_ANSWERS = {**ALLOWED_ACTIONS, TICKET_CLASSIFIER: (HIGH, LOW)}
 # D-034's eight, then the ticket a ticket_responder decision is about (D-068).
 DECISION_COLUMNS = (
     "window_end", "service_name", "agent_name", "trigger",
@@ -51,12 +66,16 @@ def table_sql() -> str:
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_prompt_states_the_three_output_lines_in_order(agent):
+def test_prompt_states_its_own_output_lines_in_order(agent):
     prompt = read(AGENT_FILES[agent])
-    positions = [prompt.index(line) for line in OUTPUT_LINES]
-    assert positions == sorted(positions), "the output format must list the three lines in order"
+    lines = OUTPUT_LINES[agent]
+    positions = [prompt.index(line) for line in lines]
+    assert positions == sorted(positions), "the output format must list the lines in order"
+    assert f"respond with exactly these {len(lines)} labeled lines, in this order." in prompt
     for line in ("Confidence:", "Summary:", "Reasoning:", "Target Version:", "Target Replicas:"):
         assert line not in prompt, "D-034 cut the output down to three lines"
+    for other in {line for each in OUTPUT_LINES.values() for line in each} - set(lines):
+        assert other not in prompt, f"{other} is another agent's line"
 
 
 def _examples(prompt: str) -> list[tuple[str, str]]:
@@ -67,11 +86,11 @@ def _examples(prompt: str) -> list[tuple[str, str]]:
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_prompt_has_an_example_answer_for_every_allowed_action_and_no_other(agent):
+def test_prompt_has_an_example_answer_for_every_allowed_answer_and_no_other(agent):
     examples = _examples(read(AGENT_FILES[agent]))
-    assert {action for action, _ in examples} == set(ALLOWED_ACTIONS[agent])
-    for action, text in examples:
-        assert f"Action: {action}\n" in text
+    assert {answer for answer, _ in examples} == set(ALLOWED_ANSWERS[agent])
+    for answer, text in examples:
+        assert f"{OUTPUT_LINES[agent][0]} {answer}\n" in text
 
 
 def test_the_release_prompt_rolls_back_on_either_trigger():
@@ -127,13 +146,93 @@ def test_the_capacity_agent_investigates_drops_and_observes_more_traffic():
     assert "SCALE" not in capacity and "Suggested" not in capacity
 
 
+# --- lab 5.2: the ticket classifier (D-068) ------------------------------------------------
+
+
+def test_the_classifier_answers_a_severity_and_a_reason():
+    """Spec decision 20: two labelled lines, plain text."""
+    assert "Severity: [HIGH | LOW]\nReason: [one or two sentences]\n" in read(AGENT_FILES[TICKET_CLASSIFIER])
+
+
+def test_the_classifier_calls_high_only_when_many_customers_cannot_buy_right_now():
+    """Spec decision 21: rule 1 is HIGH, rule 2 is LOW for everything else, however the ticket
+    is worded. Every ticket it reads is a P1, and reporters over-prioritise."""
+    prompt = read(AGENT_FILES[TICKET_CLASSIFIER])
+    high, low, strict = (prompt.index(s) for s in ("1. HIGH — ", "2. LOW — ", "STRICT VALUES"))
+    assert high < low < strict
+    assert "many customers cannot complete checkout or pay, right now" in prompt[high:low]
+    rule_low = prompt[low:strict]
+    for wording in ("one customer", "a question", "a request", "something cosmetic",
+                    "Capitals", "exclamation marks", "urgent", "the P1 itself"):  # fmt: skip
+        assert wording in rule_low, wording
+    assert "never make a ticket HIGH" in rule_low
+    assert "marked P1 by whoever filed it" in prompt and "over-prioritise" in prompt
+
+
+# An example shows its ticket as the INSERT shows one, then the answer.
+_EXAMPLE_TICKET = re.compile(
+    r"\nTICKET (?:ZD-\d{5}|INC\d{7}) from (?:ZENDESK|SERVICENOW)\nPriority: P1\n"
+    r"Subject: (?P<subject>[^\n]+)\nDescription: (?P<description>[^\n]+)\nAnswer:\n"
+)
+
+
+def _filled(text: str) -> re.Pattern:
+    """A template's text, each placeholder matching any value of its pool."""
+    pattern = ""
+    for literal, name, _, _ in string.Formatter().parse(text):
+        pattern += re.escape(literal)
+        if name is not None:
+            pattern += "(?:" + "|".join(map(re.escape, POOLS[name])) + ")"
+    return re.compile(pattern)
+
+
+def _classifier_examples() -> list[tuple[str, Template, str]]:
+    """(severity, the approved template its ticket fills in, Reason) for each example."""
+    found = []
+    for severity, text in _examples(read(AGENT_FILES[TICKET_CLASSIFIER])):
+        ticket = _EXAMPLE_TICKET.match(text)
+        assert ticket, text
+        [template] = [
+            t for t in TEMPLATES
+            if _filled(t.subject).fullmatch(ticket["subject"]) and _filled(t.description).fullmatch(ticket["description"])
+        ]  # fmt: skip
+        found.append((severity, template, _reason(text).strip()))
+    return found
+
+
+def test_the_classifier_examples_are_approved_p1_tickets_filled_in():
+    """One HIGH, one plain LOW and one shouting LOW, each a P1 template the user approved
+    (issue 03) with its placeholders filled from their pools, answered with its true severity."""
+    examples = _classifier_examples()
+    for severity, template, _ in examples:
+        assert (template.priority, template.true_severity) == ("P1", severity), template.subject
+    assert sorted((severity, t.shouting) for severity, t, _ in examples) == [(HIGH, False), (LOW, False), (LOW, True)]
+
+
+def test_each_classifier_example_reason_names_the_deciding_fact():
+    """How many customers, and whether they can still buy or pay."""
+    examples = _classifier_examples()
+    assert examples
+    for severity, _, reason in examples:
+        assert "customer" in reason.lower(), (severity, reason)
+        assert re.search(r"\b(buy|pay)\b", reason), (severity, reason)
+
+
+def test_the_shouting_example_is_low_for_one_customer_while_checkout_works():
+    [reason] = [reason for _, template, reason in _classifier_examples() if template.shouting]
+    assert reason.startswith("One customer ") and "checkout works" in reason
+    assert "capitals" in reason.lower() and "urgen" in reason.lower(), "why the wording does not count"
+
+
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
-def test_prompt_allows_exactly_the_actions_the_scorer_accepts(agent):
+def test_prompt_allows_exactly_the_answers_the_scorer_accepts(agent):
+    """The Action line of a metric agent, the Severity line of the classifier."""
     prompt = read(AGENT_FILES[agent])
-    stated = re.search(r"the Action line must be exactly ([^.]+)\.", prompt)
-    assert stated, "the prompt must state the allowed actions"
+    label = OUTPUT_LINES[agent][0].rstrip(":")
+    stated = re.search(rf"the {label} line must be exactly ([^.]+)\.", prompt)
+    assert stated, "the prompt must state the allowed answers"
     named = {w for w in re.findall(r"\b[A-Z][A-Z_]{2,}\b", stated.group(1))}
-    assert named == set(ALLOWED_ACTIONS[agent])
+    assert named == set(ALLOWED_ANSWERS[agent])
 
 
 @pytest.mark.parametrize("agent", sorted(AGENT_FILES))
