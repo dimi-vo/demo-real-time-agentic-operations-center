@@ -391,3 +391,41 @@ def test_evaluate_dumps_and_rereads_the_error_rate_rows(monkeypatch, capsys, tmp
     dump = tmp_path / "error_rate.jsonl"
     _main_with_error_rate(monkeypatch, capsys, health=None, argv=["--dump-error-rate", str(dump)])
     assert len(dump.read_text().splitlines()) == 80
+
+
+# --- ticket decisions (D-068) ------------------------------------------------------------
+
+
+def _ticket_decision(k):
+    return _dec("checkout", k, agent="ticket_responder", trigger="HIGH_SEVERITY_TICKET", action=SCALE_OUT,
+                ticket_id=f"ZD-{48215 + k}")  # fmt: skip
+
+
+def test_a_ticket_decision_is_never_an_unexpected_metric_decision_and_never_moves_counted_from():
+    rows = _series("payments", 100, {60: {"lat": "HIGH"}})
+    rep = _score([_ticket_decision(5), _dec("payments", 60), _ticket_decision(80)], rows, [])
+    assert rep.total_decisions == 1
+    assert rep.coverage.counted_from == T0 + 610
+    assert rep.coverage.unexpected == []
+    assert [d.service_name for d in rep.outside] == ["payments"] and set(rep.agents) == {RELEASE_AGENT}
+
+
+def test_a_ticket_decision_alone_leaves_the_metric_half_empty():
+    rep = _score([_ticket_decision(5)], _series("payments", 20, {5: {"lat": "HIGH"}}), [])
+    assert rep.total_decisions == 0 and rep.coverage.counted_from is None
+
+
+def test_from_record_reads_a_ticket_decision_and_its_kafka_timestamp():
+    d = DecisionRow.from_record({
+        "window_end": "2027-01-15T12:00:03.000Z", "service_name": "checkout", "agent_name": "ticket_responder",
+        "trigger": "HIGH_SEVERITY_TICKET", "action": "SCALE_OUT", "target": None, "reason": "Sale traffic.",
+        "raw_response": "Action: SCALE_OUT\nReason: Sale traffic.", "ticket_id": "ZD-48215",
+        "kafka_timestamp": "2027-01-15T12:00:12.500Z",
+    })  # fmt: skip
+    assert d.ticket_id == "ZD-48215" and d.valid and d.routed_correctly
+    assert d.written_at - d.window_end == 9.5
+    metric = DecisionRow.from_record({
+        "window_end": "2027-01-15T12:00:10Z", "service_name": "payments", "agent_name": RELEASE_AGENT,
+        "trigger": "LATENCY_HIGH", "action": "OBSERVE",
+    })  # fmt: skip
+    assert metric.ticket_id is None and metric.written_at is None

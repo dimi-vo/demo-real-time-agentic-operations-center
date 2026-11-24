@@ -2929,6 +2929,20 @@ both tables' options and on `remediation_decisions`' `ticket_id`). `IF NOT EXIST
 changes a table, so `remediation_decisions` is dropped before the apply that recreates it; the
 user does both.
 
+Issue 05 (lab 5.1, route the P1 tickets): `sql/5.1_p1_tickets.sql` (new; one INSERT from
+`support_tickets` into `p1_tickets`, the seven columns named in `p1_tickets`' order, rather
+than `SELECT *`, and `WHERE priority = 'P1'` its only filter; no hint, so it reads from the
+table's default, the earliest offset, and replays up to 24 hours of tickets; the header opens
+section 5, "A second architecture: support tickets": checkout produces tickets rather than
+metrics, the reporter sets the priority and Flink routes on it, so only the P1s reach the
+agents and their model calls, and P2 and P3 tickets stay in `support_tickets` with nothing
+further done to them; it says to start 5.2's INSERT once 5.1 has caught up, as `reset-health`
+does). Tests: `tests/test_sql_pipeline.py` (one statement, from `support_tickets` into
+`p1_tickets`; the priority its only filter, with no join; `p1_tickets`' DDL columns, named
+bare and in order; no hint, against `support_tickets`' earliest-offset default; the module
+docstring names section 5). Nothing else needed the lab: `reset`, `reset-health` and the
+call-rate check name 5.1 since issue 04, and Terraform runs no INSERT.
+
 Issue 08 (the design's frame and the Issues panels): `scripts/opswall/state.py` (each service
 in the snapshot gets `issues`, over the incidents that *started* in the last 10 minutes, so an
 incident cut by the chart's left edge is drawn but not counted: `injected`; `detected`, an
@@ -3012,6 +3026,44 @@ working" and "Open P1 1" read right, and web-gateway's and payments' rows keep i
 a bar's hover tooltip and keyboard focus work, and the focused bar survives the next
 snapshots. With `--dump` the harness also writes the four ticket tables and the ticket
 decisions as JSONL.
+
+Issue 10 (`evaluate` scores the ticket pipeline): `scripts/evaluation/tickets.py` (new; the P1
+tickets created in the scored range and found in the answer key; the verdict is the first
+`ticket_triage` record's severity, and a ticket with none written by the end of the range plus
+30 s is never classified; true severity by verdict, with INVALID and never classified counted
+wrong; for really-HIGH tickets classified HIGH, answered or not, the expected action or not, and
+INVALID actions; an answer to a really-LOW ticket called HIGH is unexpected, one to a ticket with
+no HIGH verdict a routing error, and a target, another agent or another trigger on a ticket
+decision is listed; P2 or P3 tickets in `p1_tickets` or `ticket_triage` are leaks; the median
+ticket → verdict and verdict → action times, from the Kafka timestamps; acceptance at 95 %, 95 %
+and no leaks, `NO_DATA` with no P1 ticket in range, and for the responder until it has
+answered), `scripts/evaluation/decisions.py` (`HIGH_SEVERITY_TICKET` → `ticket_responder`, whose
+actions are the three; `DecisionRow` reads `ticket_id` and the Kafka timestamp; `score_decisions`
+leaves out the rows with a `ticket_id`, so they are never unexpected metric decisions and never
+move `counted_from`; the docstring), `detection.py` (docstring), `scripts/common/topic_reader.py`
+(`read_topic(..., timestamps=True)` adds each record's Kafka timestamp as `kafka_timestamp`;
+`evaluate` reads every table with it, and a dump keeps it), `scripts/evaluate.py`
+(`--tickets-topic`, `--ticket-rows` and `--dump-tickets`, and the same for the answer key,
+`p1_tickets` and `ticket_triage`; `--rows` or `--ticket-rows` means offline; a missing or empty
+ticket table names ops-sim, `sql/5.1_p1_tickets.sql` or `sql/5.2_insert_ticket_classifier.sql`,
+and no ticket decisions name `sql/5.3_insert_ticket_responder.sql`; either half runs without the
+other's tables, and with no metric rows the tickets set the range by the same rule; the metric
+decision half gets the metric decisions alone, so its "read in total" leaves the ticket ones
+out; a "Tickets" section after the metric sections, with `--details` listing every wrong verdict
+and wrong action with its `raw_response`; the docstring). Tests: `tests/test_evaluate_tickets.py`
+(new: the 2×2, INVALID and never classified, the grace, response accuracy, a target, an
+unexpected answer, a routing error, a misrouted decision, leaks, the medians, `NO_DATA`, the 95 %
+boundaries; through `evaluate.main` with fake reads, the ticket half alone, each missing table's
+hint, empty tables, the metric half the same with and without the ticket tables, the dump round
+trip with its timestamps and `--details`; `read_topic`'s timestamps over a fake consumer),
+`tests/test_evaluate_decisions.py` (a ticket decision is never an unexpected metric decision and
+never moves `counted_from`; `from_record` reads `ticket_id` and the timestamp). Offline on dumps
+(`.scratch/checkout-tickets/research/issue10_evaluate_dumps.py`, its outputs next to it): the real
+`Simulation` (seed 7, 2 h), payments through the AR(1) replica and web-gateway through lab 2.2
+with stand-in metric agents fed back, and stand-in ticket agents with one wrong verdict in twenty.
+113 P1 tickets in range: the classifier 108/113 (96 %), the responder 51/51, 3 unexpected
+answers, no leaks, medians 5.3 s and 5.8 s. The metric half reads the same with and without the
+ticket tables: 93/93 incidents detected in time, 96/96 anomalous rows answered, 93/93 actions.
 
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.
