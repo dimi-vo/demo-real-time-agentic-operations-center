@@ -3,6 +3,9 @@ criteria)."""
 
 import io
 import json
+import re
+from collections import Counter
+from datetime import datetime, timezone
 
 import pytest
 
@@ -10,6 +13,7 @@ from opsgen.driver import run_simulate
 from opsgen.engine import BAD_DEPLOY, Config, Decision, Event
 from opsgen.simulation import Simulation
 from opsgen.sinks import DryRunSink, event_json, format_event
+from opsgen.tickets import NewTicket
 
 
 def test_dry_run_sink_emits_tagged_json_lines():
@@ -17,7 +21,7 @@ def test_dry_run_sink_emits_tagged_json_lines():
     sink = DryRunSink(out=out, log=log)
     sim = Simulation(1, start=0.0, config=Config(no_incidents=True))
     sink.emit_deployments(sim.bootstrap())
-    metrics, _, _ = sim.tick(0.0)
+    metrics, _, _, _ = sim.tick(0.0)
     sink.emit_metrics(metrics)
     lines = [json.loads(line) for line in out.getvalue().splitlines()]
     deployments = [x for x in lines if x.get("_stream") == "service_deployments"]
@@ -40,7 +44,7 @@ def test_simulate_has_per_window_summaries_for_the_metric_services():
     # first window closes at t=00:10, one line per metric service; checkout has no metrics (D-068)
     summaries = [ln.split()[1] for ln in text.splitlines() if ln.startswith("[t=00:10]")]
     assert summaries == ["web-gateway", "payments"]
-    assert "checkout" not in text
+    assert not any(ln.startswith("[t=") and " checkout " in ln for ln in text.splitlines())
 
 
 def test_simulate_summary_sums_the_window_records():
@@ -84,9 +88,11 @@ def test_simulate_banner_shows_the_schedule():
     assert first == (
         "# ops-sim --simulate 1min  (quiet=150s max=35s gap=20s "
         "rests: BAD_DEPLOY=390s UPSTREAM_DROP=300s; "
-        "web-gateway deploys: first=60s every=60-90s)"
+        "web-gateway deploys: first=60s every=60-90s; "
+        "checkout tickets: 1/15s P1=30% P2=30% P3=40% P1-HIGH=50%)"  # D-068
     )
-    assert _simulate(minutes=1, no_incidents=True).splitlines()[0] == "# ops-sim --simulate 1min  (no incidents)"
+    no_incidents = _simulate(minutes=1, no_incidents=True).splitlines()[0]
+    assert no_incidents == "# ops-sim --simulate 1min  (no incidents, no tickets)"
 
 
 def test_simulate_an_hour_has_overlapping_incidents():
@@ -161,7 +167,9 @@ def test_simulate_gives_payments_bad_deploys_and_drops_and_nobody_a_surge():
     shared = {(itype, svc) for itype, svc in starts if svc != "web-gateway"}
     assert shared == {("BAD_DEPLOY", "payments"), ("UPSTREAM_DROP", "payments")}
     assert {itype for itype, svc in starts if svc == "web-gateway"} == {"BAD_DEPLOY_ERRORS"}
-    assert "SURGE" not in text and "TRAFFIC_HIGH" not in text and "SCALE_OUT" not in text
+    # The schedule's lines: checkout's tickets, and their summary, expect SCALE_OUT (D-068).
+    schedule = "\n".join(ln for ln in text.splitlines() if ln.startswith("[") and " TICKET " not in ln)
+    assert "SURGE" not in schedule and "TRAFFIC_HIGH" not in schedule and "SCALE_OUT" not in schedule
 
 
 def test_simulate_bad_deploy_rolls_back():
@@ -233,18 +241,30 @@ def test_a_good_deploy_in_the_dry_run_json_and_on_the_console():
 # --- --show-records SERVICE: one service_metrics record every 5 s -----------------------
 
 
-def test_show_records_takes_one_of_the_metric_services():
+def test_show_records_takes_any_of_the_three_services():
     from opsgen.cli import _build_parser
 
     parser = _build_parser()
     assert parser.parse_args([]).show_records is None
-    assert parser.parse_args(["--show-records", "payments"]).show_records == "payments"
-    assert parser.parse_args(["--show-records", "web-gateway"]).show_records == "web-gateway"
-    # checkout writes no service_metrics (D-068)
-    for bad in (["--show-records"], ["--show-records", "catalog"], ["--show-records", "checkout"]):
+    for svc in ("web-gateway", "checkout", "payments"):  # checkout shows its tickets (D-068)
+        assert parser.parse_args(["--show-records", svc]).show_records == svc
+    for bad in (["--show-records"], ["--show-records", "catalog"]):
         with pytest.raises(SystemExit):
             parser.parse_args(bad)
-    assert "(web-gateway, payments)" in " ".join(parser.format_help().split())
+    help_text = " ".join(parser.format_help().split())
+    assert "(web-gateway, checkout, payments)" in help_text
+    assert "support_tickets" in help_text and "ticket_answer_key" in help_text
+
+
+def test_the_announcement_says_what_show_records_prints(capsys):
+    from opsgen.cli import _announce
+
+    _announce("checkout")
+    assert capsys.readouterr().err == (
+        "Showing checkout's support_tickets and ticket_answer_key records as they are produced.\n"
+    )
+    _announce("payments")
+    assert capsys.readouterr().err == "Showing payments's service_metrics record every 5 s, as it is sent.\n"
 
 
 def test_show_records_needs_real_time(capsys):
@@ -286,3 +306,108 @@ def test_without_show_records_nothing_more_is_printed_and_stdout_is_unchanged(ca
     plain = _ticks(None)
     assert capsys.readouterr().err == ""
     assert _ticks("web-gateway") == plain  # the sample goes to stderr only
+
+
+# --- checkout's tickets (D-068) ------------------------------------------------------------
+
+HIGH_TICKET = NewTicket(
+    {
+        "event_time": 1_800_000_005_000,
+        "ticket_id": "ZD-48215",
+        "source": "ZENDESK",
+        "service_name": "checkout",
+        "priority": "P1",
+        "subject": "Checkout times out during the flash sale",
+        "description": "Since the sale started at 10:05, checkout spins for a minute and then times out.",
+    },
+    {"event_time": 1_800_000_005_000, "ticket_id": "ZD-48215", "true_severity": "HIGH", "expected_action": "SCALE_OUT"},
+)
+LOW_TICKET = NewTicket(
+    {
+        "event_time": 1_800_000_007_000,
+        "ticket_id": "INC0041872",
+        "source": "SERVICENOW",
+        "service_name": "checkout",
+        "priority": "P3",
+        "subject": "Order confirmation email delayed",
+        "description": "I placed order RS-482913 an hour ago and the confirmation email has not arrived yet.",
+    },
+    {"event_time": 1_800_000_007_000, "ticket_id": "INC0041872", "true_severity": "LOW", "expected_action": None},
+)
+
+
+def test_dry_run_writes_each_ticket_and_its_answer_key_and_a_console_line():
+    out, log = io.StringIO(), io.StringIO()
+    DryRunSink(out=out, log=log).emit_tickets([HIGH_TICKET, LOW_TICKET])
+    assert [json.loads(line) for line in out.getvalue().splitlines()] == [
+        {"_stream": "support_tickets", **HIGH_TICKET.ticket},
+        {"_stream": "ticket_answer_key", **HIGH_TICKET.answer_key},
+        {"_stream": "support_tickets", **LOW_TICKET.ticket},
+        {"_stream": "ticket_answer_key", **LOW_TICKET.answer_key},
+    ]
+    # The answer key is set apart, so nobody takes it for part of the ticket.
+    assert log.getvalue().splitlines() == [
+        '[08:00:05] TICKET          P1  ZD-48215    Zendesk     "Checkout times out during the flash sale"'
+        "  [truth: HIGH, SCALE_OUT]",
+        '[08:00:07] TICKET          P3  INC0041872  ServiceNow  "Order confirmation email delayed"  [truth: LOW]',
+    ]
+
+
+def test_a_live_or_dry_run_tick_sends_its_tickets_to_the_sink():
+    sent = _ticks(None, seconds=120)
+    tickets = [r for r in sent if r.get("_stream") == "support_tickets"]
+    keys = [r for r in sent if r.get("_stream") == "ticket_answer_key"]
+    assert len(tickets) >= 3
+    assert [r["ticket_id"] for r in tickets] == [r["ticket_id"] for r in keys]
+
+
+def test_show_records_checkout_prints_each_ticket_and_its_answer_key_as_produced(capsys):
+    sent = _ticks("checkout", seconds=120)
+    lines = capsys.readouterr().err.splitlines()
+    produced = [r for r in sent if r.get("_stream") in ("support_tickets", "ticket_answer_key")]
+    assert len(produced) >= 6 and len(lines) == len(produced)  # every one, not every 5 s
+    for record, line in zip(produced, lines, strict=True):
+        topic = record.pop("_stream")
+        key = record["service_name"] if topic == "support_tickets" else record["ticket_id"]
+        clock, rest = line.split("] ", 1)
+        assert clock == "[" + datetime.fromtimestamp(record["event_time"] / 1000, tz=timezone.utc).strftime("%H:%M:%S")
+        prefix = f"{topic} key={key} "
+        assert rest.startswith(prefix), line
+        assert json.loads(rest[len(prefix):]) == record  # the record the sink was given
+    assert "service_metrics" not in " ".join(lines)  # checkout has none
+
+
+TICKET_LINE = re.compile(
+    r'\[(\d\d:\d\d)\] TICKET {10}(P[123])  (?:ZD-\d{5}  |INC\d{7})  (?:Zendesk   |ServiceNow)  ".+"  '
+    r"\[truth: (HIGH|LOW)(?:, (ROLLBACK|SCALE_OUT|INVESTIGATE_UPSTREAM))?\]"
+)
+
+
+def test_simulate_prints_every_ticket_from_the_first_minute():
+    lines = _simulate(seed=1, minutes=15).splitlines()
+    tickets = [ln for ln in lines if " TICKET " in ln]
+    assert all(TICKET_LINE.fullmatch(ln) for ln in tickets), [ln for ln in tickets if not TICKET_LINE.fullmatch(ln)]
+    assert _clock(tickets[0]) < 60  # no quiet period
+    assert 40 <= len(tickets) <= 80  # about 4 a minute
+
+
+def test_simulate_ends_with_the_tickets_by_priority_and_true_severity_and_the_high_ones_by_action():
+    lines = _simulate(seed=3, minutes=60).splitlines()
+    drawn = [TICKET_LINE.fullmatch(ln).groups() for ln in lines if " TICKET " in ln]
+    by = Counter((prio, sev) for _, prio, sev, _ in drawn)
+    actions = Counter(action for _, _, sev, action in drawn if sev == "HIGH")
+    summary = lines[-5:]
+    assert summary[0] == f"# tickets: {len(drawn)} in 60 min, {len(drawn) / 60:.1f} a minute"
+    for prio, line in zip(("P1", "P2", "P3"), summary[1:4], strict=True):
+        assert line == f"#   {prio}: {by[prio, 'HIGH']} HIGH, {by[prio, 'LOW']} LOW"
+    assert summary[4] == (
+        f"#   HIGH by expected action: ROLLBACK {actions['ROLLBACK']}, SCALE_OUT {actions['SCALE_OUT']}, "
+        f"INVESTIGATE_UPSTREAM {actions['INVESTIGATE_UPSTREAM']}"
+    )
+    assert by["P2", "HIGH"] == by["P3", "HIGH"] == 0 and min(actions.values()) > 0
+
+
+def test_simulate_without_incidents_says_tickets_are_off():
+    text = _simulate(minutes=10, no_incidents=True)
+    assert " TICKET " not in text
+    assert text.splitlines()[-1] == "# tickets: off (--no-incidents)"

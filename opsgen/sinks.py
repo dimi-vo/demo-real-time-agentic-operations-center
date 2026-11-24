@@ -2,7 +2,8 @@
 
 `DryRunSink` writes the data events as JSON lines on stdout (each tagged with
 `_stream` or `_event`, so they're greppable and testable) and a concise human line
-per schedule event on stderr. The Kafka sink lives in `opsgen/kafka_io.py` (Phase 2).
+per schedule event and per support ticket on stderr. The Kafka sink lives in
+`opsgen/kafka_io.py` (Phase 2).
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import sys
 from datetime import datetime, timezone
 
 from opsgen.engine import BAD_DEPLOY_TYPES, Event, Incident
+from opsgen.tickets import SOURCE_NAMES, NewTicket
 
 
 def _hms(epoch_seconds: float) -> str:
@@ -50,13 +52,31 @@ def format_event(ev: Event, clock: str | None = None) -> str:
     return f"[{when}] {ev.kind} {ev.service_name}"
 
 
-def format_record(topic: str, record: dict, now: float) -> str:
+def format_ticket(t: NewTicket, clock: str | None = None) -> str:
+    """One human-readable line per ticket (D-068): its priority, id, source and subject, then
+    its answer key in brackets, set apart so nobody takes it for part of the ticket.
+
+        [10:42:05] TICKET          P1  ZD-48215    Zendesk     "Checkout times out ..."  [truth: HIGH, SCALE_OUT]
+    """
+    ticket, key = t
+    when = clock if clock is not None else _hms(ticket["event_time"] / 1000)
+    truth = ", ".join(v for v in (key["true_severity"], key["expected_action"]) if v)
+    return (
+        f"[{when}] TICKET          {ticket['priority']}  {ticket['ticket_id']:<10}  "
+        f'{SOURCE_NAMES[ticket["source"]]:<10}  "{ticket["subject"]}"  [truth: {truth}]'
+    )
+
+
+def format_record(topic: str, record: dict, now: float, key: str | None = None) -> str:
     """One record as ops-sim sends it, for `--show-records`: the topic, the Kafka key (the
-    raw service name) and the dict the Avro serializer gets, unchanged.
+    raw service name unless `key` says otherwise: an answer-key record's is its ticket id)
+    and the dict the Avro serializer gets, unchanged.
 
         [10:42:05] service_metrics key=web-gateway {"event_time": 1800000005999, ...}
+        [10:42:05] ticket_answer_key key=ZD-48215 {"event_time": 1800000005000, ...}
     """
-    return f"[{_hms(now)}] {topic} key={record['service_name']} {json.dumps(record)}"
+    key = record["service_name"] if key is None else key
+    return f"[{_hms(now)}] {topic} key={key} {json.dumps(record)}"
 
 
 def event_json(ev: Event) -> dict:
@@ -90,6 +110,14 @@ class DryRunSink:
 
     def emit_incident(self, record: dict) -> None:
         self.out.write(json.dumps({"_stream": "service_incidents", **record}) + "\n")
+
+    def emit_tickets(self, tickets: list[NewTicket]) -> None:
+        """Each ticket's two records, tagged with their topics, and its console line."""
+        for t in tickets:
+            self.out.write(json.dumps({"_stream": "support_tickets", **t.ticket}) + "\n")
+            self.out.write(json.dumps({"_stream": "ticket_answer_key", **t.answer_key}) + "\n")
+            self.log.write(format_ticket(t) + "\n")
+        self.log.flush()
 
     def emit_event(self, ev: Event) -> None:
         self.out.write(json.dumps(event_json(ev)) + "\n")

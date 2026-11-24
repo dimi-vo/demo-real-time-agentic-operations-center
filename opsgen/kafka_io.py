@@ -3,11 +3,13 @@
 Mirrors the reference simulator: one `AvroSerializer` with `auto.register.schemas`
 off and `use.latest.version` on resolves whichever subject the `SerializationContext`
 names, so the latest schema Flink registered from the DDL is used for each of
-`service_metrics-value`, `service_deployments-value`, `service_deployments-key` and
-`service_incidents-value`.
+`service_metrics-value`, `service_deployments-value`, `service_deployments-key`,
+`service_incidents-value`, `support_tickets-value` and `ticket_answer_key-value`.
 
 - `service_metrics` is append-only with no primary key: the Kafka message key is the
   raw `service_name` string (no key schema), like the reference `car_telemetry`.
+  `service_incidents` and `support_tickets` are keyed the same way; `ticket_answer_key`
+  by the raw `ticket_id` string (D-068).
 - `service_deployments` is a keyed upsert table: the key is Avro-encoded against the
   registered `service_deployments-key` subject (primitive or record, inspected once),
   like the reference `race_standings`.
@@ -28,10 +30,13 @@ from confluent_kafka.schema_registry.avro import AvroSerializer
 from confluent_kafka.serialization import MessageField, SerializationContext
 
 from opsgen.sinks import format_event
+from opsgen.tickets import NewTicket
 
 METRICS_TOPIC = "service_metrics"
 DEPLOYMENTS_TOPIC = "service_deployments"
 INCIDENTS_TOPIC = "service_incidents"
+TICKETS_TOPIC = "support_tickets"  # checkout's tickets (D-068)
+ANSWER_KEY_TOPIC = "ticket_answer_key"
 
 
 def key_payload(key_schema_str: str, service_name: str):
@@ -76,6 +81,8 @@ class KafkaSink:
         self._metrics_value_ctx = SerializationContext(METRICS_TOPIC, MessageField.VALUE)
         self._dep_value_ctx = SerializationContext(DEPLOYMENTS_TOPIC, MessageField.VALUE)
         self._inc_value_ctx = SerializationContext(INCIDENTS_TOPIC, MessageField.VALUE)
+        self._ticket_value_ctx = SerializationContext(TICKETS_TOPIC, MessageField.VALUE)
+        self._answer_key_value_ctx = SerializationContext(ANSWER_KEY_TOPIC, MessageField.VALUE)
         self._dep_key_fn = self._build_deployments_key_fn()
 
     def _build_deployments_key_fn(self):
@@ -119,6 +126,34 @@ class KafkaSink:
             value=self._serializer(record, self._inc_value_ctx),
             timestamp=int(record["event_time"]),
         )
+        self._producer.poll(0)
+
+    def emit_ticket(self, record: dict) -> None:
+        """One support ticket. No key subject: the message key is the raw service_name
+        string, like service_incidents. The Kafka record timestamp is event_time (ms)."""
+        self._producer.produce(
+            TICKETS_TOPIC,
+            key=record["service_name"].encode("utf-8"),
+            value=self._serializer(record, self._ticket_value_ctx),
+            timestamp=int(record["event_time"]),
+        )
+
+    def emit_answer_key(self, record: dict) -> None:
+        """One ticket's answer key. No key subject: the message key is the raw ticket_id
+        string. The Kafka record timestamp is event_time (ms), the ticket's."""
+        self._producer.produce(
+            ANSWER_KEY_TOPIC,
+            key=record["ticket_id"].encode("utf-8"),
+            value=self._serializer(record, self._answer_key_value_ctx),
+            timestamp=int(record["event_time"]),
+        )
+
+    def emit_tickets(self, tickets: list[NewTicket]) -> None:
+        """Each ticket and its answer key, on the same tick. Live mode prints no line for
+        them (only `--show-records checkout` does)."""
+        for t in tickets:
+            self.emit_ticket(t.ticket)
+            self.emit_answer_key(t.answer_key)
         self._producer.poll(0)
 
     def emit_event(self, ev) -> None:

@@ -156,7 +156,7 @@ def test_a_bad_deploy_record_looks_like_a_good_one():
     sim = Simulation(3, start=0.0)
     seen = {}
     for k in range(600):
-        _, deps, events = sim.tick(float(k))
+        _, deps, events, _ = sim.tick(float(k))
         for e in events:
             if e.service_name == GATEWAY and e.kind in ("deploy", "bad_deploy"):
                 [rec] = [d for d in deps if d["service_name"] == GATEWAY]
@@ -174,7 +174,7 @@ def test_a_bad_deploy_fails_40_percent_and_leaves_traffic_and_latency_alone():
     sim = Simulation(4, start=0.0)
     during, outside = [], []
     for k in range(3600):
-        metrics, _, _ = sim.tick(float(k))
+        metrics, _, _, _ = sim.tick(float(k))
         inc = sim.engine.active.get(GATEWAY)
         [rec] = [m for m in metrics if m["service_name"] == GATEWAY]
         degraded = inc is not None and inc.degradation_start <= k < inc.degradation_end
@@ -195,6 +195,6 @@ def test_a_bad_deploy_fails_40_percent_and_leaves_traffic_and_latency_alone():
 def test_no_incidents_means_web_gateway_never_deploys():
     sim = Simulation(1, start=0.0, config=Config(no_incidents=True))
     for k in range(3600):
-        _, _, events = sim.tick(float(k))
+        _, _, events, _ = sim.tick(float(k))
         assert not events
     assert sim.deployments[GATEWAY].version == "3.4.2"

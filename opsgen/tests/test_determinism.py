@@ -11,7 +11,7 @@ def _tick_run(seed, ticks=300):
     sim = Simulation(seed, start=0.0)
     out = []
     for k in range(ticks):
-        metrics, deps, events = sim.tick(float(k))
+        metrics, deps, events, _ = sim.tick(float(k))
         out.append((metrics, deps, [(e.kind, e.service_name, e.new_version) for e in events]))
     return out
 

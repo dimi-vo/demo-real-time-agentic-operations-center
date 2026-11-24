@@ -71,6 +71,7 @@ class _RecordingSink:
     def emit_metrics(self, rs): pass
     def emit_event(self, ev): self.events.append(ev)
     def emit_incident(self, r): self.incidents.append(r)
+    def emit_tickets(self, ts): pass
     def flush(self): pass
 
 

@@ -1,4 +1,5 @@
-"""Ties the engine, deployment state and metrics generation into per-second ticks.
+"""Ties the engine, deployment state, metrics generation and the ticket clock into per-second
+ticks.
 
 `Simulation` is clock-agnostic: the live driver feeds it `time.time()`, the
 `--simulate` driver feeds it a fast synthetic clock. It never sleeps, never touches
@@ -16,6 +17,7 @@ from opsgen.deployments import DeploymentState, highest
 from opsgen.distributions import binomial, mean_latency_ms, poisson
 from opsgen.engine import Config, Decision, Engine, Event
 from opsgen.services import METRIC_SERVICES
+from opsgen.tickets import FIRST_NUMBERS, NewTicket, TicketClock
 
 REEMIT_INTERVAL = 5  # seconds; the controller reconciliation loop re-emits every metric service
 # A metrics record covers one tick and is stamped at its end: tick + 999 ms (D-058).
@@ -27,10 +29,13 @@ def to_millis(epoch_seconds: float) -> int:
 
 
 class Simulation:
-    """One generator run. Two independent RNG streams derived from `seed`: the
-    scheduler's (`Random(seed)`) and the traffic's (`Random(seed+1)`), so the incident
-    and deploy schedule is reproducible and independent of how much traffic is drawn.
-    `seed=None` seeds both from the OS (not reproducible)."""
+    """One generator run. Four independent RNG streams derived from `seed`:
+    - the scheduler's, `Random(seed)`: payments' incidents;
+    - the traffic's, `Random(seed + 1)`: the metric values;
+    - web-gateway's deploy clock, `Random(seed + 2)` (D-067);
+    - checkout's ticket clock, `Random(seed + 3)` (D-068).
+    So each schedule is reproducible, and independent of how much the others draw.
+    `seed=None` seeds them all from the OS (not reproducible)."""
 
     def __init__(
         self,
@@ -63,6 +68,17 @@ class Simulation:
         # web-gateway's deploy clock has its own rng, so it never moves the shared schedule (D-067)
         self.deploy_rng = random.Random(None if seed is None else seed + 2)
         self.engine = Engine(rng=self.sched_rng, start=start, config=self.config, deploy_rng=self.deploy_rng)
+        # checkout's ticket clock has its own rng too, so tickets never move another service's
+        # schedule (D-068). --no-incidents turns it off. Its id counters, one per source,
+        # continue across restarts like the incident counter; a state file without them (from
+        # before D-068) starts at the defaults.
+        self.ticket_rng = random.Random(None if seed is None else seed + 3)
+        saved_numbers = (initial_state or {}).get("next_ticket_numbers", {})
+        self.ticket_clock = TicketClock(
+            rng=self.ticket_rng,
+            next_numbers={src: int(saved_numbers.get(src, first)) for src, first in FIRST_NUMBERS.items()},
+            on=not self.config.no_incidents,
+        )
         # Continue incident numbering across restarts: ops-wall pairs each incident's start
         # and end records by incident_id, so ids must never repeat (D-046).
         self.engine.incident_counter = int((initial_state or {}).get("incident_counter", 0))
@@ -125,8 +141,12 @@ class Simulation:
 
     # --- tick ------------------------------------------------------------------
 
-    def tick(self, now: float, decisions: Iterable[Decision] = ()) -> tuple[list[dict], list[dict], list[Event]]:
-        """Advance one tick. Returns (metrics_records, deployment_records, events).
+    def tick(
+        self, now: float, decisions: Iterable[Decision] = ()
+    ) -> tuple[list[dict], list[dict], list[Event], list[NewTicket]]:
+        """Advance one tick. Returns (metrics_records, deployment_records, events, tickets):
+        each ticket is its `support_tickets` record and its `ticket_answer_key` record, both
+        stamped with the tick.
 
         `decisions` are the agent decisions read since the last tick. They are applied first
         (D-065), so a decision that resolves an incident ends it on this tick: this tick's
@@ -147,11 +167,13 @@ class Simulation:
                 if name not in emitted:
                     dep_records.append(self._dep_record(name, now))
         metrics = self._gen_metrics(now)
-        return metrics, dep_records, events
+        tickets = self.ticket_clock.tick(self.tick_ms(now))
+        return metrics, dep_records, events, tickets
 
     def state_snapshot(self) -> dict:
         """The persistable state: each metric service's deployment (versions, the highest
-        version it has run, deployed_at) and the last incident number used."""
+        version it has run, deployed_at), the last incident number used, and the next ticket
+        number of each source (D-068)."""
         return {
             "services": {
                 name: {
@@ -164,4 +186,5 @@ class Simulation:
                 for name, d in self.deployments.items()
             },
             "incident_counter": self.engine.incident_counter,
+            "next_ticket_numbers": dict(self.ticket_clock.next_numbers),
         }

@@ -1,6 +1,8 @@
-"""The deployments key shape and the Lightning Query request (no network)."""
+"""The deployments key shape, what the Kafka sink produces, and the Lightning Query request
+(no network)."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +19,71 @@ def test_key_payload_record_schema():
         {"type": "record", "name": "k", "fields": [{"name": "service_name", "type": "string"}]}
     )
     assert key_payload(schema, "checkout") == {"service_name": "checkout"}
+
+
+def _kafka_sink(monkeypatch):
+    """A KafkaSink over fake Kafka and Schema Registry clients (the network boundary). The
+    fake serializer returns what it was asked to encode, and against which subject."""
+    from confluent_kafka.serialization import MessageField
+
+    from opsgen import kafka_io
+
+    produced, serializer_conf = [], {}
+
+    class FakeProducer:
+        def __init__(self, conf):
+            pass
+
+        def produce(self, topic, key, value, timestamp):
+            produced.append((topic, key, value, timestamp))
+
+        def poll(self, timeout):
+            pass
+
+    class FakeSchemaRegistry:
+        def __init__(self, conf):
+            pass
+
+        def get_latest_version(self, subject):
+            return SimpleNamespace(schema=SimpleNamespace(schema_str='"string"'))
+
+    class FakeSerializer:
+        def __init__(self, sr, schema_str, conf):
+            serializer_conf.update(conf)
+
+        def __call__(self, obj, ctx):
+            field = "value" if ctx.field == MessageField.VALUE else "key"
+            return (f"{ctx.topic}-{field}", obj)
+
+    monkeypatch.setattr(kafka_io, "Producer", FakeProducer)
+    monkeypatch.setattr(kafka_io, "SchemaRegistryClient", FakeSchemaRegistry)
+    monkeypatch.setattr(kafka_io, "AvroSerializer", FakeSerializer)
+    card = {
+        "AIOPS_KAFKA_BOOTSTRAP": "SASL_SSL://pkc-1.example:9092",
+        "AIOPS_SCHEMA_REGISTRY_URL": "https://psrc-1.example",
+        "AIOPS_SR_API_KEY": "SRKEY",
+        "AIOPS_SR_API_SECRET": "SRSEC",
+        "AIOPS_KAFKA_API_KEY": "KKEY",
+        "AIOPS_KAFKA_API_SECRET": "KSEC",
+    }
+    return kafka_io.KafkaSink(card), produced, serializer_conf
+
+
+def test_kafka_sink_produces_a_ticket_and_its_answer_key_keyed_by_raw_strings(monkeypatch):
+    # D-068: no key schemas. A ticket is keyed by its service name, like service_incidents; an
+    # answer-key record by its ticket id. Both value schemas are looked up, never registered.
+    from opsgen.tickets import NewTicket
+
+    sink, produced, serializer_conf = _kafka_sink(monkeypatch)
+    ticket = {"event_time": 1_800_000_005_000, "ticket_id": "INC0041872", "source": "SERVICENOW",
+              "service_name": "checkout", "priority": "P1", "subject": "s", "description": "d"}  # fmt: skip
+    key = {"event_time": 1_800_000_005_000, "ticket_id": "INC0041872", "true_severity": "LOW", "expected_action": None}
+    sink.emit_tickets([NewTicket(ticket, key)])
+    assert produced == [
+        ("support_tickets", b"checkout", ("support_tickets-value", ticket), 1_800_000_005_000),
+        ("ticket_answer_key", b"INC0041872", ("ticket_answer_key-value", key), 1_800_000_005_000),
+    ]
+    assert serializer_conf["auto.register.schemas"] is False
 
 
 def _card():

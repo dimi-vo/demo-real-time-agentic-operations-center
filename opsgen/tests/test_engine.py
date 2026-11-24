@@ -406,7 +406,7 @@ def test_no_incidents_runs_an_hour_without_a_deploy():
     boot = {r["service_name"]: r for r in sim.bootstrap()}
     heartbeats = 0
     for k in range(3600):
-        _, deps, events = sim.tick(float(k))
+        _, deps, events, _ = sim.tick(float(k))
         assert events == [], events
         for r in deps:
             heartbeats += 1
@@ -516,7 +516,7 @@ def test_incident_numbering_continues_after_a_restart(tmp_path):
     first = Simulation(1, start=0.0, config=config)
     started = []
     for now in range(0, 400):
-        _, _, events = first.tick(float(now))
+        _, _, events, _ = first.tick(float(now))
         started += [ev.incident.incident_id for ev in events if ev.kind == "incident_start"]
     assert len(started) >= 2
     save_state(path, first.state_snapshot())
@@ -531,7 +531,7 @@ def test_incident_numbering_continues_after_a_restart(tmp_path):
     }
     ids = []
     for now in range(1000, 1300):
-        _, _, events = second.tick(float(now))
+        _, _, events, _ = second.tick(float(now))
         ids += [ev.incident.incident_id for ev in events if ev.kind == "incident_start"]
     assert ids and ids[0] == f"INC{len(started) + 1:04d}"
 

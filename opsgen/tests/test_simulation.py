@@ -73,7 +73,7 @@ def test_checkout_writes_no_metrics_and_no_deployment_records():
     sim = _sim(seed=1)
     changes: dict[str, set[str]] = defaultdict(set)
     for k in range(3600):
-        metrics, deps, _ = sim.tick(float(k))
+        metrics, deps, _, _ = sim.tick(float(k))
         assert [r["service_name"] for r in metrics] == ["web-gateway", "payments"], k
         for d in deps:
             changes[d["service_name"]].add(d["last_change"])
@@ -83,7 +83,7 @@ def test_checkout_writes_no_metrics_and_no_deployment_records():
 
 def test_metrics_record_fields_match_schema():
     sim = _sim(seed=1)
-    metrics, _, _ = sim.tick(0.0)
+    metrics, _, _, _ = sim.tick(0.0)
     for r in metrics:
         assert set(r) == METRICS_FIELDS
         assert isinstance(r["traffic_count"], int) and isinstance(r["error_count"], int)
@@ -107,11 +107,11 @@ def test_deployment_record_fields_match_schema():
 def test_reemit_every_five_seconds():
     sim = _sim(seed=3, config=Config(no_incidents=True))  # no deploys to interfere
     # No re-emit at tick 0 (bootstrap covers it); full re-emit at the 5s boundary.
-    _, deps0, _ = sim.tick(0.0)
+    _, deps0, _, _ = sim.tick(0.0)
     assert deps0 == []
-    _, deps5, _ = sim.tick(float(REEMIT_INTERVAL))
+    _, deps5, _, _ = sim.tick(float(REEMIT_INTERVAL))
     assert {r["service_name"] for r in deps5} == {"web-gateway", "payments"}
-    _, deps6, _ = sim.tick(6.0)
+    _, deps6, _, _ = sim.tick(6.0)
     assert deps6 == []
 
 
@@ -119,7 +119,7 @@ def test_deploy_emits_deployment_record_and_mutates_version():
     # Force a bad deploy on payments at tick 0 (the only kind of deploy there, D-057).
     sim = _sim(seed=4, config=Config(quiet_period=0))
     _force(sim, BAD_DEPLOY, "payments")
-    _, deps, events = sim.tick(0.0)
+    _, deps, events, _ = sim.tick(0.0)
     deployed = [e for e in events if e.kind == "bad_deploy"]
     assert deployed, "expected a bad deploy at tick 0"
     svc = deployed[0].service_name
@@ -145,7 +145,7 @@ def _run(sim: Simulation, ticks: range) -> dict[str, list[dict]]:
     per tick (D-058)."""
     by_service: dict[str, list[dict]] = defaultdict(list)
     for k in ticks:
-        metrics, _, _ = sim.tick(float(k))
+        metrics, _, _, _ = sim.tick(float(k))
         assert sorted(r["service_name"] for r in metrics) == ["payments", "web-gateway"], k
         for r in metrics:
             by_service[r["service_name"]].append(r)
@@ -207,7 +207,7 @@ def test_bad_deploy_degrades_from_its_own_tick():
     # window it opens is already fully degraded.
     sim = _sim(seed=11)
     for k in range(3000):
-        metrics, _, events = sim.tick(float(k))
+        metrics, _, events, _ = sim.tick(float(k))
         # a latency bad deploy; web-gateway's BAD_DEPLOY_ERRORS only fails requests (D-067)
         bad = next((e for e in events if e.kind == "bad_deploy" and e.incident.type == BAD_DEPLOY), None)
         if bad is not None:
@@ -231,7 +231,7 @@ def test_records_sit_at_the_end_of_their_tick():
     sim = Simulation(7, start=1_794_390_513.319599, config=Config())
     for k in range(600):
         now = sim.start + k
-        metrics, deps, _ = sim.tick(now)
+        metrics, deps, _, _ = sim.tick(now)
         tick_ms = sim.start_ms + 1000 * k
         assert [r["event_time"] for r in metrics] == [tick_ms + 999] * 2
         assert all(d["event_time"] == tick_ms for d in deps)
@@ -245,7 +245,7 @@ def test_a_record_follows_the_deploy_record_of_its_tick():
     _force(sim, BAD_DEPLOY, "payments")
     seen = []
     for k in range(100):
-        metrics, deps, events = sim.tick(sim.start + k)
+        metrics, deps, events, _ = sim.tick(sim.start + k)
         for ev in events:
             if ev.new_version is None:
                 continue
@@ -295,7 +295,7 @@ def test_incident_ends_on_a_tick_at_the_logged_ended_at():
     sim = Simulation(42, start=1_794_390_513.319599, config=Config())
     ends = []
     for k in range(3600):
-        _, _, events = sim.tick(sim.start + k)
+        _, _, events, _ = sim.tick(sim.start + k)
         ends += [(ev.now, ev.incident) for ev in events if ev.kind == "incident_end"]
     assert ends
     for now, inc in ends:
@@ -320,7 +320,7 @@ def _resolved_on_tick_17(itype, svc):
     and ticks 16 and 17."""
     sim = _sim(seed=4, config=Config(quiet_period=0))
     _force(sim, itype, svc)
-    _, _, started = sim.tick(0.0)
+    _, _, started, _ = sim.tick(0.0)
     inc = started[-1].incident
     for k in range(1, 16):
         assert sim.tick(float(k))[2] == []
@@ -332,7 +332,7 @@ def _resolved_on_tick_17(itype, svc):
 
 @pytest.mark.parametrize(("itype", "svc"), [*ONE_OF_EACH, (BAD_DEPLOY_ERRORS, "web-gateway")])
 def test_a_resolved_incident_and_its_records_end_on_the_tick_that_read_the_decision(itype, svc):
-    sim, started, _, (_, deps, events) = _resolved_on_tick_17(itype, svc)
+    sim, started, _, (_, deps, events, _) = _resolved_on_tick_17(itype, svc)
     [end] = events
     assert (end.kind, end.now, end.incident) == ("incident_end", 17.0, started[-1].incident)
     assert end_record(end.incident, end.now)["ended_at"] == 17_000  # the real end, not the cap
@@ -353,7 +353,7 @@ def _times_normal(record, itype):
 
 @pytest.mark.parametrize(("itype", "svc"), ONE_OF_EACH)
 def test_the_tick_that_reads_the_decision_samples_normal_metrics(itype, svc):
-    _, _, (before, _, _), (at, _, _) = _resolved_on_tick_17(itype, svc)
+    _, _, (before, _, _, _), (at, _, _, _) = _resolved_on_tick_17(itype, svc)
     [before] = [r for r in before if r["service_name"] == svc]
     [at] = [r for r in at if r["service_name"] == svc]
     assert not 0.5 < _times_normal(before, itype) < 2, before  # x4 or x0.1 on tick 16
