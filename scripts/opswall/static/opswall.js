@@ -106,13 +106,7 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const esc = v => String(v).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const clip = (text, n) => text.length > n ? `${text.slice(0, n - 1).trimEnd()}…` : text;
 
-const ACTION = {
-  ROLLBACK: "Rollback",
-  SCALE_OUT: "Scale out",
-  INVESTIGATE_UPSTREAM: "Investigate upstream",
-  OBSERVE: "Observe",
-  INVALID: "Invalid decision",
-};
+let ACTION = {};  // the snapshot's actionWords: every action in words, as the responder's bars read it
 
 // ---------- Model ----------
 // A chart's model is a filter of the snapshot: one service's incidents and blocks for one
@@ -142,8 +136,8 @@ const TRIGGER = {
 const triggerLabel = b => TRIGGER[b.trigger]
   || (b.metric === "latency" ? "Latency high" : b.metric === "errors" ? "Error rate high"
     : b.direction === "down" ? "Traffic low" : "Traffic high");
-const actionLabel = a => ACTION[a] || esc(human(a || "unknown"));
-const actionWord = a => (a === "INVALID" ? "invalid" : actionLabel(a).toLowerCase());
+const actionLabel = a => esc(ACTION[a] || human(a || "unknown"));
+const actionWord = a => actionLabel(a).toLowerCase();
 
 function targetText(action, target) {
   if (target == null || target === "") return "";
@@ -492,7 +486,7 @@ function ensureCharts(row, kinds) {
 function updateRow(row, svc) {
   const ui = row._ui, status = svc.status || "healthy", tickets = svc.row === "tickets";
   ensureCharts(row, tickets ? [] : svc.charts || ["latency", "traffic"]);
-  setClass(row, `svc-row ${status}`);
+  setClass(row, `svc-row${tickets ? " ticket-row" : ""} ${status}`);
   setText(ui.name, svc.name);
   setAttr(ui.main, "aria-label", svc.name);
   setAttr(ui.issues, "aria-label", `${svc.name} issues in the last 10 minutes`);
@@ -510,21 +504,23 @@ function updateRow(row, svc) {
 // design: the two sources, whose curved paths merge and run on to the list; the list of the
 // newest tickets; and "Tickets and agent runs", the last 2 minutes (svc.timelineSeconds) with
 // a mark per ticket and one lane per agent. The state did the matching and the counting: the
-// runs come with their positions, labels and words. A ticket id the page hasn't seen before
-// lights its source, sends a dot down the path and into the list, and fades its row in; the
-// ones on the first snapshot don't. Under prefers-reduced-motion nothing moves (CSS).
-const SOURCES = [
-  { key: "ZENDESK", name: "Zendesk", top: 70, labelTop: 72, path: "M40 90 H70 C105 90 110 140 145 140 H170",
+// runs come with their positions, labels and words, the sources and the lanes with their names,
+// and each lane with its state. A ticket id the page hasn't seen before lights its source, sends
+// a dot down the path and into the list, and fades its row in; the ones on the first snapshot
+// don't. Under prefers-reduced-motion nothing moves (CSS).
+// Where the snapshot's two sources (svc.sources) are drawn, in its order: the design's ticket
+// icon and upper path for the first, its bell and lower path for the second.
+const SOURCE_LAYOUT = [
+  { top: 70, labelTop: 72, path: "M40 90 H70 C105 90 110 140 145 140 H170",
     icon: '<path d="M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-4z"></path><path d="M14 6v2M14 11v2M14 16v1"></path>' },
-  { key: "SERVICENOW", name: "ServiceNow", top: 170, labelTop: 196, path: "M40 190 H70 C105 190 110 140 145 140 H170",
+  { top: 170, labelTop: 196, path: "M40 190 H70 C105 190 110 140 145 140 H170",
     icon: '<path d="M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15z"></path><path d="M10 20.5a2 2 0 0 0 4 0"></path>' },
 ];
-const SOURCE_NAME = Object.fromEntries(SOURCES.map(x => [x.key, x.name]));
+// Where each lane of the snapshot (svc.lanes, by key) is drawn.
 const LANES = [
-  { key: "classifier", name: "Classifier", top: 30 },
-  { key: "responder", name: "Responder", top: 86 },
+  { key: "classifier", top: 30 },
+  { key: "responder", top: 86 },
 ];
-const LANE_NAME = Object.fromEntries(LANES.map(l => [l.key, l.name]));
 const FRESH_SECONDS = 10;  // a new id this old or younger animates; an older one (a backread) doesn't
 const pad2 = n => String(n).padStart(2, "0");
 const ticketTime = sec => {  // "24.11.2026 09:26", local time
@@ -540,7 +536,8 @@ function replay(el, base) {
   el.classList.add(next);
 }
 
-function createTicketBody(row) {
+function createTicketBody(row, svcSources) {
+  const SOURCES = SOURCE_LAYOUT.map((at, k) => ({ ...at, key: svcSources[k]?.key ?? "", name: esc(svcSources[k]?.name ?? "") }));
   const body = document.createElement("div");
   body.className = "tk-body";
   const flowDots = (n, cls, delays) => delays.slice(0, n).map(d => `<span class="${cls}" style="animation-delay: ${d}"></span>`).join("");
@@ -579,7 +576,7 @@ function createTicketBody(row) {
         <div class="tk-runs"></div>
         ${LANES.map(l => `
           <div class="tk-chip ${l.key}" style="top: ${l.top + 9}px">
-            <span class="tk-square"></span><span class="tk-lane-name">${l.name}</span><span class="tk-lane-state"></span>
+            <span class="tk-square"></span><span class="tk-lane-name"></span><span class="tk-lane-state"></span>
           </div>`).join("")}
       </div>
       <div class="tk-axis" aria-hidden="true"><span>−2m</span><span>−90s</span><span>−60s</span><span>−30s</span><span>now</span></div>
@@ -600,7 +597,7 @@ function createTicketBody(row) {
 }
 
 function updateTicketRow(row, svc) {
-  if (!row._tk) createTicketBody(row);
+  if (!row._tk) createTicketBody(row, svc.sources || []);
   const tk = row._tk, T = svc.timelineSeconds || 120, list = (svc.tickets && svc.tickets.newest) || [];
   const pct = t => `${(Math.max(0, Math.min(t, T)) / T * 100).toFixed(3)}%`;
 
@@ -631,7 +628,7 @@ function updateTicketRow(row, svc) {
     setText(title, t.subject || "");
     setAttr(title, "title", t.subject || "");
     setText(sub.firstChild, t.id);
-    setText(sub.lastChild, ` from ${SOURCE_NAME[t.source] || t.source || "?"} at ${ticketTime(t.eventTime)}`);
+    setText(sub.lastChild, ` from ${t.sourceName || "?"} at ${ticketTime(t.eventTime)}`);
   });
   if (fresh.length) replay(tk.rows, "push");
   for (const t of fresh.slice().reverse()) {  // oldest first, so the newest colours last
@@ -660,6 +657,7 @@ function updateTicketRow(row, svc) {
     setText(n.firstChild, m.priority === "P1" ? `P1 ${m.id}` : "");
   });
   const top = Object.fromEntries(LANES.map(l => [l.key, l.top + 9]));
+  const laneName = Object.fromEntries((svc.lanes || []).map(l => [l.key, l.name]));
   sync(tk.runs, svc.runs || [], r => r.key, () => {
     const bar = document.createElement("div");
     bar.tabIndex = 0;
@@ -669,19 +667,19 @@ function updateTicketRow(row, svc) {
     setClass(bar, `tk-run ${r.lane}${r.open ? " open" : ""}`);
     setAttr(bar, "style", `left: ${pct(r.start)}; width: ${pct(r.end - r.start)}; top: ${top[r.lane] ?? top.classifier}px`);
     setText(bar.lastChild, r.label || "");
-    bar.setAttribute("data-tip", runTip(r));
+    bar.setAttribute("data-tip", runTip(r, laneName[r.lane] || r.lane));
   });
 
-  // The lanes' chips, and the words above the chart.
-  const working = new Set((svc.runs || []).filter(r => r.open).map(r => r.lane));
-  for (const l of LANES) {
-    const chip = tk.chips[l.key], on = working.has(l.key);
-    setClass(chip, `tk-chip ${l.key}${on ? " working" : ""}`);
-    setText(chip.lastElementChild, on ? "Working" : "Idle");
+  // The lanes' chips, and the words above the chart: the state said which lane works.
+  for (const lane of svc.lanes || []) {
+    const chip = tk.chips[lane.key];
+    if (!chip) continue;
+    setClass(chip, `tk-chip ${lane.key}${lane.working ? " working" : ""}`);
+    setText(chip.querySelector(".tk-lane-name"), lane.name || "");
+    setText(chip.lastElementChild, lane.state || "");
   }
-  const n = svc.agentsWorking || 0;
-  setText(tk.agents, n ? `${n} of 2 agents working` : "Both agents idle");
-  setClass(tk.agents, n ? "tk-agents working" : "tk-agents");
+  setText(tk.agents, svc.agentsText || "");
+  setClass(tk.agents, svc.agentsWorking ? "tk-agents working" : "tk-agents");
   placeLabels(tk);
 }
 
@@ -723,8 +721,7 @@ function placeLabels(tk) {
 }
 
 // A run's tooltip: the ticket, the agent's verdict or action, and its reason.
-function runTip(r) {
-  const agent = LANE_NAME[r.lane] || r.lane;
+function runTip(r, agent) {
   const what = r.lane === "classifier" ? "Verdict" : "Action";
   const answer = r.outcome != null ? `${what}: ${esc(r.outcome)}.`
     : r.open ? `Waiting for the ${agent.toLowerCase()}.` : `The ${agent.toLowerCase()} gave no answer.`;
@@ -736,12 +733,7 @@ function runTip(r) {
 // ---------- Issues ----------
 // A row's Issues panel (D-068): the numbers the state counted (svc.issues), whatever they
 // were counted from. Detected reads "x of y" over a missed line, amber when any was missed.
-// Durations as the design writes them: "6s", "1m 12s", and "—" with nothing to show.
-const issueDur = sec => {
-  if (sec == null) return "—";
-  sec = Math.max(0, Math.round(sec));
-  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, "0")}s`;
-};
+// The durations come in words ("6s", "1m 05s", "—" with nothing to show).
 function renderIssues(ui, I) {
   const injected = I.injected ?? 0, missed = I.missed ?? 0;
   setText(ui.stat.injected, String(injected));
@@ -749,8 +741,8 @@ function renderIssues(ui, I) {
   setText(ui.of, `of ${injected}`);
   setText(ui.missed, missed ? `${missed} missed` : "None missed");
   setClass(ui.missed, missed ? "stat-missed some" : "stat-missed");
-  setText(ui.stat.medianTimeToDetect, issueDur(I.medianTimeToDetect));
-  setText(ui.stat.medianTimeToRemediate, issueDur(I.medianTimeToRemediate));
+  setText(ui.stat.medianTimeToDetect, I.medianTimeToDetectText || "—");
+  setText(ui.stat.medianTimeToRemediate, I.medianTimeToRemediateText || "—");
 }
 
 // ---------- Tooltip ----------
@@ -814,6 +806,7 @@ function render(D) {
   AXIS = D.axisSeconds || 600;
   UPDATED = D.updatedAt || Date.now() / 1000;
   THRESHOLD = D.errorThresholdPct ?? THRESHOLD;
+  ACTION = D.actionWords || ACTION;
   sync(document.getElementById("rows"), D.services || [], svc => svc.name, createRow, updateRow);
   setText(document.getElementById("updated"), clockText(D.updatedAt || Date.now() / 1000));
   refreshTip();

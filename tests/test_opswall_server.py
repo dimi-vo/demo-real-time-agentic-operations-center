@@ -61,12 +61,17 @@ def test_websocket_sends_a_snapshot_on_connect(client):
         assert snap["axisSeconds"] == 600
         assert isinstance(snap["services"], list) and len(snap["services"]) == 3
         assert "summary" not in snap  # each row has its own Issues panel (D-068)
+        assert snap["actionWords"]["ROLLBACK"] == "Roll back"
         for s in snap["services"]:
-            assert "blocks" in s and "groundTruth" in s
+            assert ("blocks" in s and "groundTruth" in s) == (s["row"] == "metrics")
             assert s["issues"] == {"injected": 0, "detected": 0, "missed": 0,
-                                   "medianTimeToDetect": None, "medianTimeToRemediate": None}
-        # checkout's row is the ticket row (D-068), with its list and timeline
+                                   "medianTimeToDetect": None, "medianTimeToRemediate": None,
+                                   "medianTimeToDetectText": "—", "medianTimeToRemediateText": "—"}
+        # checkout's row is the ticket row (D-068), with its sources, list and timeline
         checkout = next(s for s in snap["services"] if s["row"] == "tickets")
+        assert [src["name"] for src in checkout["sources"]] == ["Zendesk", "ServiceNow"]
         assert checkout["tickets"] == {"received": 0, "newest": []}
         assert (checkout["marks"], checkout["runs"], checkout["openP1"], checkout["agentsWorking"]) == ([], [], 0, 0)
+        assert [lane["state"] for lane in checkout["lanes"]] == ["Idle", "Idle"]
+        assert checkout["agentsText"] == "Both agents idle"
         assert checkout["timelineSeconds"] == 120

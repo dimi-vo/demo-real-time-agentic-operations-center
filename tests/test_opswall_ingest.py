@@ -299,13 +299,15 @@ def test_a_record_from_each_ticket_topic_reaches_checkouts_row(registry):
 
     row = _service(st, "checkout", created + 30)
     assert row["tickets"]["newest"] == [{
-        "id": new.ticket["ticket_id"], "source": new.ticket["source"], "priority": "P1",
+        "id": new.ticket["ticket_id"], "source": new.ticket["source"],
+        "sourceName": {"ZENDESK": "Zendesk", "SERVICENOW": "ServiceNow"}[new.ticket["source"]], "priority": "P1",
         "subject": new.ticket["subject"], "eventTime": pytest.approx(created)}]
     classifier, responder = row["runs"]
     assert (classifier["label"], classifier["reason"]) == ("High in 3s", "Everyone is affected.")
     assert responder["label"].endswith(" in 5s") and responder["reason"] == "It matches the cue."
     assert row["issues"] == {"injected": 1, "detected": 1, "missed": 0,
-                             "medianTimeToDetect": pytest.approx(4.0), "medianTimeToRemediate": pytest.approx(9.0)}
+                             "medianTimeToDetect": pytest.approx(4.0), "medianTimeToRemediate": pytest.approx(9.0),
+                             "medianTimeToDetectText": "4s", "medianTimeToRemediateText": "9s"}
 
 
 # --- the topics the consumer tails ---------------------------------------------------

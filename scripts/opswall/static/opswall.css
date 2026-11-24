@@ -194,7 +194,11 @@ body {
 .chart .mark:focus-visible .ans { stroke: var(--text); stroke-width: 2; }
 
 /* A ticket row (checkout, D-068): the sources and the list, then the timeline. Sizes,
-   colours and animations are the design's. */
+   colours and animations are the design's. Its status text takes its dot's colour, amber
+   while an agent works and green when healthy (spec decision 35); a metric row's healthy
+   text stays grey. */
+.ticket-row .status.healthy { color: var(--green); }
+.status.working { color: var(--accent); }
 .status.working .dot { background: var(--accent); }
 .open-p1 { font-family: var(--mono); font-weight: 700; color: var(--text-2); }
 .open-p1.some { color: var(--accent); }

@@ -446,8 +446,10 @@ def test_each_service_counts_its_own_issues_over_the_last_10_minutes():
     assert issues["payments"] == {
         "injected": 1, "detected": 1, "missed": 0,
         "medianTimeToDetect": pytest.approx(16.0), "medianTimeToRemediate": pytest.approx(24.0),
+        "medianTimeToDetectText": "16s", "medianTimeToRemediateText": "24s",
     }
-    nothing = {"injected": 0, "detected": 0, "missed": 0, "medianTimeToDetect": None, "medianTimeToRemediate": None}
+    nothing = {"injected": 0, "detected": 0, "missed": 0, "medianTimeToDetect": None, "medianTimeToRemediate": None,
+               "medianTimeToDetectText": "—", "medianTimeToRemediateText": "—"}
     assert issues["web-gateway"] == nothing
     assert issues["checkout"] == nothing
 
@@ -473,6 +475,39 @@ def test_time_to_remediate_runs_from_the_incidents_start_to_its_answer():
     assert issues["medianTimeToRemediate"] == pytest.approx(31.0)
 
 
+def _two_runs_on_one_incident(st):
+    """A bad deploy flagged in two runs, its first detected at T0 + 16 and its second at T0 + 36;
+    the second run is answered at T0 + 38."""
+    _incident(st, "payments", T0, T0 + 40)
+    _health(st, "payments", T0 + 10, lat="HIGH")
+    _health(st, "payments", T0 + 20)  # a normal window ends the first run
+    _health(st, "payments", T0 + 30, lat="HIGH")
+    _decide(st, "payments", T0 + 30, at=T0 + 38)
+
+
+def test_time_to_remediate_is_the_first_blocks_time_to_detect_plus_its_time_to_answer():
+    # Spec decision 29: incident start -> its answer, timeToDetect + timeToAnswer, which are both
+    # the first block's. A later block answered sooner doesn't shorten it.
+    st = OpsWallState()
+    _two_runs_on_one_incident(st)
+    _decide(st, "payments", T0 + 10, at=T0 + 45)  # the first run is answered last
+    s = _svc(st, "payments")
+    [gt] = s["groundTruth"]
+    assert gt["timeToDetect"] + gt["timeToAnswer"] == pytest.approx(45.0)
+    assert s["issues"]["medianTimeToRemediate"] == pytest.approx(45.0)
+
+
+def test_while_the_first_block_waits_unanswered_time_to_remediate_runs_to_the_first_answer():
+    # The first block has no timeToAnswer until it is answered or removed (30 s after its last
+    # detection), so the spec's sum is undefined: start -> the first answer, the second run's.
+    st = OpsWallState()
+    _two_runs_on_one_incident(st)
+    s = _svc(st, "payments", now=T0 + 40)
+    [gt] = s["groundTruth"]
+    assert (gt["verdict"], gt["timeToDetect"], gt["timeToAnswer"]) == ("answered", pytest.approx(16.0), None)
+    assert s["issues"]["medianTimeToRemediate"] == pytest.approx(38.0)
+
+
 def test_a_missed_incident_counts_as_missed_and_not_detected():
     st = OpsWallState()
     _incident(st, "payments", T0, T0 + 40)
@@ -483,7 +518,8 @@ def test_a_missed_incident_counts_as_missed_and_not_detected():
     s = _svc(st, "payments", now=T0 + 80)
     assert s["groundTruth"][0]["verdict"] == "missed" and s["blocks"][0]["incidentId"] == "INC0001"
     assert s["issues"] == {"injected": 1, "detected": 0, "missed": 1,
-                           "medianTimeToDetect": None, "medianTimeToRemediate": None}
+                           "medianTimeToDetect": None, "medianTimeToRemediate": None,
+                           "medianTimeToDetectText": "—", "medianTimeToRemediateText": "—"}
 
 
 def test_an_open_incident_counts_as_injected_but_neither_detected_nor_missed():
@@ -506,7 +542,8 @@ def test_only_incidents_that_started_in_the_last_10_minutes_count():
     s = _svc(st, "payments")
     assert [g["incidentId"] for g in s["groundTruth"]] == ["EDGE", "IN"]  # both drawn
     assert s["issues"] == {"injected": 1, "detected": 0, "missed": 1,
-                           "medianTimeToDetect": None, "medianTimeToRemediate": None}
+                           "medianTimeToDetect": None, "medianTimeToRemediate": None,
+                           "medianTimeToDetectText": "—", "medianTimeToRemediateText": "—"}
 
 
 def test_the_snapshot_has_no_global_summary():
@@ -522,7 +559,20 @@ def test_checkouts_panel_counts_tickets_and_never_incidents():
     st = OpsWallState()
     _incident(st, "checkout", T0, T0 + 40)  # never happens (D-068): checkout's numbers come from tickets
     assert _svc(st, "checkout")["issues"] == {"injected": 0, "detected": 0, "missed": 0,
-                                              "medianTimeToDetect": None, "medianTimeToRemediate": None}
+                                              "medianTimeToDetect": None, "medianTimeToRemediate": None,
+                                              "medianTimeToDetectText": "—", "medianTimeToRemediateText": "—"}
+
+
+def test_the_issues_durations_come_in_words_as_the_design_writes_them():
+    st = OpsWallState()
+    _story(st, "A", NOW - 300, verdict="HIGH", verdict_after=65, answer_after=130)
+    issues = _row(st)["issues"]
+    assert (issues["medianTimeToDetectText"], issues["medianTimeToRemediateText"]) == ("1m 05s", "2m 10s")
+    _story(st, "B", NOW - 200, verdict="HIGH", verdict_after=4, answer_after=10)
+    issues = _row(st)["issues"]  # medians of 65 and 4, 130 and 10: a half rounds up, as the page did
+    assert (issues["medianTimeToDetectText"], issues["medianTimeToRemediateText"]) == ("35s", "1m 10s")
+    _story(st, "C", NOW - 100, verdict="HIGH", verdict_after=4.5)
+    assert _row(st)["issues"]["medianTimeToDetectText"] == "5s"  # 4.5, the middle of 4, 4.5 and 65
 
 
 # --- trim --------------------------------------------------------------------
@@ -546,11 +596,11 @@ def test_trim_takes_an_incident_that_never_ended_off_the_wall_after_11_minutes()
     # The simulator restarted mid-incident: no end record ever comes (D-060). Untrimmed, the
     # incident stays open, pending and drawn across the whole lane for as long as the wall runs.
     st = OpsWallState()
-    _incident(st, "checkout", NOW - 670, iid="ORPHAN")
+    _incident(st, "web-gateway", NOW - 670, iid="ORPHAN", incident_type="BAD_DEPLOY_ERRORS")
     _incident(st, "payments", NOW - 650, iid="RECENT", incident_type="UPSTREAM_DROP")
-    assert _svc(st, "checkout")["groundTruth"][0]["verdict"] == "pending"
+    assert _svc(st, "web-gateway")["groundTruth"][0]["verdict"] == "pending"
     st.trim(NOW)
-    assert _svc(st, "checkout")["groundTruth"] == []
+    assert _svc(st, "web-gateway")["groundTruth"] == []
     assert [g["incidentId"] for g in _svc(st, "payments")["groundTruth"]] == ["RECENT"]
 
 
@@ -593,18 +643,19 @@ def _deployment(st, service, deployed_at, last_change, version, previous_version
                          "last_change": last_change, "deployed_at": _dt(deployed_at)})
 
 
-def test_each_card_names_its_charts():
-    charts = {s["name"]: s["charts"] for s in OpsWallState().snapshot(now=NOW)["services"]}
-    assert charts == {"web-gateway": ["errors"], "checkout": [], "payments": ["latency", "traffic"]}
+def test_each_metric_row_names_its_charts():
+    charts = {s["name"]: s["charts"] for s in OpsWallState().snapshot(now=NOW)["services"] if s["row"] == "metrics"}
+    assert charts == {"web-gateway": ["errors"], "payments": ["latency", "traffic"]}
 
 
-def test_checkout_has_no_charts_and_its_card_stays_healthy():
-    # D-068: checkout produces tickets, not metrics, so its card has a header and a status and
-    # nothing to draw. Its row comes with the wall's new frame.
+def test_checkouts_row_carries_what_a_ticket_row_draws_and_nothing_of_a_metric_row():
+    # D-068: checkout produces tickets, not metrics: no charts, samples, deploys, blocks or
+    # incidents, only its header, its Issues panel, the sources, the list and the timeline.
     st = OpsWallState()
     _health(st, "payments", NOW - 10, lat="HIGH")
     s = _svc(st, "checkout")
-    assert s["charts"] == [] and s["metrics"] == [] and s["deploys"] == []
+    assert set(s) == {"name", "row", "status", "statusText", "issues", "sources", "tickets", "timelineSeconds",
+                      "marks", "runs", "lanes", "agentsText", "agentsWorking", "openP1"}
     assert (s["status"], s["statusText"]) == ("healthy", "Healthy")
 
 
@@ -744,8 +795,13 @@ def test_the_list_has_the_newest_5_tickets_and_the_count_of_the_last_10_minutes(
     tickets = _row(st)["tickets"]
     assert tickets["received"] == 6
     assert [t["id"] for t in tickets["newest"]] == ["ZD-48204", "ZD-48203", "INC0041873", "ZD-48202", "INC0041872"]
-    assert tickets["newest"][2] == {"id": "INC0041873", "source": SN, "priority": "P3",
+    assert tickets["newest"][2] == {"id": "INC0041873", "source": SN, "sourceName": "ServiceNow", "priority": "P3",
                                     "subject": "Subject of INC0041873", "eventTime": pytest.approx(NOW - 30)}
+
+
+def test_the_ticket_row_names_its_two_sources_in_the_order_the_page_draws_them():
+    # opsgen's table of sources, so the page holds no source names (D-068).
+    assert _row(OpsWallState())["sources"] == [{"key": ZD, "name": "Zendesk"}, {"key": SN, "name": "ServiceNow"}]
 
 
 def test_every_ticket_of_the_last_2_minutes_is_a_mark_on_the_timeline():
@@ -832,6 +888,15 @@ def test_a_low_or_invalid_verdict_stops_after_the_classifier(severity):
     assert (run["lane"], run["label"]) == ("classifier", f"{severity.capitalize()} in 3s")
 
 
+def test_the_snapshot_carries_the_action_words_for_every_tooltip_on_the_page():
+    # One table for the responder's bars and the metric rows' tooltips, so "Roll back" reads the
+    # same everywhere (the bars' "Roll back in 5s", issue 09).
+    assert OpsWallState().snapshot(now=NOW)["actionWords"] == {
+        "ROLLBACK": "Roll back", "SCALE_OUT": "Scale out", "INVESTIGATE_UPSTREAM": "Investigate upstream",
+        "OBSERVE": "Observe", "INVALID": "Invalid",
+    }
+
+
 @pytest.mark.parametrize(("action", "label"), [
     ("ROLLBACK", "Roll back in 5s"),
     ("SCALE_OUT", "Scale out in 5s"),
@@ -913,6 +978,25 @@ def test_the_status_and_the_counters_follow_the_open_runs():
     assert (row["status"], row["statusText"], row["openP1"], row["agentsWorking"]) == ("healthy", "Healthy", 0, 0)
 
 
+def test_each_lane_says_whether_its_agent_works_and_the_words_above_the_chart_count_them():
+    st = OpsWallState()
+    row = _row(st)
+    assert row["lanes"] == [{"key": "classifier", "name": "Classifier", "working": False, "state": "Idle"},
+                            {"key": "responder", "name": "Responder", "working": False, "state": "Idle"}]
+    assert row["agentsText"] == "Both agents idle"
+
+    _p1(st, "ZD-48215", at=NOW - 20)                 # the classifier works on it
+    row = _row(st)
+    assert [(lane["working"], lane["state"]) for lane in row["lanes"]] == [(True, "Working"), (False, "Idle")]
+    assert row["agentsText"] == "1 of 2 agents working"
+
+    _triage(st, "ZD-48215", at=NOW - 5)              # HIGH: the responder takes it over
+    _p1(st, "INC0041872", at=NOW - 3, t=NOW - 4)     # and the classifier has a new one
+    row = _row(st)
+    assert [(lane["working"], lane["state"]) for lane in row["lanes"]] == [(True, "Working"), (True, "Working")]
+    assert row["agentsText"] == "2 of 2 agents working"
+
+
 def test_a_run_that_got_no_answer_no_longer_counts_as_open():
     st = OpsWallState()
     _p1(st, "ZD-48215", at=NOW - 31)
@@ -949,6 +1033,7 @@ def test_checkouts_issues_count_the_really_high_p1_tickets_of_the_last_10_minute
         "injected": 8, "detected": 4, "missed": 3,
         "medianTimeToDetect": pytest.approx(7.0),       # 4, 6, 8, 40: ticket -> HIGH verdict
         "medianTimeToRemediate": pytest.approx(15.0),   # 10, 20: ticket -> the responder's action
+        "medianTimeToDetectText": "7s", "medianTimeToRemediateText": "15s",
     }
 
 
@@ -967,12 +1052,13 @@ def test_a_ticket_fills_in_from_its_five_records_in_any_order():
         for apply in order:
             apply(st)
         row = _row(st)
-        assert row["tickets"]["newest"] == [{"id": "ZD-48215", "source": ZD, "priority": "P1",
+        assert row["tickets"]["newest"] == [{"id": "ZD-48215", "source": ZD, "sourceName": "Zendesk", "priority": "P1",
                                              "subject": "Subject of ZD-48215", "eventTime": pytest.approx(TK)}]
         assert [(r["label"], r["reason"]) for r in row["runs"]] == [
             ("High in 4s", "Many customers cannot pay."), ("Scale out in 6s", "Checkout times out under the sale.")]
         assert row["issues"] == {"injected": 1, "detected": 1, "missed": 0,
-                                 "medianTimeToDetect": pytest.approx(5.0), "medianTimeToRemediate": pytest.approx(11.0)}
+                                 "medianTimeToDetect": pytest.approx(5.0), "medianTimeToRemediate": pytest.approx(11.0),
+                                 "medianTimeToDetectText": "5s", "medianTimeToRemediateText": "11s"}
 
 
 def test_p2_and_p3_tickets_are_listed_and_marked_but_get_no_runs():
@@ -1003,7 +1089,7 @@ def test_a_ticket_decision_stays_out_of_the_metric_rows():
     assert (after["status"], after["issues"]) == ("anomaly", before["issues"])
     assert _svc(st, "payments", T0 + 140)["status"] == "healthy"  # no fix shown, even once the block is gone
     checkout = _svc(st, "checkout", T0 + 20)
-    assert checkout["blocks"] == [] and checkout["groundTruth"] == []  # no false alarm either
+    assert "blocks" not in checkout and checkout["status"] == "healthy"  # a ticket row draws no metric block
 
 
 def test_trim_drops_the_tickets_older_than_the_axis_plus_the_margin():
