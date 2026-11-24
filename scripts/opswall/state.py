@@ -29,6 +29,11 @@ transaction wrote comes again when the statement replays, D-063).
   time to answer are measured on its first block.
 - The tile: a block open → ``anomaly``; a fix within the last 120 s → ``remediated``;
   otherwise ``healthy``.
+- The **Issues panel** of a row (``issues``, D-068), over the incidents that started in the
+  last 10 minutes: injected; detected (an owned block, and not missed); missed; the median
+  time to detect and the median time to remediate (start → the first answer), both over
+  answered incidents. A ticket service has its own (zeros until the wall reads tickets);
+  the page draws ``issues`` whatever it was counted from. There is no global summary.
 - The **samples** are the raw ``service_metrics`` records, one per metric service per
   second (D-058, D-068), kept for the axis plus a margin (``trim()``). The snapshot
   carries the ones on the chart; the page draws them as the latency and traffic lines
@@ -373,8 +378,6 @@ class OpsWallState:
                 "errorThresholdPct": ERROR_RATE_THRESHOLD_PCT,
                 "updatedAt": now,
                 "connectionErrors": dict(self._connection_errors),
-                "summary": _summary([inc for svc in services for inc in svc["groundTruth"]],
-                                    [b for svc in services for b in svc["blocks"]]),
                 "services": services,
             }
 
@@ -392,6 +395,8 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
         b.incident = _owner(b, incidents, now)
 
     status, status_text = _status(blocks, now)
+    # The page draws svc.issues whatever it was counted from (D-068).
+    issues = _ticket_issues(s, now) if s.name in TICKET_SERVICES else _incident_issues(incidents, blocks, left, now)
     return {
         "name": s.name,
         "previousVersion": s.previous_version,
@@ -399,6 +404,7 @@ def _snapshot_service(s: ServiceState, now: float, left: float, rel) -> dict:
         "secondsSinceDeploy": (now - s.deployed_at) if s.deployed_at else None,
         "status": status,
         "statusText": status_text,
+        "issues": issues,
         "groundTruth": [_incident_json(i, [b for b in blocks if b.incident is i], now, rel)
                         for i in incidents],
         "blocks": [_block_json(b, now, rel) for b in blocks],
@@ -487,14 +493,17 @@ def _owner(block: _Block, incidents: list[IncidentEvent], now: float) -> Inciden
     return None
 
 
+def _verdict(inc: IncidentEvent, owned: list[_Block], now: float) -> str:
+    if any(b.closer for b in owned):
+        return "answered"
+    if inc.ended_at is not None and now - inc.ended_at > MISSED_AFTER_SECONDS:
+        return "missed"
+    return "pending"
+
+
 def _incident_json(inc: IncidentEvent, owned: list[_Block], now: float, rel) -> dict:
     first = owned[0] if owned else None
-    if any(b.closer for b in owned):
-        verdict = "answered"
-    elif inc.ended_at is not None and now - inc.ended_at > MISSED_AFTER_SECONDS:
-        verdict = "missed"
-    else:
-        verdict = "pending"
+    verdict = _verdict(inc, owned, now)
     return {
         "incidentId": inc.incident_id,
         "type": inc.incident_type,
@@ -507,6 +516,43 @@ def _incident_json(inc: IncidentEvent, owned: list[_Block], now: float, rel) -> 
         "timeToDetect": first.start - inc.started_at if first else None,
         "timeToAnswer": first.end - first.start if first and first.closer else None,
     }
+
+
+def _issues_json(injected: int, detected: int, missed: int,
+                 to_detect: list[float], to_remediate: list[float]) -> dict:
+    """A service's Issues panel (D-068): the counts, and the medians in seconds (None
+    with nothing to take one over)."""
+    return {
+        "injected": injected,
+        "detected": detected,
+        "missed": missed,
+        "medianTimeToDetect": _median(to_detect),
+        "medianTimeToRemediate": _median(to_remediate),
+    }
+
+
+def _incident_issues(incidents: list[IncidentEvent], blocks: list[_Block], left: float, now: float) -> dict:
+    """The Issues panel of a metric service: the incidents that started in the last 10 minutes
+    (one cut by the chart's left edge started earlier), and their blocks."""
+    recent = [inc for inc in incidents if inc.started_at >= left]
+    detected = missed = 0
+    to_detect, to_remediate = [], []
+    for inc in recent:
+        owned = [b for b in blocks if b.incident is inc]
+        verdict = _verdict(inc, owned, now)
+        if verdict == "missed":
+            missed += 1  # even while a block of its run is still drawn: nobody answered
+        elif owned:
+            detected += 1
+        if verdict == "answered":
+            to_detect.append(owned[0].start - inc.started_at)
+            to_remediate.append(min(b.end for b in owned if b.closer) - inc.started_at)
+    return _issues_json(len(recent), detected, missed, to_detect, to_remediate)
+
+
+def _ticket_issues(s: ServiceState, now: float) -> dict:
+    """The Issues panel of a ticket service: zeros until the wall reads tickets (issue 09)."""
+    return _issues_json(0, 0, 0, [], [])
 
 
 def _block_json(b: _Block, now: float, rel) -> dict:
@@ -528,20 +574,6 @@ def _block_json(b: _Block, now: float, rel) -> dict:
         "decisionCount": len(b.decisions),
         "timeToDetect": b.start - b.incident.started_at if b.incident else None,
         "timeToAnswer": b.end - b.start if closer else None,
-    }
-
-
-def _summary(incidents: list[dict], blocks: list[dict]) -> dict:
-    verdicts = Counter(i["verdict"] for i in incidents)
-    answered = [i for i in incidents if i["verdict"] == "answered"]
-    return {
-        "injected": len(incidents),
-        "answered": verdicts["answered"],
-        "missed": verdicts["missed"],
-        "pending": verdicts["pending"],
-        "falseAlarms": sum(1 for b in blocks if b["incidentId"] is None),
-        "medianTimeToDetect": _median(i["timeToDetect"] for i in answered),
-        "medianTimeToAnswer": _median(i["timeToAnswer"] for i in answered),
     }
 
 

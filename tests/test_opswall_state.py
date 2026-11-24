@@ -359,10 +359,10 @@ def test_a_block_with_no_incident_is_a_false_alarm():
     st = OpsWallState()
     _health(st, "web-gateway", T0 + 10, lat="HIGH")
     _decide(st, "web-gateway", T0 + 10, at=T0 + 24, action="OBSERVE", target=None)
-    snap = st.snapshot(now=NOW)
-    [block] = next(s for s in snap["services"] if s["name"] == "web-gateway")["blocks"]
+    s = _svc(st, "web-gateway")
+    [block] = s["blocks"]
     assert block["incidentId"] is None
-    assert snap["summary"]["falseAlarms"] == 1
+    assert (s["issues"]["injected"], s["issues"]["detected"]) == (0, 0)  # the Issues panel ignores it
 
 
 @pytest.mark.parametrize(("first_window_end", "owned"), [
@@ -433,45 +433,96 @@ def test_an_observe_answer_leaves_the_tile_healthy():
     assert _svc(st, "web-gateway", T0 + 30)["status"] == "healthy"
 
 
-# --- the summary ------------------------------------------------------------------
+# --- the Issues panel (D-068) ------------------------------------------------------
 
 
-def test_the_summary_counts_verdicts_and_takes_medians_over_answered_incidents():
+def test_each_service_counts_its_own_issues_over_the_last_10_minutes():
     st = OpsWallState()
-    # answered: detected 16 s after it started, answered 8 s later
-    _incident(st, "checkout", T0, T0 + 40, iid="INC-A")
-    _health(st, "checkout", T0 + 10, lat="HIGH")
-    _decide(st, "checkout", T0 + 10, at=T0 + 24)
-    # answered: a drop detected 26 s after it started, answered 12 s later
-    _incident(st, "web-gateway", T0, T0 + 40, incident_type="UPSTREAM_DROP", iid="INC-B")
-    _health(st, "web-gateway", T0 + 20, trf="LOW")
-    _decide(st, "web-gateway", T0 + 20, at=T0 + 38, action="INVESTIGATE_UPSTREAM", trigger="TRAFFIC_LOW",
-            target=None, agent="capacity_agent")
-    # missed: detected, never answered
-    _incident(st, "payments", T0, T0 + 40, iid="INC-C")
+    # payments: a bad deploy detected 16 s after it started, answered 8 s later
+    _incident(st, "payments", T0, T0 + 40)
     _health(st, "payments", T0 + 10, lat="HIGH")
-    # pending: still running, nothing detected yet (checkout's second incident)
-    _incident(st, "checkout", NOW - 5, iid="INC-D")
-    # false alarm: latency, so the drop on the same service doesn't own it
-    _health(st, "web-gateway", T0 + 100, lat="HIGH")
-    _decide(st, "web-gateway", T0 + 100, at=T0 + 114, action="OBSERVE", target=None)
-
-    assert st.snapshot(now=NOW)["summary"] == {
-        "injected": 4,
-        "answered": 2,
-        "missed": 1,
-        "pending": 1,
-        "falseAlarms": 1,
-        "medianTimeToDetect": pytest.approx(21.0),
-        "medianTimeToAnswer": pytest.approx(10.0),
+    _decide(st, "payments", T0 + 10, at=T0 + 24)
+    issues = {s["name"]: s["issues"] for s in st.snapshot(now=NOW)["services"]}
+    assert issues["payments"] == {
+        "injected": 1, "detected": 1, "missed": 0,
+        "medianTimeToDetect": pytest.approx(16.0), "medianTimeToRemediate": pytest.approx(24.0),
     }
+    nothing = {"injected": 0, "detected": 0, "missed": 0, "medianTimeToDetect": None, "medianTimeToRemediate": None}
+    assert issues["web-gateway"] == nothing
+    assert issues["checkout"] == nothing
 
 
-def test_an_empty_wall_has_an_empty_summary():
-    assert OpsWallState().snapshot(now=NOW)["summary"] == {
-        "injected": 0, "answered": 0, "missed": 0, "pending": 0, "falseAlarms": 0,
-        "medianTimeToDetect": None, "medianTimeToAnswer": None,
-    }
+def test_time_to_remediate_runs_from_the_incidents_start_to_its_answer():
+    # The old summary measured detection -> answer (8 s and 12 s here); remediation is start -> answer.
+    st = OpsWallState()
+    # detected 16 s after the start, answered 8 s later: 24 s
+    _incident(st, "payments", T0, T0 + 40, iid="INC-A")
+    _health(st, "payments", T0 + 10, lat="HIGH")
+    _decide(st, "payments", T0 + 10, at=T0 + 24)
+    # a drop detected 26 s after the start, answered 12 s later: 38 s
+    _incident(st, "payments", T0 + 100, T0 + 140, incident_type="UPSTREAM_DROP", iid="INC-B")
+    _health(st, "payments", T0 + 120, trf="LOW")
+    _decide(st, "payments", T0 + 120, at=T0 + 138, action="INVESTIGATE_UPSTREAM", trigger="TRAFFIC_LOW",
+            target=None, agent="capacity_agent")
+    # detected, not answered yet: counted, but in neither median
+    _incident(st, "payments", NOW - 20, iid="INC-C")
+    _health(st, "payments", NOW - 10, lat="HIGH")
+    issues = _svc(st, "payments")["issues"]
+    assert (issues["injected"], issues["detected"], issues["missed"]) == (3, 3, 0)
+    assert issues["medianTimeToDetect"] == pytest.approx(21.0)
+    assert issues["medianTimeToRemediate"] == pytest.approx(31.0)
+
+
+def test_a_missed_incident_counts_as_missed_and_not_detected():
+    st = OpsWallState()
+    _incident(st, "payments", T0, T0 + 40)
+    # Flagged from the first window on and never answered. The run outlasts the incident, so at
+    # T0 + 80 its block is still drawn (last detection T0 + 76) while the incident is missed.
+    for w in range(10, 80, 10):
+        _health(st, "payments", T0 + w, lat="HIGH")
+    s = _svc(st, "payments", now=T0 + 80)
+    assert s["groundTruth"][0]["verdict"] == "missed" and s["blocks"][0]["incidentId"] == "INC0001"
+    assert s["issues"] == {"injected": 1, "detected": 0, "missed": 1,
+                           "medianTimeToDetect": None, "medianTimeToRemediate": None}
+
+
+def test_an_open_incident_counts_as_injected_but_neither_detected_nor_missed():
+    st = OpsWallState()
+    _incident(st, "web-gateway", NOW - 5, incident_type="BAD_DEPLOY_ERRORS")
+    issues = _svc(st, "web-gateway")["issues"]
+    assert (issues["injected"], issues["detected"], issues["missed"]) == (1, 0, 0)
+
+
+def test_only_incidents_that_started_in_the_last_10_minutes_count():
+    st = OpsWallState()
+    # ended before the window: off the chart
+    _incident(st, "payments", NOW - 700, NOW - 660, iid="OLD")
+    # started 10 s before the window and still on the chart, answered: not in the last 10 minutes
+    _incident(st, "payments", NOW - 610, NOW - 575, iid="EDGE")
+    _health(st, "payments", NOW - 590, lat="HIGH")
+    _decide(st, "payments", NOW - 590, at=NOW - 580)
+    # started in the window: counted
+    _incident(st, "payments", T0, T0 + 40, incident_type="UPSTREAM_DROP", iid="IN")
+    s = _svc(st, "payments")
+    assert [g["incidentId"] for g in s["groundTruth"]] == ["EDGE", "IN"]  # both drawn
+    assert s["issues"] == {"injected": 1, "detected": 0, "missed": 1,
+                           "medianTimeToDetect": None, "medianTimeToRemediate": None}
+
+
+def test_the_snapshot_has_no_global_summary():
+    # The Issues panels replace the summary table; false alarms are evaluate's to report (D-068).
+    st = OpsWallState()
+    _incident(st, "payments", T0, T0 + 40)
+    _health(st, "payments", T0 + 10, lat="HIGH")
+    _decide(st, "payments", T0 + 10, at=T0 + 24)
+    assert "summary" not in st.snapshot(now=NOW)
+
+
+def test_checkouts_panel_reads_zeros_until_the_wall_reads_its_tickets():
+    st = OpsWallState()
+    _incident(st, "checkout", T0, T0 + 40)  # never happens (D-068): checkout's numbers come from tickets
+    assert _svc(st, "checkout")["issues"] == {"injected": 0, "detected": 0, "missed": 0,
+                                              "medianTimeToDetect": None, "medianTimeToRemediate": None}
 
 
 # --- trim --------------------------------------------------------------------
@@ -501,7 +552,6 @@ def test_trim_takes_an_incident_that_never_ended_off_the_wall_after_11_minutes()
     st.trim(NOW)
     assert _svc(st, "checkout")["groundTruth"] == []
     assert [g["incidentId"] for g in _svc(st, "payments")["groundTruth"]] == ["RECENT"]
-    assert st.snapshot(now=NOW)["summary"]["pending"] == 1
 
 
 # --- thread safety -----------------------------------------------------------
