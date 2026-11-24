@@ -725,6 +725,9 @@ half is skipped silently when `remediation_decisions` doesn't exist yet.
 **Amended by D-050.** The table always exists (Terraform creates it), so the decision half is
 skipped, with a message, when `remediation_decisions` exists but is empty, not only when it
 is missing.
+**Amended by D-068.** Only a `ROLLBACK` carries a target. The capacity agent has no
+`SCALE_OUT` and its Target line is always N/A, so the replica-count check and
+`suggested_replicas` are gone; a target on any other action is still flagged.
 
 ### D-033 · DEVIATION · Agent SQL follows the docs, not the reference, on three points
 **Status.** **Confirmed live on 2026-11-12**: both agents and both INSERT statements were
@@ -808,6 +811,10 @@ format, not the brief's six.
 **Amended by D-050.** The 8-column table is created by the platform team's Terraform
 (`sql/sink_remediation_decisions.sql`, with `IF NOT EXISTS`, delete cleanup and 24 h
 retention); lab 4.3 keeps only the two INSERTs. Its columns are unchanged.
+**Amended by D-068.** `remediation_decisions` gets a ninth column, `ticket_id` (nullable, the
+last), for the ticket responder's decisions; the metric INSERTs write `CAST(NULL AS STRING)`
+there. Suggested Replicas is no longer computed in SQL: the capacity agent has no
+`SCALE_OUT`.
 
 ### D-035 · DEVIATION · Ops wall is dark-only
 **What.** Brief §7.3 asks for "readable in light and dark mode"; the dashboard ships
@@ -901,6 +908,9 @@ attendee's screen matches the mockups and the dashboard has no third-party depen
 render time.
 **Impact.** `scripts/opswall/static/fonts/` carries the WOFF2s and a `LICENSE.md` (OFL).
 `opswall.css` starts with three `@font-face` blocks pointing at `/static/fonts/*.woff2`.
+**Amended by D-068.** Geist and Geist Mono, copied from the target design
+(`inspiration/Ops wall redesign.html`) with their OFL licence, replace IBM Plex Sans. Still
+vendored, no CDN.
 
 ### D-041 · DECISION · No separate "progressive unlock" panels
 **What.** Brief §7.3 describes an anomaly panel that unlocks when `service_health` has
@@ -1000,6 +1010,12 @@ recreated: `service_deployments` changes shape.
 `TRAFFIC_SURGE` → `SCALE_OUT` on `web-gateway` only, `UPSTREAM_DROP` →
 `INVESTIGATE_UPSTREAM` on `checkout` and `payments`.
 
+**Amended by D-068.** `TRAFFIC_SURGE` is retired, so `SCALE_OUT` leaves the capacity agent:
+it answers `INVESTIGATE_UPSTREAM` for `TRAFFIC_LOW` and `OBSERVE` for `TRAFFIC_HIGH`, and
+Suggested Replicas is gone. Each remaining type keeps its one answer, on payments:
+`BAD_DEPLOY` → `ROLLBACK`, `UPSTREAM_DROP` → `INVESTIGATE_UPSTREAM`. `SCALE_OUT` stays in the
+vocabulary for the ticket responder.
+
 ### D-044 · DECISION · `avg_response_bytes` and `desired_replicas` no longer carried through the pipeline
 **What.** The 2.2–2.4 statements computed `avg_response_bytes` and carried
 `desired_replicas` from the deployment record into `service_health`. Nothing downstream
@@ -1086,6 +1102,10 @@ counter; `scripts/reset.py` step 5 deletes only the state file; `scripts/evaluat
 and `scripts/evaluation/detection.py` (`incidents_from_records` replaces
 `load_incidents`; `Incident.from_record` reads the topic's `incident_type`). Supersedes
 D-038.
+**Amended by D-068.** A second answer key, `ticket_answer_key`: one record per support ticket
+with its true severity and expected action, read only by the wall and `evaluate`.
+`service_incidents` stays the only answer key for metric incidents. The generator state file
+also keeps the two ticket-id counters.
 
 ### D-047 · DECISION · The ops-wall mock follows the simplified rules
 **What.** `uv run ops-wall --mock` scripted 8 scenes in a 12-minute loop, with 60 s
@@ -1199,6 +1219,10 @@ never changes an existing table). If the CC grammar rejects `INSERT ... WITH`, m
 shared CTEs into nested subqueries in 2.4.
 **Amended by D-054.** `service_health` has 23 columns: `detected_at TIMESTAMP_LTZ(3) NOT NULL` is the
 last. `remediation_decisions` keeps its 8.
+**Amended by D-068.** Terraform creates four more tables: `support_tickets` and
+`ticket_answer_key` (sources), `p1_tickets` and `ticket_triage` (the outputs of labs 5.1 and
+5.2), chained after the existing ones in lab order; 17 resources per person.
+`remediation_decisions` is recreated with `ticket_id`.
 
 ### D-051 · DECISION · `reset` empties the output topics instead of dropping their tables; `--with-labs` is removed
 **What.** `reset` dropped `service_health` and `remediation_decisions`, which Terraform now
@@ -1447,6 +1471,10 @@ data. No change to Terraform, the schemas or the DDL. Tests: `CANDIDATES` is pin
 drops). web-gateway deploys on its own clock; its bad deploys are `BAD_DEPLOY_ERRORS`,
 flagged by an error-rate threshold in lab 2.2.
 
+**Amended by D-068.** checkout is no longer a metric service: it produces support tickets and
+is never an incident candidate. `TRAFFIC_SURGE` is retired; payments keeps `BAD_DEPLOY` and
+`UPSTREAM_DROP`.
+
 ### D-057 · DECISION · No benign deploys
 **What.** `ops-sim` deployed a random healthy service every 3-5 minutes (first at 60 s): a
 patch-version bump that changed no metric, so the temporal join had versions to follow
@@ -1586,6 +1614,10 @@ latency effect), drop ×0.1 and bad deploy ×4 latency.
 rate over a 10-second window against a fixed 25 % threshold, written to
 `service_error_rate`. `service_health` still has no error columns, and the ARIMA labs
 (renumbered 2.3–2.5) still don't read it.
+
+**Amended by D-068.** Two services write `service_metrics`, web-gateway and payments, so two
+records per second: checkout produces support tickets instead. The surge's size is gone with
+the surges.
 
 ### D-059 · DECISION · Tuned data and reference detector: 20 s spikes, 50/30/30, confidence 99.95
 **What.** Workshop preparation: the data settings and **our** reference detector settings
@@ -1752,6 +1784,10 @@ resolves it, or a 35 s cap (`Config.max_duration`) that ends mid-window on purpo
 35 s has no echoes, where 30 s and 40 s (both on a boundary) have 80× and 670× those of 20 s.
 The rests stay 390/300/300 s, counted from the scheduled end; the rate is ~56 an hour.
 
+**Amended by D-068.** Surges are retired, and with them the ×5 surge size and the 300 s surge
+rest. The rests are 390 s for bad deploys and 300 s for drops, on payments alone: about 19
+incidents an hour, every one caught offline.
+
 ### D-060 · DECISION · Per-service schedules: overlap, per-type rests, first three one of each type
 **What.** `ops-sim` had one global incident slot: one incident at a time, the next one
 240–360 s after the last ended, and a 420 s cooldown per service. About 10 incidents an
@@ -1833,6 +1869,10 @@ incidents is 25 s (T+35 to the boundary at T+60). The banner prints `max` for `d
 before. web-gateway has its own deploy clock with its own RNG (`seed + 2`): a deploy every 60–90 s,
 bad with probability ½, outside the quiet period, the gap, the rests and the "one of each"
 rule.
+
+**Amended by D-068.** The shared scheduler serves payments alone, with two types, so the first
+two incidents are one of each. About 19 incidents an hour (18.7 over 3-hour runs offline,
+19.0 at steady state). Every seeded schedule shifts, because the scheduler draws differently.
 
 ### D-061 · DECISION · The wall charts raw `service_metrics` latency and traffic
 **What.** The wall drew each metric as a lane: the injected incidents up, the detections
@@ -1920,6 +1960,9 @@ charts are kept and updated in place, keyed (block bars by the snapshot's new `k
 **Amended by D-066.** The line and its lane are one chart; the incidents are boxes behind the
 line instead of onset ticks. The rail's Rate and Errors are gone, and with them `rateRps`,
 `errorRatePct` and the per-sample `errors`.
+
+**Amended by D-068.** checkout has no charts: its row shows its tickets and agent runs.
+web-gateway's and payments' charts keep their behaviour inside the target design's rows.
 
 ### D-062 · FIX · The ops wall updates its DOM in place instead of rebuilding it
 **What.** On every snapshot (4 Hz, `PUSH_INTERVAL_SEC`) the page emptied `#rows` and built
@@ -2209,6 +2252,9 @@ still no worse than today); fixes at T+21 to T+29 were not tested.
 
 Amends D-059 and D-060.
 
+**Amended by D-068.** A ticket decision (`ticket_id` set) resolves nothing: it is about
+checkout, which never has an incident. There are no surges, so no `SCALE_OUT` ends one.
+
 ### D-066 · DECISION · The ops wall redesign: one chart per metric, floating cards, Confluent dark
 **What.** The user asked for a calmer wall that says what to expect: the summary sentence
 changed shape with the numbers, the legend was a run of inline items, and each service row
@@ -2281,6 +2327,11 @@ Supersedes D-053. Amends D-036, D-054 and D-061.
 keep latency and traffic. The per-sample `errors` comes back for that chart, and the wall
 reads `service_error_rate`. The deploy marks settle part of the `service_deployments`
 review: the consumer stays.
+
+**Amended by D-068.** The wall takes the frame of `inspiration/Ops wall redesign.html`: one
+full-width row per service with an Issues panel, the dotted background, Geist and the
+design's palette. The summary table, the legend and the Confluent logo go. checkout's row
+shows its ticket sources, its ticket list and the two agents' lanes.
 
 ### D-067 · DECISION · web-gateway is detected by an error-rate threshold
 **What.** Every service was detected the same way: `ML_DETECT_ANOMALIES` (ARIMA) on
@@ -2536,3 +2587,202 @@ scored minutes: `BAD_DEPLOY_ERRORS` 50/50 in window 1; `BAD_DEPLOY` 26/26, `TRAF
 release-agent decisions, all valid, no routing errors, no wrong targets.
 
 Amends D-056, D-057, D-058, D-060 and D-066.
+
+**Amended by D-068.** Surges are retired rather than left on checkout, which becomes a ticket
+pipeline. The shared scheduler serves payments alone (about 19 incidents an hour) and labs
+2.3–2.5 read payments only. The capacity agent has no `SCALE_OUT` and no checkout example: its
+examples are an `INVESTIGATE_UPSTREAM` and an `OBSERVE` on payments. The release agent's
+latency ROLLBACK example is on payments too.
+
+### D-068 · DECISION · checkout becomes a ticket pipeline; payments alone keeps ARIMA
+**What.** checkout and payments were detected the same way: the simulator produced per-second
+metrics, labs 2.3–2.5 windowed them, and `ML_DETECT_ANOMALIES` (ARIMA) flagged latency and
+traffic spikes and lows for the release and capacity agents. Two services told one story. The
+workshop should also show a second architecture: events that are not metrics, routed by
+Flink, and handled by a chain of agents.
+**Options.**
+- checkout: (a) keep it a second ARIMA service; (b) turn it into a support-ticket pipeline.
+- Traffic surges, whose only candidate was checkout (D-067): (a) move them to payments;
+  (b) retire them, and the capacity agent's `SCALE_OUT` with them.
+- The tickets: (a) more records in an existing stream (`service_metrics` or
+  `service_incidents`); (b) a stream of their own.
+- What the Flink filter routes on: (a) the real severity; (b) the priority the reporter set,
+  with an agent recovering the real severity.
+- The tickets' answer key: (a) columns of the ticket; (b) a topic of its own.
+- Where the second agent writes: (a) a new table; (b) `remediation_decisions`, with a
+  `ticket_id`.
+- The wall: (a) add checkout's row to today's cards; (b) take the frame of the target design
+  (`inspiration/Ops wall redesign.html`) now.
+**Choice.** (b) each time, decided with the user in a grilling session on 2026-11-23/24 (four
+rounds; `.scratch/checkout-tickets/spec.md`, which numbers the 39 decisions summed up here).
+The story the wall tells for checkout: tickets keep arriving; a P1 lights up and the
+classifier picks it up; if it is real, the responder recommends what to do; if it is a
+customer shouting about a discount code, it stops there. Terms: a **ticket** is one support
+request about checkout, from Zendesk or ServiceNow, never called an incident
+(`service_incidents` keeps that meaning); its **priority** (`P1`–`P3`) is the reporter's, its
+**severity** (`HIGH` | `LOW`) the real impact; the **true severity** is in the answer key and
+the **verdict** is the classifier's (`INVALID` when its answer can't be parsed).
+- **payments alone on ARIMA.** Labs 2.3–2.5 read `WHERE m.service_name = 'payments'` and keep
+  `PARTITION BY service_name`, so the lab still shows the general pattern. Detector settings,
+  columns and `service_health` don't change. `TRAFFIC_SURGE` leaves the simulator
+  (`INCIDENT_TYPES`, `INCIDENT_WEIGHTS`, `CANDIDATES`, `TRIGGER`, `EXPECTED_ACTION`, `RESTS`
+  and its ×5 effect), `SHARED_SERVICES = ("payments",)`, and the "first N are one of each"
+  rule covers two types. The weights stay 0.50/0.25 (two bad deploys for every drop); the
+  effects, the rests (390 s and 300 s), the 20 s gap, the 150 s quiet period and the 35 s cap
+  don't change. Every seeded schedule shifts, because the scheduler draws differently;
+  web-gateway's deploy clock doesn't (its own rng).
+- **The metric agents.** The capacity agent answers `INVESTIGATE_UPSTREAM` (rule 1, the
+  trigger is `TRAFFIC_LOW`) or `OBSERVE` (rule 2, `TRAFFIC_HIGH`, which now only false alarms
+  such as the echo after a drop raise). Its examples are one of each on payments, its INSERT
+  loses Suggested Replicas and Ready Replicas, and it keeps the three-line answer with Target
+  always N/A. The release agent's checkout latency ROLLBACK becomes a payments one (2.9.x);
+  nothing else in its prompt or rules changes.
+- **checkout produces only tickets**: no `service_metrics`, no `service_deployments`, never an
+  incident candidate. `opsgen/services.py` says which services produce metrics (web-gateway,
+  payments) and which tickets (checkout).
+- **The ticket clock** has its own rng, `Random(seed + 3)` (the scheduler is `seed`, traffic
+  `seed + 1`, web-gateway's deploys `seed + 2`): Poisson(1/15) tickets per 1-second tick,
+  about 4 a minute, each independent, from the start. `--no-incidents` stops it. Priority P1
+  30 %, P2 30 %, P3 40 %; a P1 is really HIGH with probability ½, P2 and P3 are always LOW; a
+  really-HIGH P1 expects `ROLLBACK`, `SCALE_OUT` or `INVESTIGATE_UPSTREAM` with equal odds;
+  the source is `ZENDESK` or `SERVICENOW` with equal odds. About 1.2 P1s a minute: about 72
+  classifier and 36 responder calls an hour per attendee. Ids look native (`ZD-48215`,
+  `INC0041872`), with one counter per source in the generator state file (D-046), so a
+  restart never reuses one. About 40 English templates in a checked-in module: 12 P1s that
+  are really HIGH (4 per action, each with one clear cue), 12 P1s that are really LOW (4 of
+  them shouting) and 16 P2–P3; the user reviews them.
+- **Tables.** Sources `support_tickets` (`event_time`, `ticket_id`, `source`, `service_name`,
+  `priority`, `subject`, `description`) and `ticket_answer_key` (`event_time`, `ticket_id`,
+  `true_severity`, `expected_action`), with `service_incidents`' options; outputs
+  `p1_tickets` (the same seven columns) and `ticket_triage` (the seven, then `severity`,
+  `reason`, `raw_response`), read-uncommitted. `remediation_decisions` gains a nullable
+  `ticket_id` as its last column, so the table is dropped and recreated. Terraform creates
+  all four new tables, sources first, then the outputs in lab order: 17 resources per
+  person. `flink_max_cfu` stays 10.
+- **Section 5, "A second architecture: support tickets".** 5.1 routes the P1s into
+  `p1_tickets`. 5.2 is the `ticket_classifier` agent and its INSERT into `ticket_triage`
+  (latest offset; `Severity:` and `Reason:`). 5.3 is the `ticket_responder` agent and its
+  INSERT into `remediation_decisions` for HIGH verdicts (latest offset; its input carries the
+  classifier's reason; `Action:` and `Reason:`, no Target; agent `ticket_responder`, trigger
+  `HIGH_SEVERITY_TICKET`, null target). Both prompts have the existing shape and no
+  apostrophes, and use `llm_textgen_model`.
+- **Housekeeping.** The topic and table lists, `LAB_AGENTS`, `uv run reset` and `uv run
+  reset-health` cover the new tables and agents. ops-sim's `DecisionFeed` decodes a ticket
+  decision and resolves nothing with it. `sql/checks` name the ticket legs. `sweep.py` is
+  fixed; the research scripts keep a note that they predate this decision.
+- **The wall** takes the frame of the target design: its header; one full-width row per
+  service with a main panel and an "Issues · Last 10 min" panel (Injected; Detected "x of y"
+  with the missed line; median time to detect; median time to remediate); the dotted
+  background; Geist and Geist Mono, vendored with their OFL licence (Plex goes); the design's
+  palette. The summary table and the legend go. web-gateway and payments keep their charts
+  inside their rows. checkout's row has its two sources (a dot runs to the list for each new
+  ticket), the newest tickets of each priority, and a 2-minute timeline with a Classifier and
+  a Responder lane, its bars drawn between Kafka timestamps.
+- **`evaluate`** gets a ticket section: true severity × verdict, answered and expected
+  actions, filter leaks, median times. Ticket decisions stay out of the metric coverage.
+  Acceptance: the classifier right on ≥ 95 % of P1s, the responder on ≥ 95 % of the HIGH
+  tickets it answers, no leaks.
+**Why.**
+- **Surges are retired, not moved.** payments already has the drops, and a traffic series
+  with both loses the drops: ×5 surges widen its band, which is symmetric, until the lower
+  bound is below zero, and a ×0.1 drop never falls under it. Offline, with both types on both
+  services, 1.6 % of drops were caught (D-067). There is no other ARIMA service to move them
+  to. Without surges, `SCALE_OUT` answers no metric incident, so the capacity agent loses it;
+  `TRAFFIC_HIGH` is then always a false alarm, and `OBSERVE` answers it.
+- **Removed, not left without a candidate.** With the type still in `INCIDENT_TYPES` and no
+  service to take it, the "first N are one of each" rule would wait for it forever and stop
+  payments' incidents after the first two.
+- **Tickets are a separate stream.** A ticket is an event with text, not a metric, and it is
+  not an incident the simulator injected: in `service_metrics` or `service_incidents` it would
+  blur both. Its own table makes routing on a field the lesson of 5.1, and its own rng keeps
+  every other stream's schedule where it was for a seed.
+- **Priority and severity differ** because reporters over-prioritise. The filter routes on
+  what the reporter set, cheaply and deterministically; the classifier recovers the real
+  impact, which is why an agent comes after the filter. P2 and P3 are always LOW, so the
+  filter never drops a real outage.
+- **The answer key is its own topic** so that nothing an agent reads carries the answer:
+  `p1_tickets` and `ticket_triage` copy the ticket's columns, and they are the agents' input.
+  Only the wall and `evaluate` read it, as with `service_incidents` for metric incidents
+  (D-046).
+- **The responder writes to `remediation_decisions`**, so there is one decisions table for
+  ops-sim, the wall and `evaluate`.
+- **The wall takes the design's frame now** because checkout's row is the design's: its
+  sources, ticket list and agent lanes don't fit today's cards of charts, and building the
+  row in today's frame would mean building it twice.
+**Measured.** ARIMA on payments alone, offline (`.scratch/checkout-tickets/research/
+payments_only.py`, output in `payments_only.out` next to it): the real generator through the
+AR(1) replica at the labs' settings (12/360/99.95), scored with `evaluate`'s code
+(`close_loop.score_run`), 300 seeds × 3 h per run, web-gateway's deploy clock on, payments'
+rows and incidents scored:
+
+| Run | Inc/h (steady) | Mix | Bad deploys | Drops | Window 1 | Echoes, other FPs | Fresh /svc |
+|---|---|---|---|---|---|---|---|
+| D-067: surges on checkout, drops on payments, both scored | 37.3 | BD/SURGE/DROP 44/28/28 | 100 % | 100 % | 100 % | 0, 0 | 0.04 |
+| **D-068: payments alone** | 18.7 (19.0) | BD/DROP 45/55 | 100 % (7406/7406) | 100 % (9094/9094) | 100 % | 0, 0 | 0.05 |
+
+Steady is hours 2 and 3 of each run. The mix by count is 45/55 although the weights are 2:1,
+because the bad-deploy rest is the longer one. The fresh-start noise is D-065's row C (0.05),
+and an incident costs 1.02 agent calls. Every incident fixed at T+11 (an answer about 1 s
+after detection) gives the same recall and no echoes; 42 opposite traffic flags then land in
+the window that holds the return to normal, which `evaluate` counts as neither.
+**Open.**
+- The web-gateway and payments rows of the target design (the releases list, the payments
+  cluster, aggregated records) come with the full redesign. The design's payments row shows
+  5 s windows, p95 latency and sub-services, none of which exist in our data, so it needs its
+  own grilling. Until then checkout's timeline covers 2 minutes and the other rows' charts 10.
+- From D-067: the windowing-only step (`2.3_window_metrics.sql`) may be redundant. Kept.
+- `opswall-redesign` issue 01 (what the wall reads from `service_deployments`) is still open.
+  The new frame shows no versions; web-gateway's deploy marks still need the consumer.
+**Pending (live check, `.scratch/checkout-tickets/issues/12-live-check.md`).**
+- The pool's CFU use with eight long-running statements (2.2, 2.5, the three 4.3 legs, 5.1,
+  5.2 and 5.3), against the ceiling of 10.
+- The time each agent takes, on both hops.
+- Whether `ticket_triage` records get their Kafka timestamp when written, as decisions do
+  (D-066). Otherwise the Classifier bars have no length; the fallback is a `classified_at`
+  column set by `CURRENT_TIMESTAMP`, like `detected_at`.
+- Both agents against the answer key on Confluent Cloud (≥ 95 %).
+- ARIMA on payments alone, live, against the offline re-check above. The capacity agent
+  answers `OBSERVE` to every `TRAFFIC_HIGH`.
+- The checks of `.scratch/web-gateway-threshold/issues/10-recheck-after-next-changes.md` that
+  still apply.
+**Impact.** Issue 01 (this entry; surges retired, ARIMA on payments only, the metric agents,
+tuning, the re-check): `opsgen/engine.py` (`TRAFFIC_SURGE`, `SURGE_LAMBDA_MULT` and the surge
+effect gone; `SHARED_SERVICES = ("payments",)`; `CANDIDATES`; `RESTS`; the "first two are one
+of each" rule; the module docstring and the rate), docstrings in
+`opsgen/{services,cli,deployments}.py` (the banner in `driver.py` lists `INCIDENT_TYPES`, so it
+now reads `rests: BAD_DEPLOY=390s UPSTREAM_DROP=300s`). The labs:
+`sql/2.3_window_metrics.sql`, `2.3_window_aggregation.sql`, `2.4_anomaly_detection.sql`,
+`2.4_anomaly_status.sql` and `2.5_service_health.sql` read payments alone, with their headers;
+`sql/sink_service_health.sql` names no service, so it and `statements.tf` are unchanged;
+`sql/checks/remediation_call_rate.sql`'s comment (60 `service_health` rows per 10 quiet
+minutes). The agents: `sql/4.2_capacity_agent.sql` (two actions, rules 1 and 2, an
+`INVESTIGATE_UPSTREAM` example kept from before and an `OBSERVE` one, both on payments; the
+role paragraph gives payments' numbers, about 300 requests per window on 2 replicas, and says
+no surge is expected), `sql/4.3_insert_capacity_agent.sql` (no replica arithmetic; the action
+parsed in `INVESTIGATE_UPSTREAM` or `OBSERVE`), `sql/4.2_release_agent.sql` (the latency
+ROLLBACK is payments at 893 ms against 226 ms, back to 2.9.4). `evaluate`:
+`scripts/evaluation/decisions.py` (the capacity agent's actions; `suggested_replicas` and the
+`SCALE_OUT` target check gone, so only a `ROLLBACK` carries a target; `SCALE_OUT` stays in
+`ACTIONS` for the responder), `detection.py` (docstring: no incident expects `TRAFFIC_HIGH`),
+`scripts/evaluate.py` (the target legend). The wall: `scripts/opswall/state.py`
+(`INCIDENT_METRIC` without `TRAFFIC_SURGE`; `FIX_ACTIONS` keeps `SCALE_OUT` for the responder),
+`static/opswall.js` (no surge label). Tuning: `scripts/tuning/sweep.py` (no surge multiplier,
+no surge or per-service drop column, rate presets without checkout); a header note on each
+`scripts/tuning/research/*.py` and in its README. Tests: `opsgen/tests/test_engine.py`
+(payments alone gets bad deploys and drops; surges retired from every table; the first two
+are one of each; the rests; about 19 an hour; the chooser, gap, rest and resolve tests on
+payments; overlap now against web-gateway's clock), `test_simulation.py`,
+`test_output.py` (no surge anywhere; payments' bad deploys and drops; 18 in the first hour;
+the banner), `test_incident_records.py`, `test_deploy_clock.py`,
+`tests/test_sql_pipeline.py` (`ARIMA_FILTER` is payments; no ARIMA lab names checkout),
+`tests/test_agent_sql.py` (exactly an `INVESTIGATE_UPSTREAM` and an `OBSERVE` example on
+payments, no `SCALE_OUT`; no replica arithmetic in the INSERT; no checkout example; the
+payments ROLLBACK), `tests/test_evaluate_decisions.py` (the capacity agent's actions; only a
+`ROLLBACK` carries a target), `tests/test_opswall_state.py` (the incident types the wall
+knows), `tests/test_tuning.py` (the sweep scores payments alone; no surge or checkout column;
+no checkout rate). `uv run ops-sim --dry-run --simulate 30 --seed 42`: no surge; payments has 4
+bad deploys and 5 drops, checkout none; web-gateway's 49 deploy and incident lines are the
+same as before the change.
+
+Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
+and D-067.
