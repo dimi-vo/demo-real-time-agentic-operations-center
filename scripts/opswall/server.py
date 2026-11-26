@@ -18,7 +18,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from scripts.opswall.state import OpsWallState
+from scripts.opswall.state import SECURITY_ROW, OpsWallState
 
 logger = logging.getLogger("ops-wall.server")
 
@@ -56,7 +56,8 @@ def create_app(state: OpsWallState) -> FastAPI:
             "status": "ok",
             "updatedAt": snap["updatedAt"],
             "connectionErrors": snap["connectionErrors"],
-            "serviceCount": len(snap["services"]),
+            # The services' rows: the "Code security incidents" row is none (D-070).
+            "serviceCount": sum(1 for s in snap["services"] if s["row"] != SECURITY_ROW),
         }
 
     @app.websocket("/ws")

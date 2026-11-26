@@ -3748,3 +3748,49 @@ endpoint the URL with no placeholder left, the tool on the connection; with it a
 plan fails on the connection), `environments.tftest.hcl` (32 statements in every environment
 with the switch and a URL; a URL without its scheme or with a trailing slash fails the plan on
 the variable). Amends D-069 (its "Amended by D-070" paragraph).
+
+Issue 09 (the wall's consumer, state and snapshot for the "Code security incidents" row):
+`scripts/opswall/consumer.py` (four more threads, fourteen, each from about 600 s back:
+`cve_scans`, `critical_cves` with its Kafka timestamp, `cve_answer_key`, `patch_decisions` with
+its Kafka timestamp; no key decoded), `scripts/opswall/state.py` (a `Finding` per `finding_id`,
+filled in from the four topics in any order as a ticket is: the scan's fields from the first
+record that carries them, `critical_at` the `critical_cves` record's Kafka timestamp, the
+decision's action, reason, patch status, commit, patch start and finish and its answer's Patch
+line, `decided_at` its Kafka timestamp, a record written twice keeping its first timestamp and the
+newer content, and `expected_action` from the answer key; `apply_finding`,
+`apply_critical_cve`, `apply_cve_answer_key` and `apply_patch_decision`, which never goes near
+`apply_decision`; trimmed like tickets; `CRITICAL_CVSS` 9.0, lab 6.1's rule; the row, `row:
+"security"`, "Code security incidents", appended after the three services by its own function:
+the security agent's run from the `critical_cves` record, or from the finding's `event_time`
+when only the decision has come, to the decision, reading "Patched in 12s", "Dismissed in 8s",
+"Patch agent unreachable" (`FAILED`, flagged `unreachable` for the page's red) or "Invalid
+answer" (`INVALID`), open ("Working 3s") for 60 s and then "No answer"; the external run from the
+patch's start to its finish once the decision has brought both, labelled with the commit and the
+duration and carrying the reply, its times and its duration; the hatch, `waitFrom`/`waitTo` on
+our run, the part of our bar the patch covers, since the laptop's clock and Kafka's can disagree;
+marks for every finding of the last 2 minutes with its CVE id and whether it is critical; the
+newest 5 findings with their repository, CVE, score, critical flag and `eventTime`, and "N
+scanned" over 600 s; the two lanes, "Security agent" with its state and "External · LangGraph ·
+A2A" with none, since the wall hears of the external call only when our agent answers;
+`openCriticals` and "Agent on critical CVE"; the Issues panel in the services' keys, over the
+critical findings of the last 10 minutes with an answer key: detected the right ones, missed the
+wrong, `INVALID` or undecided 60 s after lab 6.1's record, finding -> decision and finding -> the
+patch's finish for `PATCHED` ones), `scripts/opswall/server.py` (`/healthz`'s `serviceCount`
+stays 3: it counts services, and the new row is none), docstrings in
+`scripts/opswall/{app,consumer,state}.py`. A stopped patch agent's decision, `INVALID` and `N/A`
+(issues 02 and 07), reads "Invalid answer", draws no external bar and counts as missed; spec
+decision 24's red words show only for `FAILED`. Tests: `tests/test_opswall_state.py` (the row
+last, with its keys and its empty shape; a `PATCH` gives our closed bar hatched over the
+external one inside it; a `DISMISS` one bar; `FAILED` and `INVALID` their words; a stopped patch
+agent; no decision, open for 60 s and then "No answer", closed late by a decision; the external
+bar only once the decision has come, and only with both times; the hatch clipped to our bar; a
+decision without its `critical_cves` record; a critical finding nobody routed gets no bar; the
+marks; the list's order and the 10 s rule's fields; the header count and the lanes; the Issues
+numbers, a `DISMISS` that called the tool anyway left out of the time to patch; the four records
+in any order; written twice; trim; a run off the timeline and one clipped at its edge; the
+critical line against lab 6.1; the three service rows unchanged, and the snapshot-shape tests
+taking the fourth row), `tests/test_opswall_ingest.py` (a record from each finding topic through
+the real Avro path, with the Flink schemas of `critical_cves` and `patch_decisions`, reaching
+the row; fourteen threads, the four new ones from 600 s back, the two lab tables with their Kafka
+timestamps), `tests/test_opswall_server.py` (`serviceCount` 3; the websocket's four rows and the
+security row's empty shape). Until issue 10, the page draws the row as an empty chart row.
