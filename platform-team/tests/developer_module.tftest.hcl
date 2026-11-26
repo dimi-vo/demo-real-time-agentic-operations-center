@@ -26,6 +26,7 @@ variables {
   flink_max_cfu              = 20
   csp_hosted_model           = "anthropic.claude-sonnet-4-6"
   deploy_labs                = false
+  patch_agent_url            = ""
   principal_id               = "u-abc123"
   confluent_cloud_api_key    = "MOCKGLOBALKEY"
   confluent_cloud_api_secret = "mock-global-secret"
@@ -418,15 +419,21 @@ run "no_lab_statements_without_deploy_labs" {
         confluent_flink_statement.insert_ticket_classifier,
         confluent_flink_statement.create_ticket_responder,
         confluent_flink_statement.insert_ticket_responder,
+        confluent_flink_statement.insert_critical_cves,
+        confluent_flink_statement.create_patch_agent_connection,
+        confluent_flink_statement.create_patch_agent_tool,
+        confluent_flink_statement.create_security_agent,
+        confluent_flink_statement.insert_security_agent,
       ] : length(s) == 0
     ])
     error_message = "without deploy_labs, the module must plan none of the labs' statements"
   }
 }
 
-run "deploy_labs_runs_the_twelve_lab_statements_as_principal_in_the_developer_catalog" {
+run "deploy_labs_runs_the_seventeen_lab_statements_as_principal_in_the_developer_catalog" {
   variables {
-    deploy_labs = true
+    deploy_labs     = true
+    patch_agent_url = "https://patch-agent.example.com"
   }
 
   module {
@@ -434,8 +441,8 @@ run "deploy_labs_runs_the_twelve_lab_statements_as_principal_in_the_developer_ca
   }
 
   assert {
-    condition     = length(output.flink_statements) == 27
-    error_message = "with deploy_labs, the module must create the fourteen tables, the model and the labs' 12 statements"
+    condition     = length(output.flink_statements) == 32
+    error_message = "with deploy_labs, the module must create the fourteen tables, the model and the labs' 17 statements"
   }
 
   assert {
@@ -455,9 +462,11 @@ run "deploy_labs_runs_the_twelve_lab_statements_as_principal_in_the_developer_ca
       can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_capacity_agent[0].statement)) &&
       can(regex("^INSERT INTO `p1_tickets`\n", confluent_flink_statement.insert_p1_tickets[0].statement)) &&
       can(regex("^INSERT INTO `ticket_triage`\n", confluent_flink_statement.insert_ticket_classifier[0].statement)) &&
-      can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_ticket_responder[0].statement))
+      can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_ticket_responder[0].statement)) &&
+      can(regex("^INSERT INTO `critical_cves`\n", confluent_flink_statement.insert_critical_cves[0].statement)) &&
+      can(regex("^INSERT INTO `patch_decisions`\n", confluent_flink_statement.insert_security_agent[0].statement))
     )
-    error_message = "the eight lab INSERTs must write the output tables (heredoc indent stripped)"
+    error_message = "the ten lab INSERTs must write the output tables (heredoc indent stripped)"
   }
 
   assert {
@@ -467,8 +476,46 @@ run "deploy_labs_runs_the_twelve_lab_statements_as_principal_in_the_developer_ca
         ["capacity_agent", confluent_flink_statement.create_capacity_agent[0].statement],
         ["ticket_classifier", confluent_flink_statement.create_ticket_classifier[0].statement],
         ["ticket_responder", confluent_flink_statement.create_ticket_responder[0].statement],
+        ["security_agent", confluent_flink_statement.create_security_agent[0].statement],
       ] : can(regex("^CREATE AGENT `${pair[0]}`\nUSING MODEL `llm_textgen_model`\nUSING PROMPT 'OUTPUT FORMAT", pair[1]))
     ])
-    error_message = "the four agents must be created on llm_textgen_model, with their prompts unindented"
+    error_message = "the five agents must be created on llm_textgen_model, with their prompts unindented"
   }
+
+  assert {
+    condition     = can(regex("\nUSING TOOLS `patch_agent_tool`\n", confluent_flink_statement.create_security_agent[0].statement))
+    error_message = "the security agent must use lab 6.2's tool"
+  }
+
+  # Lab 6.2's connection points at the presenter's patch-agent: patch_agent_url in place of
+  # the file's placeholder (D-070).
+  assert {
+    condition = (
+      can(regex("^CREATE CONNECTION `patch_agent_connection`\n", confluent_flink_statement.create_patch_agent_connection[0].statement)) &&
+      strcontains(confluent_flink_statement.create_patch_agent_connection[0].statement, "'endpoint' = 'https://patch-agent.example.com',\n") &&
+      !strcontains(confluent_flink_statement.create_patch_agent_connection[0].statement, "<your patch-agent URL>")
+    )
+    error_message = "the connection's endpoint must be patch_agent_url"
+  }
+
+  assert {
+    condition     = can(regex("^CREATE TOOL `patch_agent_tool`\nUSING CONNECTION `patch_agent_connection`\n", confluent_flink_statement.create_patch_agent_tool[0].statement))
+    error_message = "the tool must be created on lab 6.2's connection"
+  }
+}
+
+# The connection would point nowhere, so a demo apply without the patch agent's URL fails at
+# the plan (D-070).
+run "deploy_labs_without_a_patch_agent_url_fails_the_plan" {
+  command = plan
+
+  variables {
+    deploy_labs = true
+  }
+
+  module {
+    source = "./modules/developer"
+  }
+
+  expect_failures = [confluent_flink_statement.create_patch_agent_connection]
 }

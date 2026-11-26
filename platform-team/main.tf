@@ -77,6 +77,7 @@ module "developer" {
   flink_max_cfu              = var.flink_max_cfu
   csp_hosted_model           = var.csp_hosted_model
   deploy_labs                = var.deploy_labs
+  patch_agent_url            = var.patch_agent_url
   principal_id               = local.principal_id
   confluent_cloud_api_key    = var.confluent_cloud_api_key
   confluent_cloud_api_secret = var.confluent_cloud_api_secret

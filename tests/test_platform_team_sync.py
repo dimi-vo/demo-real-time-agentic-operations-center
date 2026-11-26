@@ -1,9 +1,10 @@
 """platform-team/ must work when copied out of the repo, so its developer module
 carries its own copies of the fourteen CREATE TABLE statements (seven source tables, seven
-output tables) and of the labs' twelve statements (D-069). This test keeps those copies in
-step with the single source of truth in sql/ (the tables with whitespace normalized, the
-labs character for character), the labs' statements behind deploy_labs, the statements
-chained in the order they are created in, and the Real-Time Context Engine on
+output tables) and of the labs' seventeen statements (D-069, and section 6's five, D-070).
+This test keeps those copies in step with the single source of truth in sql/ (the tables
+with whitespace normalized, the labs character for character, apart from lab 6.2's
+endpoint, which is patch_agent_url), the labs' statements behind deploy_labs, the
+statements chained in the order they are created in, and the Real-Time Context Engine on
 patch_decisions once its table exists (D-070)."""
 
 import re
@@ -11,6 +12,8 @@ import textwrap
 from pathlib import Path
 
 import pytest
+
+from scripts.patchagent.app import PLACEHOLDER
 
 ROOT = Path(__file__).resolve().parents[1]
 STATEMENTS_TF = ROOT / "platform-team/modules/developer/statements.tf"
@@ -33,7 +36,9 @@ COPIED_TABLES = (
     ("patch_decisions", "sql/sink_patch_decisions.sql"),
 )
 
-# (resource, the sql/ file its statement is copied from), in lab order (D-069).
+# (resource, the sql/ file its statement is copied from), in lab order (D-069). Lab 6.2's
+# file holds two statements, the connection and then the tool, so it is listed twice, in the
+# file's order (D-070).
 COPIED_LAB_STATEMENTS = (
     ("insert_service_error_rate", "sql/2.2_service_error_rate.sql"),
     ("insert_service_health", "sql/2.5_service_health.sql"),
@@ -47,7 +52,17 @@ COPIED_LAB_STATEMENTS = (
     ("insert_ticket_classifier", "sql/5.2_insert_ticket_classifier.sql"),
     ("create_ticket_responder", "sql/5.3_ticket_responder.sql"),
     ("insert_ticket_responder", "sql/5.3_insert_ticket_responder.sql"),
+    ("insert_critical_cves", "sql/6.1_critical_cves.sql"),  # D-070
+    ("create_patch_agent_connection", "sql/6.2_patch_agent_tool.sql"),
+    ("create_patch_agent_tool", "sql/6.2_patch_agent_tool.sql"),
+    ("create_security_agent", "sql/6.3_security_agent.sql"),
+    ("insert_security_agent", "sql/6.4_insert_security_agent.sql"),
 )
+
+# The one place a copy differs from its file (D-070): lab 6.2's endpoint placeholder, which
+# patch-agent fills in when it prints the file, is the root variable patch_agent_url here.
+PATCH_AGENT_URL = "${var.patch_agent_url}"
+SUBSTITUTIONS = {"create_patch_agent_connection": (PLACEHOLDER, PATCH_AGENT_URL)}
 
 _HEREDOC = re.compile(r"<<-(\w+)\n(.*?)\n\s*\1$", re.DOTALL | re.MULTILINE)
 _CREATE_TABLE = re.compile(r"CREATE TABLE (?:IF NOT EXISTS )?`(\w+)`")
@@ -125,13 +140,36 @@ def _resource_bodies() -> dict[str, str]:
     return _bodies("confluent_flink_statement")
 
 
-def _lab_statement_from_sql(path: Path) -> str:
-    """The statement in a lab's sql/ file: from its first line (INSERT INTO or CREATE AGENT,
-    after the leading -- comments) to the end of the file."""
+_LAB_STATEMENT_START = re.compile(r"^(?:INSERT INTO|CREATE AGENT|CREATE CONNECTION|CREATE TOOL) ", re.MULTILINE)
+
+
+def _lab_statements_from_sql(path: Path) -> list[str]:
+    """The statements in a lab's sql/ file, in order: each from its first line (INSERT INTO,
+    CREATE AGENT, CREATE CONNECTION or CREATE TOOL, after the leading -- comments) to the
+    next one's, or to the end of the file, without the blank lines between them."""
     text = path.read_text()
-    match = re.search(r"^(?:INSERT INTO|CREATE AGENT) ", text, re.MULTILINE)
-    assert match, f"no INSERT INTO or CREATE AGENT statement in {path.name}"
-    return text[match.start() :]
+    starts = [m.start() for m in _LAB_STATEMENT_START.finditer(text)]
+    assert starts, f"no INSERT INTO, CREATE AGENT, CREATE CONNECTION or CREATE TOOL statement in {path.name}"
+    ends = [*starts[1:], len(text)]
+    return [text[start:end].rstrip("\n") + "\n" for start, end in zip(starts, ends, strict=True)]
+
+
+def _copied_statement(resource: str, sql_path: str) -> str:
+    """What the heredoc of this resource must hold: its statement in the sql/ file (the
+    first, or for a file listed twice, the one in the same place), with the substitution."""
+    same_file = [r for r, p in COPIED_LAB_STATEMENTS if p == sql_path]
+    statement = _lab_statements_from_sql(ROOT / sql_path)[same_file.index(resource)]
+    if resource in SUBSTITUTIONS:
+        old, new = SUBSTITUTIONS[resource]
+        statement = statement.replace(old, new)
+    return statement
+
+
+def _lab_heredoc(resource: str) -> str:
+    body = _resource_bodies().get(resource)
+    assert body, f'no resource "confluent_flink_statement" "{resource}" in {STATEMENTS_TF.relative_to(ROOT)}'
+    [(_, heredoc)] = _HEREDOC.findall(body)
+    return textwrap.dedent(heredoc + "\n")
 
 
 @pytest.mark.parametrize(("resource", "sql_path"), COPIED_LAB_STATEMENTS, ids=[r for r, _ in COPIED_LAB_STATEMENTS])
@@ -139,13 +177,42 @@ def test_each_lab_statement_is_an_exact_copy_of_its_sql_file(resource, sql_path)
     """Exact, not normalized: the agents' prompts are multi-line strings, so a changed line
     break or indent would change what the model reads. An indented heredoc (<<-) drops the
     smallest indent of its non-blank lines, as textwrap.dedent does."""
-    body = _resource_bodies().get(resource)
-    assert body, f'no resource "confluent_flink_statement" "{resource}" in {STATEMENTS_TF.relative_to(ROOT)}'
-    [(_, heredoc)] = _HEREDOC.findall(body)
-    assert textwrap.dedent(heredoc + "\n") == _lab_statement_from_sql(ROOT / sql_path), (
+    assert _lab_heredoc(resource) == _copied_statement(resource, sql_path), (
         f"{resource} in {STATEMENTS_TF.relative_to(ROOT)} has drifted from {sql_path}. Copy the "
         f"statement from {sql_path} verbatim, from its first line, indented by four spaces."
     )
+
+
+def test_every_statement_of_a_copied_lab_file_is_copied():
+    """D-070: lab 6.2 holds two statements, so it is two heredocs, the connection and then
+    the tool. Every other file holds one."""
+    for sql_path in dict.fromkeys(p for _, p in COPIED_LAB_STATEMENTS):
+        copies = [r for r, p in COPIED_LAB_STATEMENTS if p == sql_path]
+        assert len(_lab_statements_from_sql(ROOT / sql_path)) == len(copies), sql_path
+    statements = _lab_statements_from_sql(ROOT / "sql/6.2_patch_agent_tool.sql")
+    assert [s.split("\n", 1)[0] for s in statements] == [
+        "CREATE CONNECTION `patch_agent_connection`",
+        "CREATE TOOL `patch_agent_tool`",
+    ]
+
+
+def test_the_patch_agent_url_is_lab_6_2s_endpoint():
+    """D-070, spec decision 30: the connection's endpoint is the root variable patch_agent_url
+    in place of 6.2's placeholder, which appears once in the file and nowhere in Terraform."""
+    sql = (ROOT / "sql/6.2_patch_agent_tool.sql").read_text()
+    assert sql.count(PLACEHOLDER) == 1
+    assert f"'endpoint' = '{PLACEHOLDER}'" in sql
+    assert f"'endpoint' = '{PATCH_AGENT_URL}'" in _lab_heredoc("create_patch_agent_connection")
+    assert PLACEHOLDER not in STATEMENTS_TF.read_text()
+
+
+@pytest.mark.parametrize("sql_path", sorted({p for _, p in COPIED_LAB_STATEMENTS}))
+def test_no_copied_lab_file_holds_a_terraform_template_sequence(sql_path):
+    """A heredoc reads ${ and %{ as Terraform templates, so a copy holding one would send
+    Flink something other than the file, though the copy test compares the text. The
+    connection's endpoint is the one template, and it comes from SUBSTITUTIONS."""
+    text = (ROOT / sql_path).read_text()
+    assert "${" not in text and "%{" not in text
 
 
 @pytest.mark.parametrize("resource", [r for r, _ in COPIED_LAB_STATEMENTS])
@@ -163,7 +230,7 @@ def test_the_statements_run_one_after_another_sources_then_outputs_then_the_mode
     """D-037: one chain, each statement waiting for the one before. D-068: the sources first
     (D-070's two CVE sources after the tickets'), then the output tables in the order the labs
     fill them (D-070's two after the tickets'), and the model. D-069: then the labs'
-    statements, in lab order."""
+    statements, in lab order, section 6's five after 5.3's INSERT (D-070)."""
     bodies = _resource_bodies()
     after = {}
     for name, body in bodies.items():

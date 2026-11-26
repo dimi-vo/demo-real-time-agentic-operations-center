@@ -303,27 +303,38 @@ gone, but their Global key keeps any other roles they hold — have them delete 
 ## A demo environment
 
 To show the finished pipeline without typing the labs, build a demo environment where the
-labs' 12 statements are already running:
+labs' 17 statements are already running:
 - the `INSERT`s of labs 2.2 and 2.5;
-- the four agents of 4.2, 5.2 and 5.3;
+- the five agents of 4.2, 5.2, 5.3 and 6.3;
 - the three agent legs of 4.3;
-- the `INSERT`s of 5.1, 5.2 and 5.3.
+- the `INSERT`s of 5.1, 5.2, 5.3, 6.1 and 6.4;
+- lab 6.2's connection to the presenter's patch agent, and its tool.
 
-`deploy_labs = true` adds them, copied from the repository's `sql/` files (D-069).
+`deploy_labs = true` adds them, copied from the repository's `sql/` files (D-069). The one
+difference is lab 6.2's endpoint: `patch_agent_url`, the URL of the tunnel in front of the
+presenter's `uv run patch-agent` (D-070). A plan with `deploy_labs` and no `patch_agent_url`
+fails. The connection's username and password, `workshop`, are in its SQL text, as in the
+lab, so the state and the Console show them: `patch-agent` checks neither.
 
 **Never in the workshop's apply.** `deploy_labs` covers every environment in the apply, and
 attendees write these statements themselves. So the demo gets its own state, with one email:
 a `demo` workspace in this folder, with its own variables file.
 
-1. Create `demo.tfvars` next to `terraform.tfvars` (gitignored, like it). The key and secret
-   still come from `terraform.tfvars`.
+1. Start the patch agent and its tunnel on the presenter's laptop: `uv run patch-agent
+   --public-url <tunnel URL>`, as in lab 6.2. Keep both running while `ops-sim` runs: Flink
+   fetches the patch agent's card on every call to the security agent, so without them every
+   critical finding's decision fails, `DISMISS` ones included.
+2. Create `demo.tfvars` next to `terraform.tfvars` (gitignored, like it). The key and secret
+   still come from `terraform.tfvars`. `patch_agent_url` is the tunnel's URL, with its
+   scheme and no trailing slash.
 
     ```hcl
     developer_emails = ["presenter@example.com"]
     deploy_labs      = true
+    patch_agent_url  = "https://example.trycloudflare.com"
     ```
 
-2. Apply it in the `demo` workspace:
+3. Apply it in the `demo` workspace:
 
     ```bash
     terraform workspace new demo      # the first time; afterwards: terraform workspace select demo
@@ -333,61 +344,72 @@ a `demo` workspace in this folder, with its own variables file.
     terraform workspace select default
     ```
 
-    The plan adds **29**: the 17 of [step 7](#7-create-the-instructors-environments), then
-    one Flink statement for each of the labs' statements. In the `demo` workspace, always
-    pass `-var-file=demo.tfvars`. Without it, the plan reads the workshop's emails with
-    `deploy_labs` off, so it would tear the demo down and build everyone's stacks in the
-    demo's state. Run `terraform workspace show` before every plan.
+    The plan adds **39**: a developer's 22 resources (the list in
+    [step 7](#7-create-the-instructors-environments), with the four tables of section 6 and
+    `patch_decisions`' Real-Time Context Engine topic), then one Flink statement for each of
+    the labs' 17 statements. In the `demo` workspace, always pass `-var-file=demo.tfvars`.
+    Without it, the plan reads the workshop's emails with `deploy_labs` off, so it would tear
+    the demo down and build everyone's stacks in the demo's state. Run `terraform workspace
+    show` before every plan.
 
-3. The presenter runs `uv run deploy`, `uv run ops-sim` and `uv run ops-wall`, as in the
+4. The presenter runs `uv run deploy`, `uv run ops-sim` and `uv run ops-wall`, as in the
    walkthrough. If they also have a workshop environment, `uv run deploy` asks which one is
    theirs: pick the demo's, which `terraform output -raw handout` lists in the `demo`
    workspace.
 
-`confluent flink statement list` then shows the eight `INSERT`s `RUNNING` and the other 15
+`confluent flink statement list` then shows the ten `INSERT`s `RUNNING` and the other 22
 statements `COMPLETED`.
 
 **Only on empty topics.** Turn `deploy_labs` on only in the apply that creates the demo
 environment, or right after `uv run reset`, and never where `ops-sim` has already written
 data. The order the statements start in matters:
-- 2.2, 2.5 and 5.1 replay their sources from the earliest offset;
+- 2.2, 2.5, 5.1 and 6.1 replay their sources from the earliest offset;
 - the agents' `INSERT`s read from the latest offset;
 - Terraform starts each statement once the one before is running, not once it has caught up.
 
-Over existing data, the agents would call the model for every replayed anomaly and P1.
+Over existing data, the agents would call the model for every replayed anomaly, P1 and
+critical finding, and the security agent would call the patch agent for the ones it patches.
 
 ### Starting the demo over
 
-1. Stop `ops-sim`, then run `uv run reset`. It stops every statement, drops the four agents
-   and empties all ten topics.
-2. Re-apply in the `demo` workspace, with the four agents replaced. Terraform still holds
-   their completed `CREATE AGENT` statements, so it wouldn't run them again otherwise. The
-   eight `INSERT`s are gone, so the apply starts them again by itself.
+1. Stop `ops-sim`, then run `uv run reset`. It stops every statement, drops the five agents,
+   then lab 6.2's tool and connection, and empties all fourteen topics.
+2. Check that the patch agent and its tunnel are still running. If the tunnel's URL has
+   changed, put the new one in `demo.tfvars` as `patch_agent_url`.
+3. Re-apply in the `demo` workspace, with the five agents, the connection and the tool
+   replaced. Terraform still holds their completed `CREATE` statements, so it wouldn't run
+   them again otherwise. The ten `INSERT`s are gone, so the apply starts them again by
+   itself.
 
     ```bash
     terraform workspace select demo
     M='module.developer["presenter@example.com"].confluent_flink_statement'
     terraform plan -var-file=demo.tfvars -out=terraform.tfplan \
       -replace="$M.create_release_agent[0]" -replace="$M.create_capacity_agent[0]" \
-      -replace="$M.create_ticket_classifier[0]" -replace="$M.create_ticket_responder[0]"
+      -replace="$M.create_ticket_classifier[0]" -replace="$M.create_ticket_responder[0]" \
+      -replace="$M.create_patch_agent_connection[0]" -replace="$M.create_patch_agent_tool[0]" \
+      -replace="$M.create_security_agent[0]"
     terraform apply terraform.tfplan
     rm terraform.tfplan
     terraform workspace select default
     ```
 
-    The plan says `12 to add, 0 to change, 4 to destroy`.
-3. Start `ops-sim` again.
+    The plan says `17 to add, 0 to change, 7 to destroy`.
+4. Start `ops-sim` again.
 
 Don't use `uv run reset-health` and an apply instead: it empties only the output topics, so
 the sources' history would replay through the agents.
 
-The same steps bring in a lab's changed SQL. A plain apply would replace the changed
-statements in place: a replaced `INSERT` writes its output topic's rows a second time, and a
-replaced `CREATE AGENT` fails while its agent exists.
+The same steps bring in a lab's changed SQL, or a new tunnel URL. A plain apply would replace
+the changed statements in place: a replaced `INSERT` writes its output topic's rows a second
+time, and a replaced `CREATE AGENT`, `CREATE TOOL` or `CREATE CONNECTION` fails while its
+agent, tool or connection exists. A new `patch_agent_url` changes the connection's statement,
+and `ALTER CONNECTION` can't change an endpoint.
 
 **Tearing it down:** `terraform destroy -var-file=demo.tfvars` in the `demo` workspace, then
 `terraform workspace select default` and `terraform workspace delete demo`. Until then, the
-demo's statements keep running, and its agents call the model while `ops-sim` runs.
+demo's statements keep running, and its agents call the model, and the security agent the
+patch agent, while `ops-sim` runs.
 
 <details>
 <summary>Reference</summary>
@@ -417,10 +439,10 @@ or use an encrypted backend (add a `backend` block before the first `init`).
 | File | Purpose |
 |---|---|
 | `versions.tf` / `providers.tf` | Version pins; the Confluent provider configured with your Global key |
-| `variables.tf` | Key/secret, `developer_emails` + validations, `region`, `flink_max_cfu`, `csp_hosted_model`, `deploy_labs` |
+| `variables.tf` | Key/secret, `developer_emails` + validations, `region`, `flink_max_cfu`, `csp_hosted_model`, `deploy_labs`, `patch_agent_url` |
 | `main.tf` | User + key-owner lookups, name suffixes, one `modules/developer` per email |
 | `outputs.tf` | The `handout` table and the `validation` links |
-| `modules/developer/` | One developer's stack: environment, binding, cluster, pool, the five source tables, the five output tables and the model (`statements.tf`), and with `deploy_labs` the labs' 12 statements |
+| `modules/developer/` | One developer's stack: environment, binding, cluster, pool, the five source tables, the five output tables and the model (`statements.tf`), and with `deploy_labs` the labs' 17 statements |
 | `tests/` | Offline `terraform test` checks (every provider mocked) |
 
 </details>

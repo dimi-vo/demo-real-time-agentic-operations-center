@@ -73,13 +73,38 @@ run "handout_lists_every_developer" {
 # apply to one email, and the workshop's apply leaves it off.
 run "deploy_labs_reaches_every_environment" {
   variables {
-    deploy_labs = true
+    deploy_labs     = true
+    patch_agent_url = "https://patch-agent.example.com"
   }
 
   assert {
-    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 27])
-    error_message = "with deploy_labs, every developer's stack must run the labs' 12 statements"
+    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 32])
+    error_message = "with deploy_labs, every developer's stack must run the labs' 17 statements"
   }
+}
+
+# patch_agent_url is lab 6.2's endpoint (D-070): a URL with its scheme, which Flink adds the
+# agent card's path to, so without a trailing slash.
+run "patch_agent_url_needs_its_scheme" {
+  command = plan
+
+  variables {
+    deploy_labs     = true
+    patch_agent_url = "patch-agent.example.com"
+  }
+
+  expect_failures = [var.patch_agent_url]
+}
+
+run "patch_agent_url_has_no_trailing_slash" {
+  command = plan
+
+  variables {
+    deploy_labs     = true
+    patch_agent_url = "https://patch-agent.example.com/"
+  }
+
+  expect_failures = [var.patch_agent_url]
 }
 
 run "the_workshop_apply_runs_no_lab_statement" {

@@ -3358,6 +3358,13 @@ the switch, all twelve with it, in every environment).
 Amends D-051 (its open question) and D-068 ("Terraform runs no INSERT", now true only
 without `deploy_labs`).
 
+**Amended by D-070.** `deploy_labs` starts 17 statements: section 6's five follow 5.3's
+`INSERT`, in lab order (6.1, lab 6.2's connection and then its tool, 6.3's agent, 6.4). The
+connection's endpoint is a new root variable, `patch_agent_url`, in place of 6.2's placeholder,
+the one place a copy differs from its file; a plan with `deploy_labs` and no URL fails. A demo
+stack has 39 resources, and starting over replaces seven statements: the five agents, the
+connection and the tool.
+
 ### D-070 · DECISION · Code security incidents: a Streaming Agent that calls an external agent over A2A
 **What.** The workshop shows Streaming Agents that only reason over their input. It should
 also show one that calls an agent running somewhere else and waits for its answer: the
@@ -3699,3 +3706,45 @@ call whose answer says `PATCH`; the input built from each of 6.3's examples is t
 null in any text column still gives an input; each of 6.3's example answers parses back to its
 action and reason, the `PATCH` one to `PATCHED` with its request's commit and its reply's times;
 the header). `platform-team/` is unchanged: section 6 joins `deploy_labs` in issue 08.
+
+Issue 08 (section 6 behind `deploy_labs`): `platform-team/modules/developer/statements.tf` (five
+statements with `count = var.deploy_labs ? 1 : 0`, on the chain after 5.3's `INSERT` in lab
+order: `insert_critical_cves`, `create_patch_agent_connection`, `create_patch_agent_tool`,
+`create_security_agent` and `insert_security_agent`, each heredoc generated from its file,
+lab 6.2's being two, the connection and then the tool; the connection's endpoint is
+`${var.patch_agent_url}` in place of `<your patch-agent URL>`, the one difference, and a comment
+says the password is in the SQL text as in the file, so in the state and the Console, since
+Flink requires one and patch-agent checks neither, and that a new URL replaces the statement,
+which fails while the connection exists; a `precondition` on the connection fails the plan when
+the URL is empty, rather than a validation on the variable, which could read `deploy_labs` only
+from Terraform 1.9, against the root's `>= 1.3.0`; the header's counts, 32 statements and 39
+resources with `deploy_labs`; the labs' comment: seventeen, 6.1 among the replays, 6.4 among
+the latest-offset reads, and `-replace` on the five agents, the connection and the tool), its
+`variables.tf` (`patch_agent_url`, no default, like the module's other inputs), `outputs.tf`
+(the five in `lab_statements`), the root `variables.tf` (`patch_agent_url`, a string defaulting
+to `""`, with a validation: empty, or a URL with an `http` or `https` scheme, no space or
+apostrophe, since it goes into a SQL string, and no trailing slash, since Flink adds the card's
+path to it, where patch-agent strips one; `deploy_labs`' description, 17 statements and the
+URL; `flink_max_cfu`'s description names 6.1 and 6.4 as two more long-running statements, not
+yet checked against 10), the root `main.tf` (passes it), `terraform.tfvars.example` (beside
+`deploy_labs`), `platform-team/README.md` ("A demo environment": the 17 statements; the URL, the
+plan failing without it and the password in the SQL text; a first step, starting `uv run
+patch-agent` and its tunnel and keeping both running while `ops-sim` runs, since Flink fetches
+the card on every call, issue 02; `patch_agent_url` in `demo.tfvars`; 39 to add; ten `INSERT`s
+running and 22 statements completed; 6.1 among the replays; starting over: `reset` drops five
+agents, the tool and the connection and empties fourteen topics, the URL checked, `-replace` on
+seven statements, `17 to add, 0 to change, 7 to destroy`; a new tunnel URL takes the same
+steps; and the Files table). Tests: `tests/test_platform_team_sync.py` (the five in
+`COPIED_LAB_STATEMENTS`, 6.2 twice; the extractor splits a file at `INSERT INTO`, `CREATE
+AGENT`, `CREATE CONNECTION` and `CREATE TOOL` and copies a file's statements in its order; each
+copy character for character, with `PLACEHOLDER`, imported from `scripts/patchagent/app.py`,
+replaced by `${var.patch_agent_url}` for the connection alone; every statement of a copied file
+copied; the placeholder once in 6.2, as its endpoint, and in no heredoc;
+no copied file holding `${` or `%{`, which a heredoc would read as a template; the five behind
+the switch; the chain), `platform-team/tests/developer_module.tftest.hcl` (none of the
+seventeen without the switch; with it and a URL, 32 statements, the ten `INSERT`s' targets, the
+five agents on `llm_textgen_model`, the security agent's `USING TOOLS`, the connection's
+endpoint the URL with no placeholder left, the tool on the connection; with it and no URL, the
+plan fails on the connection), `environments.tftest.hcl` (32 statements in every environment
+with the switch and a URL; a URL without its scheme or with a trailing slash fails the plan on
+the variable). Amends D-069 (its "Amended by D-070" paragraph).

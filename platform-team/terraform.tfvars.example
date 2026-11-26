@@ -23,5 +23,9 @@ developer_emails = [
 # csp_hosted_model = "anthropic.claude-sonnet-4-6"
 
 # Only for a demo environment, in its own workspace and never in the workshop's
-# apply: also starts the labs' 12 statements (README, "A demo environment").
+# apply: also starts the labs' 17 statements (README, "A demo environment").
+# deploy_labs requires patch_agent_url: the URL of the tunnel in front of the
+# presenter's `uv run patch-agent`, with its scheme and no trailing slash. It is
+# lab 6.2's connection endpoint.
 # deploy_labs      = false
+# patch_agent_url  = "https://example.trycloudflare.com"

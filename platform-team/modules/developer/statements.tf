@@ -6,8 +6,8 @@
 # and section 6's critical_cves and patch_decisions, D-070), and the model: 15 statements.
 # patch_decisions also gets its RTCE topic (D-070). With that, main.tf's five resources and
 # the root's name suffix, that is 22 resources per developer. A demo environment
-# (deploy_labs = true, D-069) also gets the labs' 12 statements, at the end of this file: 27
-# statements, 34 resources.
+# (deploy_labs = true, D-069) also gets the labs' 17 statements, at the end of this file: 32
+# statements, 39 resources.
 # Each statement is signed with the Global key and runs as that key's owner (principal_id).
 #
 # The DDL is all IF NOT EXISTS, so re-running apply is a no-op for anything already
@@ -701,24 +701,26 @@ resource "confluent_flink_statement" "llm_textgen_model" {
   depends_on = [confluent_flink_statement.create_patch_decisions_table]
 }
 
-# The labs' twelve statements, for a demo environment only (D-069): off unless deploy_labs is
-# true, because attendees write these statements themselves in the workshop. Each is copied
-# from its sql/ file, from the statement's first line to its end, and
-# tests/test_platform_team_sync.py checks the copies character for character.
+# The labs' seventeen statements, for a demo environment only (D-069): off unless deploy_labs
+# is true, because attendees write these statements themselves in the workshop. Each is copied
+# from its sql/ file, from the statement's first line to its end (lab 6.2's file holds two,
+# the connection and the tool, D-070), and tests/test_platform_team_sync.py checks the copies
+# character for character. The one difference is lab 6.2's endpoint, patch_agent_url.
 #
 # Turn deploy_labs on only while the environment's topics are empty: in the apply that
-# creates the environment, or right after `uv run reset`. The agent INSERTs (4.3, 5.2 and
-# 5.3) read from the latest offset, while 2.2, 2.5 and 5.1 replay their sources, and
+# creates the environment, or right after `uv run reset`. The agent INSERTs (4.3, 5.2, 5.3
+# and 6.4) read from the latest offset, while 2.2, 2.5, 5.1 and 6.1 replay their sources, and
 # depends_on waits only until the statement before is RUNNING, not until it has caught up.
 # Started over data that is already there, the agents would call the model for every
-# replayed anomaly and P1.
+# replayed anomaly, P1 and critical finding.
 #
 # Every statement here is replaced when its SQL changes (the provider's statement argument
 # forces a new resource): a replaced INSERT replays into its output topic, and a replaced
-# CREATE AGENT fails while the agent exists, since an agent, like a table, outlives the
-# statement that created it. CREATE AGENT has no IF NOT EXISTS here, as in sql/. So after
-# `uv run reset`, which stops the INSERTs and drops the agents, re-apply with -replace on the
-# four create_*_agent statements: platform-team/README.md, "A demo environment".
+# CREATE AGENT, CREATE TOOL or CREATE CONNECTION fails while its object exists, since an
+# agent, like a table, outlives the statement that created it. They have no IF NOT EXISTS
+# here, as in sql/. So after `uv run reset`, which stops the INSERTs and drops the agents, the
+# tool and the connection, re-apply with -replace on the five create_*_agent statements and
+# lab 6.2's connection and tool: platform-team/README.md, "A demo environment".
 
 # Lab 2.2 (sql/2.2_service_error_rate.sql): web-gateway's error-rate rule, written to service_error_rate.
 resource "confluent_flink_statement" "insert_service_error_rate" {
@@ -1486,4 +1488,284 @@ resource "confluent_flink_statement" "insert_ticket_responder" {
   }
 
   depends_on = [confluent_flink_statement.create_ticket_responder]
+}
+
+# Lab 6.1 (sql/6.1_critical_cves.sql): the critical findings, copied to critical_cves.
+resource "confluent_flink_statement" "insert_critical_cves" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    INSERT INTO `critical_cves`
+    SELECT `event_time`, `finding_id`, `repository`, `cve_id`, `package`, `installed_version`,
+      `fixed_version`, `cvss_score`, `finding`
+    FROM `cve_scans`
+    WHERE `cvss_score` >= 9.0;
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.insert_ticket_responder]
+}
+
+# Lab 6.2 (sql/6.2_patch_agent_tool.sql), its first statement: the connection to the presenter's
+# patch-agent. Its endpoint is patch_agent_url, the tunnel's URL, in place of the file's
+# placeholder: the one place a copy differs from its file. The password is in the SQL text, as
+# in the file, and so in the state and the Console: Flink requires a username and a password
+# on an A2A connection, and patch-agent checks neither.
+# A new patch_agent_url changes the statement, so Terraform replaces it, and CREATE CONNECTION
+# fails while the connection exists (ALTER CONNECTION changes only credentials): start the demo
+# over with the new URL (README, "A demo environment").
+resource "confluent_flink_statement" "create_patch_agent_connection" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE CONNECTION `patch_agent_connection`
+    WITH (
+      'type' = 'a2a',
+      'endpoint' = '${var.patch_agent_url}',
+      'username' = 'workshop',
+      'password' = 'workshop'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  # A precondition, not a validation on patch_agent_url: a validation can read deploy_labs
+  # only from Terraform 1.9.
+  lifecycle {
+    precondition {
+      condition     = var.patch_agent_url != ""
+      error_message = "deploy_labs needs patch_agent_url: the URL of the tunnel in front of the presenter's `uv run patch-agent`, which lab 6.2's connection points at (README, \"A demo environment\")."
+    }
+  }
+
+  depends_on = [confluent_flink_statement.insert_critical_cves]
+}
+
+# Lab 6.2 (sql/6.2_patch_agent_tool.sql), its second statement: the patch agent as a tool.
+resource "confluent_flink_statement" "create_patch_agent_tool" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE TOOL `patch_agent_tool`
+    USING CONNECTION `patch_agent_connection`
+    WITH (
+      'type' = 'a2a',
+      'agent_card_path' = '/.well-known/agent-card.json',
+      'request_timeout' = '30',
+      'max_retries' = '0'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_patch_agent_connection]
+}
+
+# Lab 6.3 (sql/6.3_security_agent.sql): the security agent, which calls the tool on PATCH.
+resource "confluent_flink_statement" "create_security_agent" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE AGENT `security_agent`
+    USING MODEL `llm_textgen_model`
+    USING PROMPT 'OUTPUT FORMAT — respond with exactly these 3 labeled lines, in this order. Plain text only: no markdown, no bold, no bullet points, no blank lines, nothing before or after.
+
+    Action: [PATCH | DISMISS]
+    Reason: [one or two sentences]
+    Patch: [the answer from patch_agent_tool, copied exactly | N/A]
+
+    Correct PATCH example:
+    FINDING SCAN-000142 in payments
+    CVE: CVE-2026-46471 (CVSS 9.8)
+    Package: jsonwebtoken 8.5.1, fixed in 9.0.0
+    Scanner said: The deployed payments service loads jsonwebtoken 8.5.1 at runtime, and the scanner traced a call path from a public endpoint to jwt.verify, which accepts tokens signed with the none algorithm.
+    You call patch_agent_tool with: PATCH payments CVE-2026-46471 jsonwebtoken 8.5.1 -> 9.0.0
+    patch_agent_tool replies: Patched CVE-2026-46471 in payments: bumped jsonwebtoken 8.5.1 → 9.0.0 in commit e73f47b, started 2026-11-20T09:14:02.480Z, finished 2026-11-20T09:14:08.915Z
+    Answer:
+    Action: PATCH
+    Reason: jsonwebtoken ships in the deployed payments service, and the scanner traced a call path from a public endpoint to the vulnerable jwt.verify, so the flaw can be reached in production.
+    Patch: Patched CVE-2026-46471 in payments: bumped jsonwebtoken 8.5.1 → 9.0.0 in commit e73f47b, started 2026-11-20T09:14:02.480Z, finished 2026-11-20T09:14:08.915Z
+
+    Correct DISMISS example:
+    FINDING SCAN-000157 in checkout
+    CVE: CVE-2026-42817 (CVSS 9.1)
+    Package: jackson-databind 2.9.10.1, fixed in 2.9.10.8
+    Scanner said: jackson-databind 2.9.10.1 comes into checkout only as a dev dependency of its unit tests, and the production build leaves it out.
+    Answer:
+    Action: DISMISS
+    Reason: jackson-databind is only a dev dependency of the checkout unit tests, and the production build leaves it out, so the vulnerable code never runs in production.
+    Patch: N/A
+
+    Correct DISMISS example:
+    FINDING SCAN-000163 in storefront-legacy
+    CVE: CVE-2026-43390 (CVSS 9.4)
+    Package: lodash 4.17.15, fixed in 4.17.21
+    Scanner said: storefront-legacy is archived and read-only, and nothing has been deployed from it since 2024, but its lock file still pins lodash 4.17.15.
+    Answer:
+    Action: DISMISS
+    Reason: storefront-legacy is archived and nothing has been deployed from it since 2024, so the lodash it pins runs nowhere.
+    Patch: N/A
+
+    Correct DISMISS example:
+    FINDING SCAN-000171 in web-gateway
+    CVE: CVE-2026-46471 (CVSS 9.6)
+    Package: jsonwebtoken 8.5.1, fixed in 9.0.0
+    Scanner said: web-gateway has jsonwebtoken 8.5.1 as a runtime dependency in production, but the scanner traced no code path that reaches jwt.verify, the function that accepts tokens signed with the none algorithm.
+    Answer:
+    Action: DISMISS
+    Reason: jsonwebtoken ships with web-gateway in production, but the scanner traced no code path that reaches the vulnerable jwt.verify, so the flaw cannot be triggered. The critical score and the flaw alone do not decide it.
+    Patch: N/A
+
+    ---
+
+    You are the application security engineer for River Shop, an online store. A dependency scanner reports known vulnerabilities (CVEs) in the code repositories of the shop. Each input below is one finding: its id and repository, the CVE and its CVSS score, the vulnerable package with its installed version and the version that fixes it, and what the scanner said about where the package sits. Decide whether the finding is a real risk, and when it is, have the patch agent fix it.
+
+    DECISION FRAMEWORK — apply the rules in this order and stop at the first one that matches:
+    1. PATCH — both of these hold: the vulnerable package ships in the runtime dependencies of a deployed service, and the scanner says the vulnerable code is used (it found calls to it, or a code path that reaches it).
+    2. DISMISS — any of these holds: the package is only a development, test or build dependency; the repository is archived or not deployed; the scanner finds no call to the vulnerable code.
+    The CVSS score is always critical here. It never decides on its own. Decide on what the scanner said.
+
+    PATCH AGENT — patch_agent_tool is an external agent that patches the package and answers with its commit. Use it only for PATCH:
+    - Call patch_agent_tool once, with exactly this line and nothing else, filled in from the finding: PATCH <repository> <cve_id> <package> <installed_version> -> <fixed_version>
+    - Wait for its answer, then copy that answer exactly into the Patch line: every word, number and symbol, on one line.
+    - If the call fails, write Patch: FAILED and a few words on why. Never write a commit the tool did not return.
+    - For DISMISS, never call the tool, and write Patch: N/A.
+
+    STRICT VALUES — the Action line must be exactly PATCH or DISMISS, with no extra words. Use only what the finding says; never invent a repository, a package, a version or a commit.'
+    USING TOOLS `patch_agent_tool`
+    WITH (
+      'handle_exception' = 'continue',
+      'max_consecutive_failures' = '3',
+      'max_iterations' = '3',
+      'request_timeout' = '60'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_patch_agent_tool]
+}
+
+# Lab 6.4 (sql/6.4_insert_security_agent.sql): every critical finding to the security agent, its
+# decision to patch_decisions.
+resource "confluent_flink_statement" "insert_security_agent" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    INSERT INTO `patch_decisions`
+    SELECT
+      f.`event_time`, f.`finding_id`, f.`repository`, f.`cve_id`, f.`cvss_score`,
+      CASE
+        WHEN a.`agent_status` = 'SUCCESS'
+          AND UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
+              IN ('PATCH', 'DISMISS')
+          THEN UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
+        ELSE 'INVALID'
+      END,
+      TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Reason:\*{0,2}\s*([^\n]+)', 1)),
+      CASE
+        WHEN a.`agent_status` = 'SUCCESS'
+          AND UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1))) = 'PATCH'
+          AND REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Patch:\*{0,2}[^\n]*?in commit ([0-9a-f]{7})\b', 1) IS NOT NULL
+          THEN 'PATCHED'
+        WHEN a.`agent_status` = 'SUCCESS'
+          AND UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1))) = 'PATCH'
+          THEN 'FAILED'
+        ELSE 'N/A'
+      END,
+      REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Patch:\*{0,2}[^\n]*?in commit ([0-9a-f]{7})\b', 1),
+      TO_TIMESTAMP(
+        REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Patch:\*{0,2}[^\n]*?started (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)', 1),
+        'yyyy-MM-dd''T''HH:mm:ss.SSS''Z'''
+      ),
+      TO_TIMESTAMP(
+        REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Patch:\*{0,2}[^\n]*?finished (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)', 1),
+        'yyyy-MM-dd''T''HH:mm:ss.SSS''Z'''
+      ),
+      a.`agent_response`
+    FROM (
+      SELECT *
+      FROM `critical_cves` /*+ OPTIONS('scan.startup.mode'='latest-offset') */
+    ) f,
+    LATERAL TABLE(AI_RUN_AGENT(
+      'security_agent',
+      CONCAT(
+        'FINDING ', COALESCE(f.`finding_id`, 'N/A'), ' in ', COALESCE(f.`repository`, 'N/A'), '\n',
+        'CVE: ', COALESCE(f.`cve_id`, 'N/A'), ' (CVSS ', CAST(f.`cvss_score` AS STRING), ')\n',
+        'Package: ', COALESCE(f.`package`, 'N/A'), ' ', COALESCE(f.`installed_version`, 'N/A'),
+        ', fixed in ', COALESCE(f.`fixed_version`, 'N/A'), '\n',
+        'Scanner said: ', COALESCE(f.`finding`, 'N/A')
+      )
+    )) AS a(`agent_status`, `agent_response`);
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_security_agent]
 }

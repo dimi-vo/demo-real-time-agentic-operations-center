@@ -11,21 +11,26 @@ output "cluster_id" {
 }
 
 locals {
-  # The labs' statements that exist: all twelve with deploy_labs, none without (D-069).
+  # The labs' statements that exist: all seventeen with deploy_labs, none without (D-069).
   lab_statements = {
     for key, list in {
-      insert_service_error_rate   = confluent_flink_statement.insert_service_error_rate
-      insert_service_health       = confluent_flink_statement.insert_service_health
-      create_release_agent        = confluent_flink_statement.create_release_agent
-      create_capacity_agent       = confluent_flink_statement.create_capacity_agent
-      insert_release_agent_errors = confluent_flink_statement.insert_release_agent_errors
-      insert_release_agent        = confluent_flink_statement.insert_release_agent
-      insert_capacity_agent       = confluent_flink_statement.insert_capacity_agent
-      insert_p1_tickets           = confluent_flink_statement.insert_p1_tickets
-      create_ticket_classifier    = confluent_flink_statement.create_ticket_classifier
-      insert_ticket_classifier    = confluent_flink_statement.insert_ticket_classifier
-      create_ticket_responder     = confluent_flink_statement.create_ticket_responder
-      insert_ticket_responder     = confluent_flink_statement.insert_ticket_responder
+      insert_service_error_rate     = confluent_flink_statement.insert_service_error_rate
+      insert_service_health         = confluent_flink_statement.insert_service_health
+      create_release_agent          = confluent_flink_statement.create_release_agent
+      create_capacity_agent         = confluent_flink_statement.create_capacity_agent
+      insert_release_agent_errors   = confluent_flink_statement.insert_release_agent_errors
+      insert_release_agent          = confluent_flink_statement.insert_release_agent
+      insert_capacity_agent         = confluent_flink_statement.insert_capacity_agent
+      insert_p1_tickets             = confluent_flink_statement.insert_p1_tickets
+      create_ticket_classifier      = confluent_flink_statement.create_ticket_classifier
+      insert_ticket_classifier      = confluent_flink_statement.insert_ticket_classifier
+      create_ticket_responder       = confluent_flink_statement.create_ticket_responder
+      insert_ticket_responder       = confluent_flink_statement.insert_ticket_responder
+      insert_critical_cves          = confluent_flink_statement.insert_critical_cves
+      create_patch_agent_connection = confluent_flink_statement.create_patch_agent_connection
+      create_patch_agent_tool       = confluent_flink_statement.create_patch_agent_tool
+      create_security_agent         = confluent_flink_statement.create_security_agent
+      insert_security_agent         = confluent_flink_statement.insert_security_agent
     } : key => list[0] if length(list) > 0
   }
 }
