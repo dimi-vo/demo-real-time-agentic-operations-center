@@ -77,14 +77,29 @@ run "deploy_labs_reaches_every_environment" {
   }
 
   assert {
-    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 25])
+    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 27])
     error_message = "with deploy_labs, every developer's stack must run the labs' 12 statements"
   }
 }
 
 run "the_workshop_apply_runs_no_lab_statement" {
   assert {
-    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 13])
-    error_message = "by default, every developer's stack must run only the twelve tables and the model"
+    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 15])
+    error_message = "by default, every developer's stack must run only the fourteen tables and the model"
+  }
+}
+
+# Every environment serves patch_decisions over the Real-Time Context Engine (D-070), in its
+# own environment and cluster, with deploy_labs or without.
+run "every_environment_serves_patch_decisions_over_rtce" {
+  assert {
+    condition = alltrue([
+      for m in values(module.developer) : (
+        length(m.rtce_topics) == 1 &&
+        m.rtce_topics.patch_decisions.environment == m.environment_id &&
+        m.rtce_topics.patch_decisions.cluster == m.cluster_id
+      )
+    ])
+    error_message = "every developer's environment must have one RTCE topic, patch_decisions, on its own cluster"
   }
 }

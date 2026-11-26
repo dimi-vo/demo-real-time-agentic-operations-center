@@ -33,6 +33,12 @@ LIGHTNING_QUERIES = {
         "FROM remediation_decisions WHERE trigger = 'LATENCY_HIGH' "
         "ORDER BY window_end DESC LIMIT 1"
     ),
+    # RTCE-enabled by the platform team's Terraform (D-070): the latest patches and their commits.
+    "patch_decisions": (
+        "SELECT event_time, finding_id, repository, cve_id, commit_sha, reason "
+        "FROM patch_decisions WHERE patch_status = 'PATCHED' "
+        "ORDER BY event_time DESC LIMIT 5"
+    ),
 }
 LIGHTNING_QUERY = LIGHTNING_QUERIES["service_health"]
 

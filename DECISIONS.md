@@ -3539,3 +3539,59 @@ in `platform-team/tests/` the counts (13, 25) and a plan run on the two tables' 
 `DISMISS`), and leaving out the finding lines, the banner and the closing summary, the same output
 line for line as the branch's base. The templates wait on the user's approval (issue 03's
 Comments) before issue 06 takes its examples from them.
+
+Issue 04 (`critical_cves`, `patch_decisions`, RTCE, the topic lists, reset, reset-health and
+readiness): `sql/sink_critical_cves.sql` (new; `cve_scans`' nine columns and the WITH block,
+bucket and 5 s watermark of `p1_tickets`, which are `support_tickets`'; the header says lab 6.1
+writes it, lab 6.4 reads it, that a score under 9.0 in it is a filter leak, and that
+read-uncommitted spares the security agent a wait of about a minute per finding, D-063),
+`sql/sink_patch_decisions.sql` (new; the finding's `event_time`, `finding_id`, `repository`,
+`cve_id` and `cvss_score` `DOUBLE`; `action` STRING NOT NULL, `PATCH`, `DISMISS` or `INVALID`,
+and `reason`; `patch_status` STRING NOT NULL, `PATCHED`, `FAILED` or `N/A`, worked out by lab
+6.4 and not the agent, `commit_sha`, and `patch_started_at` and `patch_finished_at`
+`TIMESTAMP(3)`, null unless parsed; `raw_response`; the same options; the header says lab 6.4
+writes it, that Terraform turns RTCE on for it, and that nothing in it says what the finding
+really called for). Terraform: `platform-team/modules/developer/statements.tf` (both statements,
+byte-identical to the SQL, chained after `ticket_triage`, the model's `depends_on` moved to
+`patch_decisions`; a `confluent_rtce_topic.patch_decisions` with the cluster's cloud and region,
+the environment, the cluster, `topic_name` and the description the provider requires, waiting
+for the table's statement and off the chain, since nothing waits for it; the header's counts,
+15 statements and 22 resources per developer, 27 and 34 with `deploy_labs`), its `outputs.tf`
+(both keys in `flink_statements`, and a new `rtce_topics` output, by topic with its environment
+and cluster, since the root's tests can't reach a module's resources), its `main.tf`, the root
+`main.tf` and the root `outputs.tf`'s validation text (fourteen tables), `platform-team/README.md`
+(step 5: `confluent rtce region list` must list the region now, since the apply turns RTCE on;
+the rest of the README's counts are issue 11's). The lists: `SOURCE_TOPICS` in
+`scripts/common/topics.py` gains `cve_scans` and `cve_answer_key`, `OUTPUT_TOPICS`
+`critical_cves` and `patch_decisions`, so `uv run reset` empties all fourteen, `uv run
+reset-health` deletes whatever writes the two new tables (lab 6.1's and 6.4's INSERTs) and
+empties them, and the readiness check of `uv run deploy` checks all fourteen tables;
+`scripts/reset.py` (`LAB_AGENTS` gains `security_agent`; after the five agents, `DROP TOOL IF
+EXISTS patch_agent_tool` and then `DROP CONNECTION IF EXISTS patch_agent_connection`, each
+reported like an agent, a failed one a problem without stopping the rest; the docstring, the
+`--keep-source` help, and the closing lines name the INSERTs of 6.1 and 6.4 and lab 6.2's
+connection and tool beside the agents of 6.3), `scripts/reset_health.py` (the docstring, the
+help and its seven tables, and a fourth next step: 6.1, then 6.4's INSERT once 6.1 has caught
+up, with `uv run patch-agent` and its tunnel started first),
+`scripts/preprovisioned/provision.py` (docstring and comment counts), `scripts/setup_rtce.py`
+(a `patch_decisions` Lightning example, the latest five `PATCHED` decisions with their commits,
+so `--lightning patch_decisions` works). The checks: `sql/checks/remediation_call_rate.sql`
+(section 6's rows: `critical_cves` rows, `patch_decisions` rows, the `PATCH` decisions, one
+patch agent call each, and the `PATCHED` ones) and its README. Tests:
+`tests/test_schema_vs_ddl.py` (both tables' columns in order, `action` and `patch_status` the
+only NOT NULL columns, each naming its three values, the two patch times `TIMESTAMP(3)`,
+`p1_tickets`' tail, and a comment without an apostrophe on every column),
+`tests/test_platform_team_sync.py` (fourteen tables; the chain with the two after
+`ticket_triage`; the RTCE topic on `patch_decisions`, waiting for its table; a resource body
+now ends at the next resource of any type), `tests/test_reset.py` (fourteen topics, the source
+topics being every `*_TOPIC` in `opsgen/kafka_io.py`; the five agents, then the tool, then the
+connection, each with `IF EXISTS`, and how each is reported; a failed agent or tool drop exits
+nonzero after the rest are dropped; the next steps), `tests/test_reset_health.py` (seven
+topics; the matcher on both INSERTs and not on the two CVE sources; both deleted and emptied;
+the seven tables named; the next steps in lab order, with "once 6.1 has caught up"),
+`tests/test_preprovisioned_readiness.py` (fourteen tables; each missing CVE table names the
+platform team), `tests/test_kafka_io_and_rtce.py` (the `patch_decisions` example and its curl),
+and in `platform-team/tests/` the counts (15, 27), a plan run on the two tables' options and NOT
+NULL columns, an apply run on the RTCE topic's environment, cluster, cloud, region and
+description and on `rtce_topics`, and a root run checking every environment has one, on
+`patch_decisions`, in its own environment and cluster.

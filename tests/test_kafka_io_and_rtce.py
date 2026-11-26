@@ -158,3 +158,19 @@ def test_the_decisions_example_answers_the_walkthrough_question():
 def test_lightning_command_can_target_the_decisions_table():
     cmd = lightning_command(_card(), "remediation_decisions")
     assert "remediation_decisions" in cmd and "/query/v1" in cmd
+
+
+def test_the_patch_decisions_example_lists_the_latest_patches_with_their_commits():
+    """D-070: Terraform turns RTCE on for patch_decisions, so it gets an example too: the
+    latest PATCHED decisions, each with its commit, in plain SELECT/WHERE/ORDER BY/LIMIT."""
+    query = LIGHTNING_QUERIES["patch_decisions"]
+    lowered = query.lower()
+    assert lowered.startswith("select ")
+    assert "where patch_status = 'patched'" in lowered
+    assert "commit_sha" in query and "repository" in query and "cve_id" in query
+    assert "order by event_time desc limit " in lowered
+
+
+def test_lightning_command_can_target_patch_decisions():
+    cmd = lightning_command(_card(), "patch_decisions")
+    assert "FROM patch_decisions" in cmd and "/query/v1" in cmd

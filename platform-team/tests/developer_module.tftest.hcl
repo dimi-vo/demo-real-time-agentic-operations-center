@@ -118,14 +118,16 @@ run "statements_signed_as_principal_in_the_developer_catalog" {
       contains(keys(output.flink_statements), "remediation_decisions") &&
       contains(keys(output.flink_statements), "p1_tickets") &&
       contains(keys(output.flink_statements), "ticket_triage") &&
+      contains(keys(output.flink_statements), "critical_cves") &&
+      contains(keys(output.flink_statements), "patch_decisions") &&
       contains(keys(output.flink_statements), "llm_textgen_model")
     )
-    error_message = "the module must create the seven source tables, the five output tables and the model"
+    error_message = "the module must create the seven source tables, the seven output tables and the model"
   }
 
   assert {
-    condition     = length(output.flink_statements) == 13
-    error_message = "the module must create twelve tables and the model, and nothing else"
+    condition     = length(output.flink_statements) == 15
+    error_message = "the module must create fourteen tables and the model, and nothing else"
   }
 }
 
@@ -240,6 +242,75 @@ run "the_ticket_output_tables_are_created" {
   assert {
     condition     = can(regex("`ticket_id` STRING COMMENT", confluent_flink_statement.create_remediation_decisions_table.statement))
     error_message = "remediation_decisions must have a nullable ticket_id for the ticket responder's decisions"
+  }
+}
+
+# The outputs of labs 6.1 and 6.4 (D-070) take p1_tickets' options, so the security agent
+# never waits for a Flink commit either (D-063).
+run "the_cve_output_tables_are_created" {
+  command = plan
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in [
+        confluent_flink_statement.create_critical_cves_table,
+        confluent_flink_statement.create_patch_decisions_table,
+        ] : (
+        can(regex("'changelog.mode' = 'append'", s.statement)) &&
+        can(regex("'kafka.consumer.isolation-level' = 'read-uncommitted'", s.statement)) &&
+        can(regex("'kafka.cleanup-policy' = 'delete'", s.statement)) &&
+        can(regex("'kafka.retention.time' = '24 h'", s.statement)) &&
+        can(regex("DISTRIBUTED INTO 1 BUCKETS", s.statement)) &&
+        can(regex("WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND", s.statement)) &&
+        !can(regex("PRIMARY KEY", s.statement))
+      )
+    ])
+    error_message = "critical_cves and patch_decisions must be append-only, read-uncommitted, delete-cleanup tables in one bucket with a 5 s watermark and no key"
+  }
+
+  assert {
+    condition = (
+      can(regex("^CREATE TABLE IF NOT EXISTS `critical_cves`", confluent_flink_statement.create_critical_cves_table.statement)) &&
+      can(regex("`cvss_score` DOUBLE", confluent_flink_statement.create_critical_cves_table.statement)) &&
+      can(regex("^CREATE TABLE IF NOT EXISTS `patch_decisions`", confluent_flink_statement.create_patch_decisions_table.statement)) &&
+      can(regex("`action` STRING NOT NULL", confluent_flink_statement.create_patch_decisions_table.statement)) &&
+      can(regex("`patch_status` STRING NOT NULL", confluent_flink_statement.create_patch_decisions_table.statement))
+    )
+    error_message = "the two CVE output tables must be created, critical_cves with a DOUBLE cvss_score and patch_decisions with STRING NOT NULL action and patch_status"
+  }
+}
+
+# The Real-Time Context Engine serves patch_decisions (D-070, spec decision 12), in the
+# developer's own environment and cluster. remediation_decisions stays a Console step for
+# attendees. Applied, not planned, so the mocked environment and cluster ids are known.
+run "rtce_serves_patch_decisions" {
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = (
+      confluent_rtce_topic.patch_decisions.topic_name == "patch_decisions" &&
+      confluent_rtce_topic.patch_decisions.environment[0].id == confluent_environment.main.id &&
+      confluent_rtce_topic.patch_decisions.kafka_cluster[0].id == confluent_kafka_cluster.main.id &&
+      confluent_rtce_topic.patch_decisions.cloud == "AWS" &&
+      confluent_rtce_topic.patch_decisions.region == "eu-central-1" &&
+      length(confluent_rtce_topic.patch_decisions.description) > 0
+    )
+    error_message = "the patch_decisions topic must be RTCE-enabled in the developer's own environment, cluster, cloud and region, with a description"
+  }
+
+  assert {
+    condition = (
+      length(output.rtce_topics) == 1 &&
+      output.rtce_topics.patch_decisions.environment == confluent_environment.main.id &&
+      output.rtce_topics.patch_decisions.cluster == confluent_kafka_cluster.main.id
+    )
+    error_message = "the module must list its one RTCE topic, patch_decisions, for the root's tests"
   }
 }
 
@@ -363,8 +434,8 @@ run "deploy_labs_runs_the_twelve_lab_statements_as_principal_in_the_developer_ca
   }
 
   assert {
-    condition     = length(output.flink_statements) == 25
-    error_message = "with deploy_labs, the module must create the twelve tables, the model and the labs' 12 statements"
+    condition     = length(output.flink_statements) == 27
+    error_message = "with deploy_labs, the module must create the fourteen tables, the model and the labs' 12 statements"
   }
 
   assert {

@@ -123,7 +123,7 @@ confluent rtce region list
 ```
 
 - **Flink:** the first command must list your region.
-- **Real-Time Context Engine and Lightning Tables** (sections 6–8 of the workshop) are **AWS-only and in a subset of regions.** If `confluent rtce region list` doesn't list your region, developers skip those sections. As of late 2026 the supported AWS regions are roughly: `us-east-1`, `us-east-2`, `us-west-2`, `ap-northeast-1`, `ap-northeast-2`, `ap-southeast-1`, `ap-southeast-2`, `ap-south-1`, `eu-central-1`, `eu-west-1`, `eu-west-2`.
+- **Real-Time Context Engine and Lightning Tables** (sections 6–8 of the workshop) are **AWS-only and in a subset of regions.** The second command must list your region too, since the apply turns RTCE on for every developer's `patch_decisions` topic (D-070). As of late 2026 the supported AWS regions are roughly: `us-east-1`, `us-east-2`, `us-west-2`, `ap-northeast-1`, `ap-northeast-2`, `ap-southeast-1`, `ap-southeast-2`, `ap-south-1`, `eu-central-1`, `eu-west-1`, `eu-west-2`.
 - **The Confluent-hosted model** `anthropic.claude-sonnet-4-6` (or the `csp_hosted_model` you set) must be offered there. No CLI command shows it; confirm with your Confluent account team, and the rehearsal ([step 8](#8-rehearse-the-developer-flow)) confirms it in practice.
 
 ## 6. Check networking and access

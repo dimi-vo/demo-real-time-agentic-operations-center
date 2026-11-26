@@ -1,12 +1,13 @@
 # The workshop's tables and model, created as the platform team: the seven source tables
 # (service_metrics, service_deployments, service_incidents, checkout's support_tickets
 # and ticket_answer_key, D-068, and the scanner's cve_scans and cve_answer_key, D-070),
-# the five output tables the labs fill with INSERT statements (service_error_rate,
-# service_health, remediation_decisions, and section 5's p1_tickets and ticket_triage,
-# D-068), and the model: 13 statements. With main.tf's five resources and the root's name
-# suffix, that is 19 resources per developer. A demo environment (deploy_labs = true,
-# D-069) also gets the labs' 12 statements, at the end of this file: 25 statements, 31
-# resources.
+# the seven output tables the labs fill with INSERT statements (service_error_rate,
+# service_health, remediation_decisions, section 5's p1_tickets and ticket_triage, D-068,
+# and section 6's critical_cves and patch_decisions, D-070), and the model: 15 statements.
+# patch_decisions also gets its RTCE topic (D-070). With that, main.tf's five resources and
+# the root's name suffix, that is 22 resources per developer. A demo environment
+# (deploy_labs = true, D-069) also gets the labs' 12 statements, at the end of this file: 27
+# statements, 34 resources.
 # Each statement is signed with the Global key and runs as that key's owner (principal_id).
 #
 # The DDL is all IF NOT EXISTS, so re-running apply is a no-op for anything already
@@ -21,8 +22,8 @@
 #
 # The statements are chained with depends_on in one line (D-037), in the order of this
 # file: the source tables, then the output tables in the order the labs fill them, the
-# model, and then the labs' statements in lab order. tests/test_platform_team_sync.py checks
-# the chain.
+# model, and then the labs' statements in lab order. The RTCE topic hangs off the chain,
+# after patch_decisions' table. tests/test_platform_team_sync.py checks the chain.
 
 resource "confluent_flink_statement" "create_service_metrics_table" {
   organization { id = data.confluent_organization.main.id }
@@ -552,6 +553,121 @@ resource "confluent_flink_statement" "create_ticket_triage_table" {
   depends_on = [confluent_flink_statement.create_p1_tickets_table]
 }
 
+resource "confluent_flink_statement" "create_critical_cves_table" {
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE TABLE IF NOT EXISTS `critical_cves` (
+      `event_time` TIMESTAMP(3) COMMENT 'When the scanner reported the finding, copied from cve_scans',
+      `finding_id` STRING COMMENT 'The finding id: SCAN- and six digits, e.g. SCAN-000123',
+      `repository` STRING COMMENT 'The repository: web-gateway, checkout, payments, ci-tools or storefront-legacy (archived)',
+      `cve_id` STRING COMMENT 'The CVE, fictional: CVE-2026-4xxxx. The same CVE can be found in several repositories',
+      `package` STRING COMMENT 'The vulnerable package, e.g. urllib3',
+      `installed_version` STRING COMMENT 'The version the repository has',
+      `fixed_version` STRING COMMENT 'The first version without the vulnerability',
+      `cvss_score` DOUBLE COMMENT 'CVSS score, always 9.0 or more: lab 6.1 copies only the critical findings, so a lower score here is a filter leak',
+      `finding` STRING COMMENT 'What the scanner said: where the package sits and whether the vulnerable code is used',
+      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
+    )
+    DISTRIBUTED INTO 1 BUCKETS
+    WITH (
+      'changelog.mode' = 'append',
+      'connector' = 'confluent',
+      'kafka.cleanup-policy' = 'delete',
+      'kafka.consumer.isolation-level' = 'read-uncommitted',
+      'kafka.message-timestamp-type' = 'create-time',
+      'kafka.retention.time' = '24 h',
+      'scan.startup.mode' = 'earliest-offset',
+      'value.format' = 'avro-registry'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_ticket_triage_table]
+}
+
+resource "confluent_flink_statement" "create_patch_decisions_table" {
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE TABLE IF NOT EXISTS `patch_decisions` (
+      `event_time` TIMESTAMP(3) COMMENT 'When the scanner reported the finding, copied from critical_cves',
+      `finding_id` STRING COMMENT 'The finding id: SCAN- and six digits, e.g. SCAN-000123',
+      `repository` STRING COMMENT 'The repository: web-gateway, checkout, payments, ci-tools or storefront-legacy (archived)',
+      `cve_id` STRING COMMENT 'The CVE, fictional: CVE-2026-4xxxx',
+      `cvss_score` DOUBLE COMMENT 'CVSS score, 9.0 or more, as in critical_cves',
+      `action` STRING NOT NULL COMMENT 'The security agent decision: PATCH or DISMISS, or INVALID when the call failed or the answer did not parse',
+      `reason` STRING COMMENT 'The security agent explanation, one or two sentences',
+      `patch_status` STRING NOT NULL COMMENT 'PATCHED for a PATCH that came back with a commit, FAILED for a PATCH without one, N/A otherwise; worked out by lab 6.4, not the agent',
+      `commit_sha` STRING COMMENT 'The commit the patch agent answered with, 7 hex digits; null unless parsed',
+      `patch_started_at` TIMESTAMP(3) COMMENT 'When the patch agent started, from its reply; null unless parsed',
+      `patch_finished_at` TIMESTAMP(3) COMMENT 'When the patch agent finished, from its reply; null unless parsed',
+      `raw_response` STRING COMMENT 'The full security agent answer, kept for debugging when parsing returns null',
+      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
+    )
+    DISTRIBUTED INTO 1 BUCKETS
+    WITH (
+      'changelog.mode' = 'append',
+      'connector' = 'confluent',
+      'kafka.cleanup-policy' = 'delete',
+      'kafka.consumer.isolation-level' = 'read-uncommitted',
+      'kafka.message-timestamp-type' = 'create-time',
+      'kafka.retention.time' = '24 h',
+      'scan.startup.mode' = 'earliest-offset',
+      'value.format' = 'avro-registry'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_critical_cves_table]
+}
+
+# The Real-Time Context Engine serves patch_decisions (D-070), so a coding agent can ask about
+# the security agent's decisions over MCP. It needs the topic, which the CREATE TABLE above
+# makes, so it waits for that statement; nothing waits for it, so it stays off the chain. It is on in every environment,
+# so var.region must be one where RTCE is offered (variables.tf). remediation_decisions stays
+# a Console step for attendees, as in the reference workshop.
+resource "confluent_rtce_topic" "patch_decisions" {
+  cloud       = confluent_kafka_cluster.main.cloud
+  region      = confluent_kafka_cluster.main.region
+  description = "The security agent decisions on critical CVE scan findings in River Shop repositories, one row per finding: PATCH, DISMISS or INVALID with a reason, and for a PATCH the patch_status, the commit the external patch agent answered with, and when the patch started and finished."
+  topic_name  = "patch_decisions"
+
+  environment {
+    id = confluent_environment.main.id
+  }
+
+  kafka_cluster {
+    id = confluent_kafka_cluster.main.id
+  }
+
+  depends_on = [confluent_flink_statement.create_patch_decisions_table]
+}
+
 # CSP Hosted Flink Model Inference only: Confluent runs the model, so there is no
 # connection and no cloud key. The name llm_textgen_model is what the agent SQL
 # (sections 4 and 5 of the walkthrough) references.
@@ -582,7 +698,7 @@ resource "confluent_flink_statement" "llm_textgen_model" {
     "sql.current-database" = confluent_kafka_cluster.main.display_name
   }
 
-  depends_on = [confluent_flink_statement.create_ticket_triage_table]
+  depends_on = [confluent_flink_statement.create_patch_decisions_table]
 }
 
 # The labs' twelve statements, for a demo environment only (D-069): off unless deploy_labs is

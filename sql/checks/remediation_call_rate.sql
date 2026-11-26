@@ -1,4 +1,5 @@
--- Agent calls track anomalies and P1 tickets, not windows (brief section 3, improvement 4).
+-- Agent calls track anomalies, P1 tickets and critical findings, not windows (brief section 3,
+-- improvement 4).
 --
 -- Running totals over everything the tables hold. Expect `metric agent decisions` to track
 -- the two flagged counts added up, not the row counts: payments produces 60 service_health
@@ -12,6 +13,14 @@
 -- started have no row: a 5.2 started after 5.1's replay leaves `ticket_triage rows` behind
 -- `p1_tickets rows` by that replay, and only the gap that keeps growing is a problem. P2
 -- and P3 tickets cost nothing; `p1_tickets` holds none (lab 5.1's filter).
+--
+-- Section 6 (D-070) works the same way: the security agent costs one call per critical
+-- finding (`patch_decisions rows` tracks `critical_cves rows`, about 1.2 a minute), and the
+-- patch agent on the laptop one call per PATCH decision (about half of them). Lab 6.4 reads
+-- from the latest offset, like 5.2, so a gap left by 6.1's replay is expected. `PATCHED
+-- decisions` short of `PATCH decisions` means a patch agent call that brought no commit back:
+-- the patch agent or its tunnel was down, or the security agent did not copy the reply
+-- exactly (patch_status FAILED).
 --
 -- Plain aggregates on purpose: `remediation_decisions` declares no watermark, so a
 -- window TVF over it has no time attribute to use. The totals keep updating while the
@@ -59,4 +68,20 @@ UNION ALL
 SELECT 'ticket decisions', CAST(SUM(
   CASE WHEN ticket_id IS NOT NULL THEN 1 ELSE 0 END
 ) AS BIGINT)
-FROM `remediation_decisions` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */;
+FROM `remediation_decisions` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
+UNION ALL
+SELECT 'critical_cves rows (one expected security agent call each)', COUNT(*)
+FROM `critical_cves` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
+UNION ALL
+SELECT 'patch_decisions rows (security agent calls)', COUNT(*)
+FROM `patch_decisions` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
+UNION ALL
+SELECT 'PATCH decisions (one expected patch agent call each)', CAST(SUM(
+  CASE WHEN `action` = 'PATCH' THEN 1 ELSE 0 END
+) AS BIGINT)
+FROM `patch_decisions` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
+UNION ALL
+SELECT 'PATCHED decisions (a commit came back)', CAST(SUM(
+  CASE WHEN patch_status = 'PATCHED' THEN 1 ELSE 0 END
+) AS BIGINT)
+FROM `patch_decisions` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */;

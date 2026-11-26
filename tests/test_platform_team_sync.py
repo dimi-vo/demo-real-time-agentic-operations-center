@@ -1,9 +1,10 @@
 """platform-team/ must work when copied out of the repo, so its developer module
-carries its own copies of the twelve CREATE TABLE statements (seven source tables, five
+carries its own copies of the fourteen CREATE TABLE statements (seven source tables, seven
 output tables) and of the labs' twelve statements (D-069). This test keeps those copies in
 step with the single source of truth in sql/ (the tables with whitespace normalized, the
-labs character for character), the labs' statements behind deploy_labs, and the statements
-chained in the order they are created in."""
+labs character for character), the labs' statements behind deploy_labs, the statements
+chained in the order they are created in, and the Real-Time Context Engine on
+patch_decisions once its table exists (D-070)."""
 
 import re
 import textwrap
@@ -28,6 +29,8 @@ COPIED_TABLES = (
     ("remediation_decisions", "sql/sink_remediation_decisions.sql"),
     ("p1_tickets", "sql/sink_p1_tickets.sql"),  # D-068: labs 5.1 and 5.2
     ("ticket_triage", "sql/sink_ticket_triage.sql"),
+    ("critical_cves", "sql/sink_critical_cves.sql"),  # D-070: labs 6.1 and 6.4
+    ("patch_decisions", "sql/sink_patch_decisions.sql"),
 )
 
 # (resource, the sql/ file its statement is copied from), in lab order (D-069).
@@ -84,7 +87,7 @@ def test_statements_tf_matches_sql_source(table, sql_path):
     )
 
 
-def test_all_twelve_tables_are_present():
+def test_all_fourteen_tables_are_present():
     assert set(_heredoc_tables()) == {
         "service_metrics",
         "service_deployments",
@@ -98,19 +101,28 @@ def test_all_twelve_tables_are_present():
         "remediation_decisions",
         "p1_tickets",
         "ticket_triage",
+        "critical_cves",
+        "patch_decisions",
     }
 
 
-_RESOURCE = re.compile(r'^resource "confluent_flink_statement" "(\w+)" \{$', re.MULTILINE)
+_RESOURCE = re.compile(r'^resource "(\w+)" "(\w+)" \{$', re.MULTILINE)
 _DEPENDS_ON = re.compile(r"^  depends_on = \[(?:confluent_flink_statement\.)?([\w.]+)\]$", re.MULTILINE)
+
+
+def _bodies(resource_type: str) -> dict[str, str]:
+    """The text of every resource of this type in statements.tf, by name, each up to the next
+    resource of any type."""
+    text = STATEMENTS_TF.read_text()
+    starts = [(m.start(), m.group(1), m.group(2)) for m in _RESOURCE.finditer(text)]
+    ends = [start for start, _, _ in starts[1:]] + [len(text)]
+    spans = zip(starts, ends, strict=True)
+    return {name: text[start:end] for (start, type_, name), end in spans if type_ == resource_type}
 
 
 def _resource_bodies() -> dict[str, str]:
     """The text of every confluent_flink_statement resource in statements.tf, by name."""
-    text = STATEMENTS_TF.read_text()
-    starts = [(m.start(), m.group(1)) for m in _RESOURCE.finditer(text)]
-    ends = [start for start, _ in starts[1:]] + [len(text)]
-    return {name: text[start:end] for (start, name), end in zip(starts, ends, strict=True)}
+    return _bodies("confluent_flink_statement")
 
 
 def _lab_statement_from_sql(path: Path) -> str:
@@ -150,13 +162,12 @@ def test_only_the_lab_statements_are_behind_deploy_labs():
 def test_the_statements_run_one_after_another_sources_then_outputs_then_the_model_then_the_labs():
     """D-037: one chain, each statement waiting for the one before. D-068: the sources first
     (D-070's two CVE sources after the tickets'), then the output tables in the order the labs
-    fill them, and the model. D-069: then the
-    labs' statements, in lab order."""
-    text = STATEMENTS_TF.read_text()
-    starts = [(m.start(), m.group(1)) for m in _RESOURCE.finditer(text)]
+    fill them (D-070's two after the tickets'), and the model. D-069: then the labs'
+    statements, in lab order."""
+    bodies = _resource_bodies()
     after = {}
-    for (start, name), (end, _) in zip(starts, [*starts[1:], (len(text), "")], strict=True):
-        [dep] = _DEPENDS_ON.findall(text[start:end])
+    for name, body in bodies.items():
+        [dep] = _DEPENDS_ON.findall(body)
         after[dep] = name
     chain, step = [], "time_sleep.cluster_settle"
     while step in after:
@@ -175,10 +186,23 @@ def test_the_statements_run_one_after_another_sources_then_outputs_then_the_mode
         "create_remediation_decisions_table",
         "create_p1_tickets_table",
         "create_ticket_triage_table",
+        "create_critical_cves_table",
+        "create_patch_decisions_table",
         "llm_textgen_model",
         *(resource for resource, _ in COPIED_LAB_STATEMENTS),
     ]
-    assert len(after) == len(starts)  # every statement is on the chain
+    assert len(after) == len(bodies)  # every statement is on the chain
+
+
+def test_rtce_is_on_for_patch_decisions_once_its_table_exists():
+    """D-070, spec decision 12: Terraform turns the Real-Time Context Engine on for
+    patch_decisions' topic, and only after the CREATE TABLE that makes the topic. It hangs off
+    the chain rather than joining it: nothing waits for it (the chain test above would break)."""
+    rtce = _bodies("confluent_rtce_topic")
+    assert list(rtce) == ["patch_decisions"]
+    body = rtce["patch_decisions"]
+    assert _DEPENDS_ON.findall(body) == ["create_patch_decisions_table"]
+    assert re.search(r'^  topic_name += "patch_decisions"$', body, re.MULTILINE)
 
 
 def test_model_statement_present():

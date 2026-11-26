@@ -1,8 +1,8 @@
 # =============================================================================
 # One developer's stack: their environment and EnvironmentAdmin binding, a
-# Kafka cluster, a Flink compute pool, and the workshop's twelve tables (seven source
-# tables, five output tables) and model (statements.tf), and with deploy_labs the labs'
-# statements (D-069). The cluster and pool names
+# Kafka cluster, a Flink compute pool, and the workshop's fourteen tables (seven source
+# tables, seven output tables), patch_decisions' RTCE topic and the model (statements.tf),
+# and with deploy_labs the labs' statements (D-069). The cluster and pool names
 # are fixed, because the developer's deploy finds them by name inside the environment.
 #
 # No service accounts, no API keys: the platform team's one Global key signs

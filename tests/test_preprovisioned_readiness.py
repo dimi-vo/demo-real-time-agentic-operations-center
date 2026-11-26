@@ -116,27 +116,33 @@ def test_source_tables_includes_service_incidents():
     assert "service_incidents" in provision.SOURCE_TABLES
 
 
-def test_the_ticket_source_tables_are_checked_too():
-    # D-068: checkout's tickets and their answer key; the generator writes both.
+def test_the_ticket_and_cve_source_tables_are_checked_too():
+    # D-068: checkout's tickets and their answer key; D-070: the scanner's findings and theirs.
+    # The generator writes all four.
     assert provision.SOURCE_TABLES == (
         "service_metrics",
         "service_deployments",
         "service_incidents",
         "support_tickets",
         "ticket_answer_key",
+        "cve_scans",
+        "cve_answer_key",
     )
 
 
-def test_the_ticket_output_tables_are_checked_too():
-    # D-068: lab 5.1 fills p1_tickets and lab 5.2 ticket_triage; Terraform creates both.
+def test_the_ticket_and_cve_output_tables_are_checked_too():
+    # D-068: lab 5.1 fills p1_tickets and lab 5.2 ticket_triage; D-070: lab 6.1 fills
+    # critical_cves and lab 6.4 patch_decisions. Terraform creates all four.
     assert provision.OUTPUT_TABLES == (
         "service_error_rate",
         "service_health",
         "remediation_decisions",
         "p1_tickets",
         "ticket_triage",
+        "critical_cves",
+        "patch_decisions",
     )
-    assert len(provision.PLATFORM_TABLES) == 10
+    assert len(provision.PLATFORM_TABLES) == 14
 
 
 def test_a_missing_ticket_output_table_names_the_platform_team(monkeypatch, capsys, card_path):
@@ -146,3 +152,14 @@ def test_a_missing_ticket_output_table_names_the_platform_team(monkeypatch, caps
     out = capsys.readouterr().out
     assert "✗ table ticket_triage is missing — ask your platform team to re-run their apply." in out
     assert "✓ table p1_tickets" in out
+
+
+@pytest.mark.parametrize("missing", ["cve_scans", "cve_answer_key", "critical_cves", "patch_decisions"])
+def test_a_missing_cve_table_names_the_platform_team(monkeypatch, capsys, card_path, missing):
+    # D-070: the four section 6 tables come from the same apply as the others.
+    present = tuple(t for t in provision.PLATFORM_TABLES if t != missing)
+    _patch(monkeypatch, tables=present, model=True)
+    assert provision._verify_ready(card_path.parent, card_path) is False
+    out = capsys.readouterr().out
+    assert f"✗ table {missing} is missing — ask your platform team to re-run their apply." in out
+    assert out.count("✗") == 1

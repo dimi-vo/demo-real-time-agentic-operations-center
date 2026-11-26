@@ -49,6 +49,8 @@ output "flink_statements" {
       remediation_decisions = confluent_flink_statement.create_remediation_decisions_table
       p1_tickets            = confluent_flink_statement.create_p1_tickets_table
       ticket_triage         = confluent_flink_statement.create_ticket_triage_table
+      critical_cves         = confluent_flink_statement.create_critical_cves_table
+      patch_decisions       = confluent_flink_statement.create_patch_decisions_table
       llm_textgen_model     = confluent_flink_statement.llm_textgen_model
     }, local.lab_statements) :
     key => {
@@ -56,6 +58,18 @@ output "flink_statements" {
       catalog   = s.properties["sql.current-catalog"]
       database  = s.properties["sql.current-database"]
       principal = s.principal[0].id
+    }
+  }
+}
+
+# The topics the Real-Time Context Engine serves (D-070), by topic, with the environment and
+# cluster each is in, for the root's tests.
+output "rtce_topics" {
+  value = {
+    for t in [confluent_rtce_topic.patch_decisions] :
+    t.topic_name => {
+      environment = t.environment[0].id
+      cluster     = t.kafka_cluster[0].id
     }
   }
 }

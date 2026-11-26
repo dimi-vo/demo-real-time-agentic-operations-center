@@ -1,11 +1,13 @@
 """`uv run reset-health` — a clean slate for your detection and your agents.
 
-Deletes the Flink statements that write the five lab output tables, `service_error_rate`,
-`service_health`, `remediation_decisions`, and section 5's `p1_tickets` and `ticket_triage`
-(D-068), waits until they are gone, then empties those five topics. Section 5's three INSERTs
-go with them: lab 5.1's P1 filter, lab 5.2's classifier and lab 5.3's responder, which writes
-`remediation_decisions` like the agents of 4.3. Nothing else is touched: the source topics
-keep their records, and the agents stay.
+Deletes the Flink statements that write the seven lab output tables, `service_error_rate`,
+`service_health`, `remediation_decisions`, section 5's `p1_tickets` and `ticket_triage`
+(D-068), and section 6's `critical_cves` and `patch_decisions` (D-070), waits until they are
+gone, then empties those seven topics. Section 5's three INSERTs go with them: lab 5.1's P1
+filter, lab 5.2's classifier and lab 5.3's responder, which writes `remediation_decisions` like
+the agents of 4.3. So do section 6's two: lab 6.1's critical filter and lab 6.4's security
+agent. Nothing else is touched: the source topics keep their records, and the agents, lab
+6.2's tool and its connection stay.
 
 Use it to change your `service_error_rate` or `service_health` INSERT and run it again without
 duplicate history: the SQL stays in your workspace, so click Run to start a statement again
@@ -80,6 +82,10 @@ def _print_next_steps() -> None:
     print("     of P1 tickets; then 5.2's INSERT (5.2_insert_ticket_classifier.sql) only")
     print("     once 5.1 has caught up, so the classifier gets new tickets only; then 5.3's INSERT")
     print("     (5.3_insert_ticket_responder.sql).")
+    print("  4. Section 6, in lab order: 6.1 (6.1_critical_cves.sql), which replays the last 24 hours")
+    print("     of critical findings; then 6.4's INSERT (6.4_insert_security_agent.sql) only")
+    print("     once 6.1 has caught up, so the security agent, and the patch agent on your laptop,")
+    print("     get new findings only. Start `uv run patch-agent` and its tunnel before 6.4.")
     print("\nRestart the ops wall (Ctrl-C, then `uv run ops-wall`) for a clean view.")
 
 
@@ -87,8 +93,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Delete the statements that write service_error_rate, service_health, "
-            "remediation_decisions, p1_tickets and ticket_triage, wait until they are gone, "
-            "and empty those topics."
+            "remediation_decisions, p1_tickets, ticket_triage, critical_cves and patch_decisions, "
+            "wait until they are gone, and empty those topics."
         ),
         epilog="Your SQL stays in your workspace: click Run to start a statement again.",
     )

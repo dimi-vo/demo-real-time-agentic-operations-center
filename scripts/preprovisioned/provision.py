@@ -1,11 +1,11 @@
 """`uv run deploy --track pre-provisioned` — mint the developer's keys, write the card,
 and check the environment is ready.
 
-The platform team already built the environment (cluster, Flink pool, the five source
-tables, the five output tables, the model). This deploy runs no Terraform: it mints a
+The platform team already built the environment (cluster, Flink pool, the seven source
+tables, the seven output tables, the model). This deploy runs no Terraform: it mints a
 Global key with the Confluent CLI (as the logged-in developer), uses it to mint a Kafka
 and a Schema Registry key over REST, writes the credential card, and verifies that all
-ten tables and `llm_textgen_model` exist. Key IDs are recorded in deployment.env the moment
+fourteen tables and `llm_textgen_model` exist. Key IDs are recorded in deployment.env the moment
 each exists; a run that stops before the card is written deletes the keys it minted, so
 a premature run never burns a Global-key slot.
 """
@@ -32,8 +32,8 @@ PREFIX = "DEMO"
 KEY_LOCATION = "Console → API keys → My account"
 MODEL_NAME = "llm_textgen_model"
 # Each table is its topic's: the generator writes the sources, and the labs fill the outputs
-# with INSERT statements; the platform team's Terraform creates all ten (D-050). The lists are
-# `reset`'s (scripts/common/topics.py).
+# with INSERT statements; the platform team's Terraform creates all fourteen (D-050, D-068,
+# D-070). The lists are `reset`'s (scripts/common/topics.py).
 SOURCE_TABLES = SOURCE_TOPICS
 OUTPUT_TABLES = OUTPUT_TOPICS
 PLATFORM_TABLES = SOURCE_TABLES + OUTPUT_TABLES

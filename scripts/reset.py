@@ -4,26 +4,29 @@ Troubleshooting only; the continuous workshop never needs it in the normal flow.
 
 1. refuses to run while a local `uv run ops-sim` is still producing (`--force` overrides);
 2. stops the developer's running Flink statements and waits until they are gone;
-3. drops the four agents, section 4's `release_agent` and `capacity_agent` and section 5's
-   `ticket_classifier` and `ticket_responder` (`CREATE AGENT` has no `IF NOT EXISTS`, so
-   labs 4.2, 5.2 and 5.3 could not be run again otherwise);
-4. empties ten topics, all with delete cleanup: the five source topics (checkout's
-   `support_tickets` and `ticket_answer_key` among them, D-068) and the five lab output
-   topics (`service_error_rate`, `service_health`, `remediation_decisions`, and section 5's
-   `p1_tickets` and `ticket_triage`);
-5. deletes the generator's persisted state (versions, incident counter and ticket
-   numbers). Step 4 already emptied the ground truth: it lives in the `service_incidents`
-   and `ticket_answer_key` topics (D-046).
+3. drops the five agents, section 4's `release_agent` and `capacity_agent`, section 5's
+   `ticket_classifier` and `ticket_responder` and section 6's `security_agent`, then lab
+   6.2's `patch_agent_tool` and `patch_agent_connection`, in that order, since each uses the
+   next (D-070). `CREATE AGENT`, `CREATE TOOL` and `CREATE CONNECTION` have no
+   `IF NOT EXISTS`, so labs 4.2, 5.2, 5.3, 6.2 and 6.3 could not be run again otherwise;
+4. empties fourteen topics, all with delete cleanup: the seven source topics (checkout's
+   `support_tickets` and `ticket_answer_key`, D-068, and the scanner's `cve_scans` and
+   `cve_answer_key`, D-070, among them) and the seven lab output topics
+   (`service_error_rate`, `service_health`, `remediation_decisions`, section 5's
+   `p1_tickets` and `ticket_triage`, and section 6's `critical_cves` and `patch_decisions`);
+5. deletes the generator's persisted state (versions, incident counter, ticket numbers and
+   finding number). Step 4 already emptied the ground truth: it lives in the
+   `service_incidents`, `ticket_answer_key` and `cve_answer_key` topics (D-046).
 
 The output tables are the platform team's (Terraform creates them, D-050), so they are
 emptied, never dropped: a dropped table would not come back. Nothing is rebuilt
-automatically afterwards: run the lab INSERTs again. `--keep-source` skips the five source
+automatically afterwards: run the lab INSERTs again. `--keep-source` skips the seven source
 topics in step 4 and keeps the state file in step 5: the kept topics hold the incidents,
-versions and tickets it counts past, so the next ops-sim never reuses an incident id (D-046),
-a version (D-067) or a ticket id (D-068) next to them. The output topics are always emptied,
-because they would otherwise hold duplicates once their INSERTs run again. Everything reports
-whether it worked; anything that didn't exits nonzero. To clear only the detection and the
-agents' output, use `uv run reset-health`.
+versions, tickets and findings it counts past, so the next ops-sim never reuses an incident
+id (D-046), a version (D-067), a ticket id (D-068) or a finding id (D-070) next to them. The
+output topics are always emptied, because they would otherwise hold duplicates once their
+INSERTs run again. Everything reports whether it worked; anything that didn't exits nonzero.
+To clear only the detection and the agents' output, use `uv run reset-health`.
 """
 
 from __future__ import annotations
@@ -41,8 +44,11 @@ from scripts.common.flink import TERMINAL_PHASES, FlinkSession, wait_until_gone
 from scripts.common.paths import get_project_root
 from scripts.common.topics import OUTPUT_TOPICS, SOURCE_TOPICS, empty_topics
 
-# Labs 4.2, 5.2 and 5.3 create them (D-068 added the two ticket agents).
-LAB_AGENTS = ("release_agent", "capacity_agent", "ticket_classifier", "ticket_responder")
+# Labs 4.2, 5.2, 5.3 and 6.3 create them (D-068 added the two ticket agents, D-070 the security agent).
+LAB_AGENTS = ("release_agent", "capacity_agent", "ticket_classifier", "ticket_responder", "security_agent")
+# Lab 6.2 creates them (D-070). security_agent uses the tool and the tool uses the connection,
+# so they are dropped after the agents, the tool first.
+LAB_TOOLS_AND_CONNECTIONS = (("TOOL", "patch_agent_tool"), ("CONNECTION", "patch_agent_connection"))
 OPS_SIM_TOKENS = ("ops-sim", "opsgen.cli", "opsgen")
 STATEMENTS_GONE_TIMEOUT = 60  # seconds
 
@@ -82,24 +88,31 @@ def _stop_running_statements(session: FlinkSession) -> list[str]:
     return [f"statement {name} is still running" for name in stuck]
 
 
-def _drop_agents(session: FlinkSession) -> list[str]:
+def _drop(session: FlinkSession, heading: str, objects: list[tuple[str, str]]) -> list[str]:
+    """`DROP <kind> IF EXISTS` each (kind, name) in turn, printing one line each; returns the
+    problems found."""
     problems: list[str] = []
-    print("\nDropping the four agents...")
-    for agent in LAB_AGENTS:
+    print(f"\n{heading}")
+    for kind, obj in objects:
         try:
-            name = session.submit(f"DROP AGENT IF EXISTS `{agent}`;", label="aiops-reset")
+            name = session.submit(f"DROP {kind} IF EXISTS `{obj}`;", label="aiops-reset")
         except RuntimeError as e:
-            print(f"  {agent}: submit failed — {e}")
-            problems.append(f"drop {agent}")
+            print(f"  {obj}: submit failed — {e}")
+            problems.append(f"drop {obj}")
             continue
         phase = session.wait(name, timeout=120).get("status", {}).get("phase")
         if phase == "COMPLETED":
-            print(f"  {agent}: dropped")
+            print(f"  {obj}: dropped")
         else:
-            print(f"  {agent}: {phase}")
+            print(f"  {obj}: {phase}")
             if phase == "FAILED":
-                problems.append(f"drop {agent}")
+                problems.append(f"drop {obj}")
     return problems
+
+
+def _drop_agents(session: FlinkSession) -> list[str]:
+    problems = _drop(session, "Dropping the five agents...", [("AGENT", agent) for agent in LAB_AGENTS])
+    return problems + _drop(session, "Dropping lab 6.2's tool and connection...", list(LAB_TOOLS_AND_CONNECTIONS))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -108,7 +121,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--keep-source",
         action="store_true",
-        help="Keep the accumulated data in the five source topics, and the generator state that numbers past it "
+        help="Keep the accumulated data in the seven source topics, and the generator state that numbers past it "
         "(the output topics are always emptied)",
     )
     parser.add_argument("--force", action="store_true", help="Reset even if a local ops-sim seems to be running")
@@ -136,7 +149,7 @@ def main(argv: list[str] | None = None) -> None:
     problems += empty_topics(card, OUTPUT_TOPICS, "Emptying the output topics (the tables stay)...")
 
     # Local generator state: its counters number past what the source topics hold, so it goes
-    # with them (the ground truth lives in service_incidents and ticket_answer_key).
+    # with them (the ground truth lives in service_incidents, ticket_answer_key and cve_answer_key).
     if args.keep_source:
         print("\nKept the generator's persisted state, so ops-sim numbers past the kept source topics.")
     else:
@@ -147,8 +160,8 @@ def main(argv: list[str] | None = None) -> None:
         print("\nReset finished with problems: " + "; ".join(problems))
         sys.exit(1)
     print("\nReset complete. The output tables are still there, and nothing was rebuilt: start `uv run ops-sim`,")
-    print("then run the lab INSERTs (2.2, 2.5, 4.3, 5.1, 5.2 and 5.3) again,")
-    print("and create the agents again in labs 4.2, 5.2 and 5.3.")
+    print("then run the lab INSERTs (2.2, 2.5, 4.3, 5.1, 5.2, 5.3, 6.1 and 6.4) again,")
+    print("and create the agents again in labs 4.2, 5.2, 5.3, 6.2 (the patch agent's connection and tool) and 6.3.")
 
 
 if __name__ == "__main__":
