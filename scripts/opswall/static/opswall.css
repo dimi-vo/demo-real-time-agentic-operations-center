@@ -48,6 +48,7 @@
   --good: var(--green);
   --crit: #FF6B6B;             /* not in the design: lab 2.2's threshold, anomaly status, incident boxes */
   --truth: var(--crit);        /* the incident boxes: D-066's purple is nearest --blue, which detection holds */
+  --external: #C4A7FF;         /* not in the design: the external patch agent's lane (D-070), a colour no ticket lane uses */
   --tip-bg: var(--raised);
 
   font-family: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -214,12 +215,12 @@ body {
 /* A ticket row (checkout, D-068): the sources and the list, then the timeline. Sizes,
    colours and animations are the design's. Its status text takes its dot's colour, amber
    while an agent works and green when healthy (spec decision 35); a metric row's healthy
-   text stays grey. */
-.ticket-row .status.healthy { color: var(--green); }
+   text stays grey. The security row (D-070) does as checkout does. */
+.ticket-row .status.healthy, .security-row .status.healthy { color: var(--green); }
 .status.working { color: var(--accent); }
 .status.working .dot { background: var(--accent); }
-.open-p1 { font-family: var(--mono); font-weight: 700; color: var(--text-2); }
-.open-p1.some { color: var(--accent); }
+.open-p1, .open-crit { font-family: var(--mono); font-weight: 700; color: var(--text-2); }
+.open-p1.some, .open-crit.some { color: var(--accent); }
 /* A design row's header detail: "Running v 3.4.2", "Window 10s" */
 .detail-value { font-family: var(--mono); color: var(--text); }
 
@@ -323,7 +324,7 @@ body {
 }
 .tk-mark { position: absolute; top: calc(100% - 16px); bottom: 0; width: 0; border-left: 1px dotted var(--text-3); }
 .tk-mark.p2 { border-left: 1px dashed var(--text); }
-.tk-mark.p1 { top: 0; border-left: 1px solid var(--accent); }
+.tk-mark.p1, .tk-mark.critical { top: 0; border-left: 1px solid var(--accent); }
 .tk-mark span {
   position: absolute; top: 4px; right: 5px; padding: 1px 4px; background: var(--surface);
   font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--accent); white-space: nowrap;
@@ -361,6 +362,54 @@ body {
 .tk-lane-state { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
 .tk-chip.working .tk-lane-state { color: var(--accent); }
 .tk-chip.responder.working .tk-lane-state { color: var(--blue); }
+
+/* The security row ("Code security incidents", D-070): the laptop with "git" under it, the line
+   and the Scan findings list, a critical finding in the accent; then the ticket row's timeline,
+   our agent's bars in the accent, hatched where it waited on the patch agent, and the external
+   lane's in a colour of its own, dashed all round. */
+.sc-source { flex: 0 0 auto; position: relative; }
+.sc-laptop { --pc: var(--text); }
+.sc-laptop[data-crit="yes"] { --pc: var(--accent); }
+.sc-git {
+  position: absolute; top: 48px; left: -10px; width: 60px; text-align: center;
+  font-family: var(--mono); font-size: 11px; color: var(--text-2);
+}
+.sc-packet {
+  position: absolute; top: -4px; left: 0; width: 8px; height: 8px; border-radius: 2px;
+  background: var(--text); opacity: 0;
+}
+.sc-packet[data-crit="yes"] { background: var(--accent); }
+.sc-view {
+  height: 240px;
+  -webkit-mask-image: linear-gradient(#000 72%, transparent); mask-image: linear-gradient(#000 72%, transparent);
+}
+.sc-row {
+  --fresh: var(--text-2);
+  height: 48px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border-bottom: 1px solid var(--raised);
+}
+.sc-text { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.sc-repo, .sc-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sc-repo { font-size: 13px; color: var(--text-soft); }
+.sc-sub { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+.sc-score { flex: 0 0 auto; font-family: var(--mono); font-size: 13px; color: var(--text-2); }
+.sc-row.critical { --fresh: var(--accent); background: rgba(245, 181, 68, 0.09); }
+.sc-row.critical .sc-repo { color: var(--accent); font-weight: 600; }
+.sc-row.critical .sc-score { color: var(--accent); font-weight: 700; }
+/* A new finding waits for its packet (about a second along the line), then fades in as the rows
+   slide down to make room. */
+.sc-row.fresh { animation: ifresh 3s ease-out .95s backwards; }
+.tk-mark.finding { border-left: 1px dashed var(--text-2); }
+.sc-wait {
+  position: absolute; top: 0; bottom: 0;
+  background: repeating-linear-gradient(135deg, rgba(var(--lane-rgb), 0.55) 0 1.5px, transparent 1.5px 5px);
+}
+.tk-run.unreachable .tk-run-label { color: var(--crit); }
+.tk-run.external {
+  --lane: var(--external); --lane-rgb: 196, 167, 255;
+  border: 1px dashed rgba(var(--lane-rgb), 0.8); border-radius: 4px;
+}
+.tk-chip.external .tk-square { background: rgba(196, 167, 255, 0.25); border: 1px dashed var(--external); }
 
 /* A releases row (web-gateway, D-068): the laptop, the line and the Releases list, the
    design's deploy row. A rolled-back release takes the accent. */
@@ -530,6 +579,7 @@ body {
   .flow, .flowc, .pkt-a, .pkt-b, .merge-a, .merge-b, .ring-a, .ring-b, .push-a, .push-b, .tk-row.fresh,
   .tk-run.open .tk-cap, .tk-chip.working .tk-square,
   .travel-a, .travel-b, .rpush-a, .rpush-b, .rl-row.fresh, .rback-a, .rback-b,
-  .fill-a, .fill-b, .flush-a, .flush-b, .out-a, .out-b, .jpush-a, .jpush-b, .ag-row.fresh { animation: none; }
+  .fill-a, .fill-b, .flush-a, .flush-b, .out-a, .out-b, .jpush-a, .jpush-b, .ag-row.fresh,
+  .sc-row.fresh { animation: none; }
   .src-box { transition: none; }
 }

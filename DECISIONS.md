@@ -3794,3 +3794,38 @@ the real Avro path, with the Flink schemas of `critical_cves` and `patch_decisio
 the row; fourteen threads, the four new ones from 600 s back, the two lab tables with their Kafka
 timestamps), `tests/test_opswall_server.py` (`serviceCount` 3; the websocket's four rows and the
 security row's empty shape). Until issue 10, the page draws the row as an empty chart row.
+
+Issue 10 (the "Code security incidents" row on the page): `scripts/opswall/static/opswall.js`
+(`updateRow` gains the `"security"` branch: the `security-row` class, no charts, and the remediate
+block's title, "Measured from the finding's scan to the patch agent's finish, patched findings
+only". The ticket row's timeline becomes `timelineHTML`, `timelineParts` and `updateChips`, each
+given its title and its lanes, and `placeLabels` reads the timeline's own lanes, so checkout keeps
+its look. `createSecurityBody` and `updateSecurityRow` draw: web-gateway's laptop with "git" under
+it; a line with the ambient dots; "Scan findings", "N scanned" and the newest 5, each its
+repository, its CVE and finding ids and "CVSS 9.8", a critical row in the accent; a new id among
+them, not on the first snapshot and at most 10 s old, sends a packet along the line (in the
+accent when one of them is critical, bright otherwise), rings the laptop and fades its row in, as
+checkout's tickets do; "Open criticals N" in the header, N in the accent above 0; the timeline,
+"Findings and agent runs", with its "Security agent" and "External · LangGraph · A2A" lanes at
+checkout's lane tops and nothing on the right of its title, since the row has one agent of ours
+and its chip says whether it works; a critical finding's mark, a full-height accent line with
+its CVE id, the others short dashed ticks; our bars in the accent, hatched between `waitFrom`
+and `waitTo` as a share of the bar, with "Patch agent unreachable" in red when `unreachable`; the
+external bars dashed all round in a colour of their own; the tooltips: ours the CVE and its
+repository, the finding id, score, lane and label, the action ("No PATCH or DISMISS came back."
+for `INVALID`, "Waiting for the security agent." while open, "The security agent gave no
+answer." after 60 s), the commit or, for `FAILED`, "No commit came back.", "Waiting on patch
+agent for 6s, the hatched part." and the reason; the external one the patch's start and finish
+in local time, its duration and the patch agent's reply), `scripts/opswall/static/opswall.css`
+(`--external`, `#C4A7FF`, which no ticket lane uses; the laptop, "git", packet and list; the two
+marks; the hatch, a repeating gradient in the lane's colour; the external bar and chip square
+dashed; the row's healthy status green and "Open criticals" styled as checkout's "Open P1"; the
+new row's fade stopped under `prefers-reduced-motion`). `state.py` is unchanged: the page draws
+issue 09's snapshot as it is, so a stopped patch agent's `INVALID` reads "Invalid answer" in
+grey. The page has no tests. A throwaway harness, issue 10's
+`.scratch/code-security-incidents/research/issue10_wall_render.py`, serves the real app from the
+real Simulation and stand-ins behind a clock it holds and checks 154 things in headless Chrome: five frames (a `PATCH` with its hatch
+and external bar beside an open run, a `DISMISS`, a `FAILED`, an `INVALID`, a "No answer"), the
+two tooltips on hover, the dots live (none on the first snapshot, accent, bright, none for a
+25 s-old backread), and the three service rows byte for byte as HEAD's page draws them, at
+1440 and 820 px, at three moments, two of them with checkout bars.
