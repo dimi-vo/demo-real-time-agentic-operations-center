@@ -3426,3 +3426,47 @@ the agent card's URL or the connection endpoint, and which A2A version it speaks
 `security_agent` copies the reply exactly; whether `patch_decisions` records get their
 Kafka timestamp when written (D-068's Pending, again).
 **Impact.** Filled in by the issues under `.scratch/code-security-incidents/issues/`.
+
+Issue 01 (`uv run patch-agent` and lab 6.2's SQL): `pyproject.toml` (`a2a-sdk[http-server]>=1.3.1`
+and `langgraph>=1.2.24` in the main dependencies, the latest releases on 2026-11-26, and the
+`patch-agent` script; `uv.lock` is refreshed but stays untracked). `scripts/patchagent/` (new):
+`reply.py` (the contract, with no I/O: `REQUEST`, the request line's five fields, matched whole,
+with surrounding whitespace and a trailing full stop tolerated and the CVE id in its `CVE-` form;
+`commit_for`, the first 7 hex digits of the request's SHA-1; `format_reply`, "Patched
+CVE-2026-41234 in checkout: bumped urllib3 1.26.4 → 1.26.18 in commit …, started …Z, finished
+…Z" in UTC with milliseconds, or "Patched (<request>) in commit …" with the text echoed on one
+line; `REPLY_COMMIT`, `REPLY_STARTED` and `REPLY_FINISHED`, one numbered group each and nothing
+Java's regex lacks, for issue 07 to test lab 6.4 against), `graph.py` (a `StateGraph` with one
+async node, `patch`, which draws a delay between `--min-delay` and `--max-delay`, 4 and 10 s by
+default, streams it on LangGraph's custom stream, sleeps, and writes the reply; a comment says a
+model node can replace it without changing the A2A side), `executor.py` (an a2a-sdk 1.3.1
+`AgentExecutor`: the task goes submitted, working with "patching… N s", then completed with the
+reply as its `result` artifact, as the multi-agent repo's executor does; an empty request is
+refused as invalid params), `app.py` (the agent card, "Patch Agent" with one skill, "Patch a
+vulnerable dependency", text in and out, its description giving the request line, and the
+`--public-url` interface before `http://<host>:<port>/`, both JSON-RPC and A2A 0.3 as in the
+multi-agent repo, so the 0.3 card's `url` is the tunnel; the JSON-RPC route at `/`, with 0.3's
+method names kept on beside 1.0's; no authentication; at start-up, lab 6.2 with the endpoint
+filled in, or a warning, the file as written and a line saying a tunnel is needed; a block per
+call: the time, the request, "patching… N s", the reply; `--verbose` adds a line per HTTP request
+with its method, path, JSON-RPC method and the Authorization header's scheme, never its value;
+`--port` 8001 and `--host` localhost; a public URL without a scheme, a negative delay and delays
+out of order are refused). `sql/6.2_patch_agent_tool.sql` (new; `CREATE CONNECTION
+patch_agent_connection` of type `a2a` with the endpoint `<your patch-agent URL>` and `workshop`
+as username and password, then `CREATE TOOL patch_agent_tool` with the card's path, a 30 s
+timeout and no retries; the header opens no section and says what the two make, to run them one
+at a time, to start `patch-agent` first, a marked `TODO (tunnel)`, that nothing checks the
+credentials, why there are no retries, and that a new tunnel URL means dropping the tool and the
+connection and creating both again, since `ALTER CONNECTION` changes only credentials). Tests:
+`tests/test_patch_agent.py` (new, offline: the request line and its fields, free text rejected;
+the commit; the reply both ways, its times in UTC, and the three regexes reading it back with the
+finish not before the start; the graph with the delays at 0, and its delay within its bounds;
+the server in-process, delays at 0: the card lists the public URL first, a send-message call
+completes with the reply as its `result` artifact on A2A 1.0's `SendMessage` and on 0.3's
+`message/send`, any basic-auth header or none is accepted, an empty request is refused, each call
+prints its block, `--verbose` prints the scheme alone; the printed SQL is the file with only the
+placeholder replaced; lab 6.2's two statements and their options, no stray apostrophe, the
+placeholder once, no section opened and the tunnel TODO; the CLI's defaults and refusals). A
+local `uv run patch-agent --min-delay 0 --max-delay 0` answered `curl` on both routes, and with
+the default delays one call took 9.5 s. `platform-team/` is unchanged: section 6 joins
+`deploy_labs` in issue 08.
