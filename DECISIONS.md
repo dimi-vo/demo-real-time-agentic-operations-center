@@ -3595,3 +3595,23 @@ and in `platform-team/tests/` the counts (15, 27), a plan run on the two tables'
 NULL columns, an apply run on the RTCE topic's environment, cluster, cloud, region and
 description and on `rtce_topics`, and a root run checking every environment has one, on
 `patch_decisions`, in its own environment and cluster.
+
+Issue 05 (lab 6.1, route the critical findings): `sql/6.1_critical_cves.sql` (new; one INSERT
+from `cve_scans` into `critical_cves`, the nine columns named in `critical_cves`' order, rather
+than `SELECT *`, and `WHERE cvss_score >= 9.0` its only filter; no hint, so it reads from the
+table's default, the earliest offset, and replays up to 24 hours of findings; the header opens
+section 6, "A third architecture: code security incidents": a scanner reports CVEs in River
+Shop's repositories, each with a CVSS score, Flink keeps the critical ones, 9.0 and above,
+CVSS's own "Critical" band, so only they reach the security agent and its model calls, and the
+rest stay in `cve_scans`; a critical score is not always a real risk (a dev dependency only, an
+archived repository, vulnerable code never called), so the agent of 6.3 reads where the package
+sits and only then calls the external patch agent of 6.2; `critical_cves` already exists
+(Terraform), so this one statement is all you write; start 6.4's INSERT once 6.1 has caught up,
+as `reset-health` says; running it twice copies every finding twice, and `uv run reset-health`
+starts clean). Tests: `tests/test_sql_pipeline.py` (one statement, from `cve_scans` into
+`critical_cves`; the score its only filter, with no join; `critical_cves`' DDL columns, read from
+`sql/sink_critical_cves.sql`, named bare and in order; no hint and no `scan.startup.mode`,
+against `cve_scans`' earliest-offset default; the header's first line opens section 6, the
+counterpart of 6.2's test that it doesn't; the module docstring names section 6). Nothing else
+needed the lab: `reset`, `reset-health`, the call-rate check and its README name 6.1 since issue
+04, and `deploy_labs` starts none of section 6's statements until issue 08.

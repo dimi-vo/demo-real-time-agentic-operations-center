@@ -11,6 +11,10 @@ service_error_rate and service_health (in the queries and in the platform team's
 
 Section 5 (D-068) starts with the P1 filter (5.1): one INSERT from support_tickets into
 p1_tickets, on the priority alone, with p1_tickets' columns in order and no offset hint.
+
+Section 6 (D-070) starts the same way with the critical filter (6.1): one INSERT from
+cve_scans into critical_cves, on the CVSS score alone (9.0 and above), with critical_cves'
+columns in order and no offset hint. Its header opens the section.
 """
 
 import re
@@ -435,3 +439,51 @@ def test_the_p1_filter_reads_from_the_tables_default_offset():
     body = _body(P1_FILE)
     assert "/*+" not in body and "scan.startup.mode" not in body
     assert "'scan.startup.mode' = 'earliest-offset'" in (SQL / "source_support_tickets.sql").read_text()
+
+
+# --- lab 6.1: route the critical findings (D-070) -------------------------------------------
+
+CRITICAL_FILE = "6.1_critical_cves.sql"
+
+
+def test_the_critical_filter_copies_cve_scans_into_critical_cves():
+    body = _norm(_body(CRITICAL_FILE))
+    assert body.startswith("INSERT INTO `critical_cves` SELECT ")
+    assert " FROM `cve_scans`" in body
+    # One statement: nothing to run before or after it.
+    assert body.count(";") == 1 and body.endswith(";")
+
+
+def test_the_critical_filter_routes_on_the_score_alone():
+    # CVSS's own "Critical" band, 9.0 and above, nothing else: no join, no second condition.
+    # The finding sentence is for the security agent (6.3), not for a WHERE.
+    body = _norm(_body(CRITICAL_FILE))
+    assert body.count(" WHERE ") == 1
+    assert body.endswith(" FROM `cve_scans` WHERE `cvss_score` >= 9.0;")
+    assert "JOIN" not in body
+
+
+def test_the_critical_filter_names_the_critical_cves_columns_in_order():
+    """The INSERT is positional, and seven of the nine columns are STRINGs, so a swap (the two
+    versions, say) would go unnoticed. Each column is named bare, not `SELECT *`."""
+    body = _norm(_body(CRITICAL_FILE))
+    head = "INSERT INTO `critical_cves` SELECT "
+    selected = body[len(head) : body.index(" FROM `cve_scans`")].split(", ")
+    ddl = (SQL / "sink_critical_cves.sql").read_text()
+    declared = re.findall(r"^  `(\w+)` ", ddl, re.MULTILINE)
+    assert len(declared) == 9
+    assert selected == [f"`{name}`" for name in declared]
+
+
+def test_the_critical_filter_reads_from_the_tables_default_offset():
+    # cve_scans' default is the earliest offset, so the filter replays the history with no
+    # hint. The filter is cheap, and 6.4 reads from the latest offset anyway.
+    body = _body(CRITICAL_FILE)
+    assert "/*+" not in body and "scan.startup.mode" not in body
+    assert "'scan.startup.mode' = 'earliest-offset'" in (SQL / "source_cve_scans.sql").read_text()
+
+
+def test_the_critical_filter_opens_section_6():
+    # 6.2's header leaves the section to this one (tests/test_patch_agent.py).
+    header = [line for line in (SQL / CRITICAL_FILE).read_text().splitlines() if line.startswith("--")]
+    assert header[0].startswith('-- 6.1 Section 6, "A third architecture: code security incidents"')
