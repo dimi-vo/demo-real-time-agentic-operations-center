@@ -3657,3 +3657,45 @@ finding, its reply is `format_reply`'s for that request with a delay within patc
 bounds, and its Patch line is that reply; the `DISMISS` examples call nothing and write `N/A`;
 each Reason names its cue; the four `WITH` options, and a `request_timeout` longer than the
 tool's). `platform-team/` is unchanged: section 6 joins `deploy_labs` in issue 08.
+
+Issue 07 (lab 6.4, the security agent's INSERT): `sql/6.4_insert_security_agent.sql` (new; one
+INSERT from `critical_cves`, read from the latest offset in a derived table with no WHERE, into
+`patch_decisions`, its values in the DDL's order: the finding's `event_time`, `finding_id`,
+`repository`, `cve_id` and `cvss_score` as they came; `action`, the capacity leg's `CASE` with `IN
+('PATCH', 'DISMISS')`; `reason`, the Reason line read to the end of its line (`[^\n]+`), since the
+Patch line follows it; `patch_status`, `PATCHED` when the call succeeded, the Action line says
+`PATCH` and the Patch line holds a commit, `FAILED` for such a `PATCH` without one, and `N/A`
+otherwise, all three in one flat `CASE` that repeats the Action test, keeping 5.2's shape;
+`commit_sha`, `patch_started_at` and `patch_finished_at`, each the first match on the Patch line of
+`\*{0,2}Patch:\*{0,2}[^\n]*?` followed by `REPLY_COMMIT`'s, `REPLY_STARTED`'s or `REPLY_FINISHED`'s
+pattern, whatever the action, the times through `TO_TIMESTAMP` with `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'`
+(its quotes doubled in the SQL string), null when they do not parse; `raw_response`. The input is
+one `CONCAT` in the format of 6.3's examples, `FINDING <id> in <repository>`, `CVE: <cve_id> (CVSS
+<score>)`, `Package: <package> <installed_version>, fixed in <fixed_version>` and `Scanner said:
+<finding>`, with each text column in `COALESCE(…, 'N/A')` and the score cast bare, since 6.1 copies
+no null score. The header: what it reads and writes; the latest offset, since every row is a model
+call and, on `PATCH`, a call to the laptop; start it after 6.1's replay, with `patch-agent` and its
+tunnel running; the parsing; `patch_status` worked out here, not by the agent; a stopped
+patch-agent's answer, Flink's agent card error (issue 02), is `INVALID` and `N/A`; the time zones,
+checked: `event_time` holds UTC (ops-sim's epoch milliseconds in a `TIMESTAMP(3)`, which the wall
+reads as UTC), and `TO_TIMESTAMP` reads a string "under the 'UTC+0' time zone" (Confluent's
+reference, read on 2026-11-26) into a `TIMESTAMP(3)`, whatever the workspace's session zone, so the
+patch's times are UTC as well, where `TO_TIMESTAMP_LTZ` and a cast would have brought the session
+zone in (D-054); the `COALESCE`s; running it twice writes every decision twice). Tests:
+`tests/test_agent_sql.py` (6.4 joins `INSERTS`, so the latest-offset, `INVALID`, call-by-name,
+arity, select-star, `ESCALATE` and input-label rules hold for it; the Reason test takes two endings,
+to the end of the answer when Reason is the agent's last line, to the end of its line when another
+follows; a small evaluator of the SQL the INSERT uses, with Flink's null rules, Java's find for
+`REGEXP_EXTRACT` and `TO_TIMESTAMP`'s pattern turned into `strptime`'s, runs the select list and
+the input on findings and answers: one statement with no filter; the columns in the DDL's order,
+the finding's five copied; the action `CASE` the capacity leg's with the two actions; the labels
+6.3 declares, the three patch patterns being the reply patterns after the Patch label; the reply
+contract, `format_reply` for a parsed and an unparsed request with times given in CET, giving back
+the commit and both times in UTC, 1.62 s after the finding's `event_time`; `patch_status` for
+eleven answers: a patch, the same in markdown bold or after the example's tool lines, `Patch:
+FAILED`, a reply copied without its commit, no Patch line, a `DISMISS`, an action out of the set
+(its commit still read), issue 02's A2A error with `SUCCESS` or another status, and a failed
+call whose answer says `PATCH`; the input built from each of 6.3's examples is that example's four lines, word for word; a
+null in any text column still gives an input; each of 6.3's example answers parses back to its
+action and reason, the `PATCH` one to `PATCHED` with its request's commit and its reply's times;
+the header). `platform-team/` is unchanged: section 6 joins `deploy_labs` in issue 08.
