@@ -3968,4 +3968,17 @@ and at the two moments with checkout bars, the six frames, a PATCH with its hatc
 a DISMISS, FAILED, INVALID, the unreachable INVALID and "No answer", and the PATCH frame 55 s on); a
 hovered bar shows its own tooltip; Shift+Tab reaches the security row's last bar and Tab a checkout
 bar, each showing its tooltip and keeping the focus as the snapshots come; and new tickets and
-windows arrive on our page as on HEAD's.
+windows arrive on our page as on HEAD's. Pass 3's question, answered by the coordinator (the "one
+place" rule wins, D-068's review fixes, where a bar's tooltip words come from the snapshot, the
+precedent), in a commit of its own: `state.py`'s `_outcome_text` words what our agent's run came to,
+"Action: Patch. Commit 16e8af2.", "Action: Patch. No commit came back." for `FAILED`, "The patch
+agent could not be reached, so no decision came back." for a stopped patch agent, "No PATCH or
+DISMISS came back.", "Waiting for the security agent." or "The security agent gave no answer.", and
+our bar carries it as `outcomeText`, so `findingRunTip` writes the parts a bar carries in one order
+and no longer tests the lane or the action, which `state.py` alone now tests; the snapshot gains
+that field on our bars and nothing else (`action`, `outcome`, `commit` and `patchStatus` stay,
+though the page no longer reads them on our bar), 153 of 153 of issue 10's snapshots the same bytes
+once it is dropped and the lane key put back. Tests: `tests/test_opswall_state.py` checks the
+sentence in each case, 8 tests failing before; issue 10's harness, against the pass 3 commit's page
+and state, passes 308 of 308 checks, the four rows the same PNG and the rows' DOM the same string in
+all ten scenes.

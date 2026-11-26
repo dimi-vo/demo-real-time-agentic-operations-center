@@ -1357,8 +1357,9 @@ def test_a_patch_is_our_closed_bar_hatched_while_it_waits_with_the_external_bar_
         "key": "security-agent@SCAN-000123", "lane": "security-agent", "findingId": "SCAN-000123",
         "repository": "checkout", "cveId": "CVE-2026-41234", "cvssScore": 9.8, "start": pytest.approx(_tpos(FT + 0.6)),
         "end": pytest.approx(_tpos(FT + 12.6)), "open": False, "label": "Patched in 12s",
-        "action": "PATCH", "outcome": "Patch", "reason": PATCH_REASON, "commit": COMMIT, "patchStatus": "PATCHED",
-        "unreachable": False,
+        "action": "PATCH", "outcome": "Patch",
+        "outcomeText": f"Action: Patch. Commit {COMMIT}.",  # the tooltip's sentence (the code review's M5)
+        "reason": PATCH_REASON, "commit": COMMIT, "patchStatus": "PATCHED", "unreachable": False,
         # the hatch: the external run's span, on our bar
         "waitFrom": pytest.approx(_tpos(FT + 3.1)), "waitTo": pytest.approx(_tpos(FT + 9.1)),
     }
@@ -1373,6 +1374,7 @@ def test_a_patch_is_our_closed_bar_hatched_while_it_waits_with_the_external_bar_
         "duration": pytest.approx(6.0), "durationText": "6s",
     }
     assert security["start"] < external["start"] < external["end"] < security["end"]
+    assert "outcomeText" not in external  # its tooltip is the reply and the times, which the page writes
 
 
 def test_a_dismiss_is_one_bar_and_no_external_one():
@@ -1383,24 +1385,28 @@ def test_a_dismiss_is_one_bar_and_no_external_one():
     assert (run["lane"], run["open"], run["label"]) == ("security-agent", False, "Dismissed in 8s")
     assert (run["action"], run["outcome"], run["reason"]) == (
         "DISMISS", "Dismiss", "Only a dev dependency of the test suite.")
+    assert run["outcomeText"] == "Action: Dismiss."
     assert (run["commit"], run["patchStatus"], run["unreachable"]) == (None, "N/A", False)
     assert (run["waitFrom"], run["waitTo"]) == (None, None)
 
 
-@pytest.mark.parametrize(("action", "status", "raw", "label", "outcome", "unreachable"), [
+@pytest.mark.parametrize(("action", "status", "raw", "label", "outcome", "unreachable", "text"), [
     # lab 6.4: a PATCH whose Patch line holds no commit
     ("PATCH", "FAILED", "Action: PATCH\nReason: r\nPatch: FAILED, the call timed out", "Patch agent unreachable",
-     "Patch", True),
-    ("INVALID", "N/A", "I am not sure.", "Invalid answer", "Invalid", False),
+     "Patch", True, "Action: Patch. No commit came back."),
+    ("INVALID", "N/A", "I am not sure.", "Invalid answer", "Invalid", False, "No PATCH or DISMISS came back."),
     # Flink's error for a patch agent it could not reach, but not the whole answer: the agent answered
-    ("INVALID", "N/A", f"Action: unsure\nPatch: {A2A_ERROR}", "Invalid answer", "Invalid", False),
+    ("INVALID", "N/A", f"Action: unsure\nPatch: {A2A_ERROR}", "Invalid answer", "Invalid", False,
+     "No PATCH or DISMISS came back."),
 ])
-def test_a_failed_patch_and_an_invalid_answer_read_their_words(action, status, raw, label, outcome, unreachable):
+def test_a_failed_patch_and_an_invalid_answer_read_their_words(action, status, raw, label, outcome, unreachable,
+                                                               text):
     st = OpsWallState()
     _critical(st, "SCAN-000125", at=FT + 1)
     _patch_decision(st, "SCAN-000125", at=FT + 31, action=action, status=status, reason=None, raw=raw)
     [run] = _sec(st)["runs"]
     assert (run["open"], run["label"], run["outcome"], run["unreachable"]) == (False, label, outcome, unreachable)
+    assert run["outcomeText"] == text
     assert run["end"] == pytest.approx(_tpos(FT + 31))
 
 
@@ -1420,6 +1426,7 @@ def test_a_stopped_patch_agent_reads_patch_agent_unreachable_in_red_and_is_a_mis
     [run] = row["runs"]
     assert (run["label"], run["unreachable"], run["action"], run["outcome"]) == (
         "Patch agent unreachable", True, "INVALID", "Invalid")
+    assert run["outcomeText"] == "The patch agent could not be reached, so no decision came back."
     assert (run["commit"], run["waitFrom"], run["waitTo"]) == (None, None, None)
     assert (row["issues"]["injected"], row["issues"]["detected"], row["issues"]["missed"]) == (1, 0, 1)
 
@@ -1429,10 +1436,12 @@ def test_with_no_decision_our_bar_works_for_60_s_then_reads_no_answer():
     _critical(st, "SCAN-000127", at=FT + 1)
     [run] = _sec(st, now=FT + 4.2)["runs"]
     assert (run["open"], run["label"], run["outcome"], run["end"]) == (True, "Working 3s", None, 120)
+    assert run["outcomeText"] == "Waiting for the security agent."
     [run] = _sec(st, now=FT + 61)["runs"]
     assert (run["open"], run["label"]) == (True, "Working 1m 00s")  # checkout gives up after 30 s; ours after 60
     [run] = _sec(st, now=FT + 61.5)["runs"]
     assert (run["open"], run["label"], run["outcome"]) == (False, "No answer", None)
+    assert run["outcomeText"] == "The security agent gave no answer."
     assert run["end"] == pytest.approx(_tpos(FT + 61, now=FT + 61.5))  # it ends 60 s after it started
     # A late decision still closes it, as a ticket's does.
     _dismissed(st, "SCAN-000127", at=FT + 76)

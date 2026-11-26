@@ -1160,12 +1160,14 @@ def _finding_run_json(run: _Run, left: float) -> dict:
 
 
 def _decision_tip(run: _Run, left: float) -> dict:
-    """Our bar's tooltip: the action, the reason and the commit, and where the hatch is."""
+    """Our bar's tooltip: the action, its outcome in the tooltip's words, the reason and the
+    commit, and where the hatch is."""
     f = run.item
     hatch = _hatch(run)
     return {
         "action": f.action,
         "outcome": _words(f.action, SECURITY_ACTION_WORDS),
+        "outcomeText": _outcome_text(run),  # the page writes it as it comes (the code review's M5)
         "reason": f.reason,
         "commit": f.commit_sha,
         "patchStatus": f.patch_status,
@@ -1173,6 +1175,24 @@ def _decision_tip(run: _Run, left: float) -> dict:
         "waitFrom": _axis(hatch[0], left) if hatch else None,
         "waitTo": _axis(hatch[1], left) if hatch else None,
     }
+
+
+def _outcome_text(run: _Run) -> str:
+    """What our agent's run came to, as its tooltip says it: the action and the commit, or what
+    a stopped patch agent, an answer with no action, a FAILED patch or no answer at all left."""
+    f = run.item
+    lost = f.action == INVALID and _unreachable(f)  # a stopped patch agent: Flink's agent card error
+    if lost:
+        said = "The patch agent could not be reached, so no decision came back."
+    elif f.action == INVALID:
+        said = "No PATCH or DISMISS came back."
+    elif f.action is not None:
+        said = f"Action: {_words(f.action, SECURITY_ACTION_WORDS)}."
+    else:
+        said = "Waiting for the security agent." if run.open else "The security agent gave no answer."
+    if f.commit_sha:
+        return f"{said} Commit {f.commit_sha}."
+    return f"{said} No commit came back." if _unreachable(f) and not lost else said
 
 
 def _patch_tip(run: _Run) -> dict:

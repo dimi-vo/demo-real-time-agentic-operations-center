@@ -1196,29 +1196,24 @@ function drawHatch(bar, r) {
   }
 }
 
-// A finding's bar's tooltip. Ours: the finding, the security agent's action and its reason, the
-// commit, and how long it waited on the patch agent (the hatch). The external one: the patch
-// agent's reply, when the patch started and finished, and how long it took.
+// A finding's bar's tooltip: the finding, then the parts the bar carries, in this order. The state
+// chose them by lane and worded our agent's outcome (r.outcomeText: the action and the commit, or
+// what came back instead), so the page tests neither the lane nor the action. Ours carries that
+// outcome, how long it waited on the patch agent (the hatch) and the reason; the external one when
+// the patch started and finished, how long it took, and the patch agent's reply.
 function findingRunTip(r, lane) {
   const score = r.cvssScore != null ? `, CVSS ${Number(r.cvssScore).toFixed(1)}` : "";
   const head = `<strong>${esc(r.cveId || r.findingId)} in ${esc(r.repository || "?")}</strong>` +
     `${esc(r.findingId)}${score} · ${esc(lane)} · ${esc(r.label)}`;
-  if (r.lane === "external") {
-    const when = r.startedAt != null && r.finishedAt != null
-      ? `<em>Started ${clockOf(r.startedAt)}, finished ${clockOf(r.finishedAt)}: ${esc(r.durationText || dur(r.duration || 0))}.</em>`
-      : "";
-    return head + when + (r.reply ? `<span class="reason">${esc(clip(String(r.reply), 240))}</span>` : "");
-  }
-  const lost = r.action === "INVALID" && r.unreachable;  // a stopped patch agent: Flink's agent card error
-  const answer = lost ? "The patch agent could not be reached, so no decision came back."
-    : r.action === "INVALID" ? "No PATCH or DISMISS came back."
-    : r.outcome != null ? `Action: ${esc(r.outcome)}.`
-    : r.open ? "Waiting for the security agent." : "The security agent gave no answer.";
-  const commit = r.commit ? ` Commit ${esc(r.commit)}.` : r.unreachable && !lost ? " No commit came back." : "";
+  const outcome = r.outcomeText ? `<em>${esc(r.outcomeText)}</em>` : "";
+  const when = r.startedAt != null && r.finishedAt != null
+    ? `<em>Started ${clockOf(r.startedAt)}, finished ${clockOf(r.finishedAt)}: ${esc(r.durationText || dur(r.duration || 0))}.</em>`
+    : "";
   const wait = r.waitFrom != null && r.waitTo != null
     ? `<em>Waiting on patch agent for ${dur(r.waitTo - r.waitFrom)}, the hatched part.</em>` : "";
-  return `${head}<em>${answer}${commit}</em>${wait}` +
-    (r.reason ? `<span class="reason">${esc(clip(String(r.reason), 180))}</span>` : "");
+  return head + outcome + when + wait +
+    (r.reason ? `<span class="reason">${esc(clip(String(r.reason), 180))}</span>` : "") +
+    (r.reply ? `<span class="reason">${esc(clip(String(r.reply), 240))}</span>` : "");
 }
 
 // ---------- Issues ----------
