@@ -9,6 +9,8 @@ As registered by Confluent Cloud (checked in Phase 3): TIMESTAMP(3) maps to
 `local-timestamp-millis`, and an upsert table's PRIMARY KEY columns are in the key
 subject only, not in the value.
 
+The two CVE source tables (D-070) copy support_tickets' options, checked here too.
+
 The two ticket output tables (D-068) have no .avsc (Flink writes them), but they copy
 support_tickets' columns and options, so their DDL is checked against it here too.
 """
@@ -28,6 +30,8 @@ PAIRS = [
     ("sql/source_service_incidents.sql", "schemas/service_incidents.avsc", None),
     ("sql/source_support_tickets.sql", "schemas/support_tickets.avsc", None),  # D-068
     ("sql/source_ticket_answer_key.sql", "schemas/ticket_answer_key.avsc", None),
+    ("sql/source_cve_scans.sql", "schemas/cve_scans.avsc", None),  # D-070
+    ("sql/source_cve_answer_key.sql", "schemas/cve_answer_key.avsc", None),
 ]
 _PRIMARY_KEY = re.compile(r"PRIMARY KEY \(([^)]*)\)")
 
@@ -139,6 +143,50 @@ def test_the_ticket_tables_take_service_incidents_options(table):
         return sql[sql.index("  WATERMARK") :]
 
     assert tail(table) == tail("service_incidents")
+
+
+def test_the_cve_tables_have_the_specs_columns_in_order():
+    # D-070, spec decisions 8 and 9.
+    scans = _ddl_columns((ROOT / "sql/source_cve_scans.sql").read_text())
+    assert list(scans.items()) == [
+        ("event_time", "local-timestamp-millis"),
+        ("finding_id", "string"),
+        ("repository", "string"),
+        ("cve_id", "string"),
+        ("package", "string"),
+        ("installed_version", "string"),
+        ("fixed_version", "string"),
+        ("cvss_score", "double"),
+        ("finding", "string"),
+    ]
+    answer_key = _ddl_columns((ROOT / "sql/source_cve_answer_key.sql").read_text())
+    assert list(answer_key.items()) == [
+        ("event_time", "local-timestamp-millis"),
+        ("finding_id", "string"),
+        ("expected_action", "string"),
+    ]
+
+
+@pytest.mark.parametrize("table", ["cve_scans", "cve_answer_key"])
+def test_the_cve_tables_take_support_tickets_options(table):
+    # The same WITH options, bucket and 5 s watermark as support_tickets; no key columns.
+    def tail(name):
+        sql = (ROOT / f"sql/source_{name}.sql").read_text()
+        return sql[sql.index("  WATERMARK") :]
+
+    assert tail(table) == tail("support_tickets")
+
+
+def test_every_cve_column_has_a_comment_and_the_answer_key_says_who_reads_it():
+    for table in ("cve_scans", "cve_answer_key"):
+        sql = (ROOT / f"sql/source_{table}.sql").read_text()
+        columns = [ln for ln in sql.splitlines() if _COLUMN.match(ln)]
+        assert columns and all(" COMMENT '" in ln for ln in columns), table
+    answer_key = (ROOT / "sql/source_cve_answer_key.sql").read_text()
+    assert "FOR THE WALL AND EVALUATE ONLY" in answer_key
+    action = re.search(r"^\s+`expected_action` (.+)$", answer_key, re.MULTILINE).group(1)
+    for word in ("PATCH", "DISMISS", "NULL"):
+        assert word in action, word
 
 
 TICKET_COLUMNS = [

@@ -2,7 +2,7 @@
 
 `DryRunSink` writes the data events as JSON lines on stdout (each tagged with
 `_stream` or `_event`, so they're greppable and testable) and a concise human line
-per schedule event and per support ticket on stderr. The Kafka sink lives in
+per schedule event, per support ticket and per CVE scan finding on stderr. The Kafka sink lives in
 `opsgen/kafka_io.py` (Phase 2).
 """
 
@@ -13,6 +13,7 @@ import sys
 from datetime import datetime, timezone
 
 from opsgen.engine import BAD_DEPLOY_TYPES, Event, Incident
+from opsgen.findings import NewFinding
 from opsgen.tickets import SOURCES_BY_CODE, NewTicket
 
 
@@ -67,6 +68,25 @@ def format_ticket(t: NewTicket, clock: str | None = None) -> str:
     )
 
 
+def format_finding(f: NewFinding, clock: str | None = None) -> str:
+    """One human-readable line per CVE scan finding (D-070): its id, score, repository, CVE and
+    package bump, then its answer key in brackets, set apart like a ticket's:
+
+        [10:42:05] FINDING         SCAN-000001   9.4  checkout           CVE-2026-41234  ...
+            ... urllib3 1.26.4 -> 1.26.18  [truth: PATCH]
+
+    on one line. A finding that isn't critical reads `[truth: not critical]`.
+    """
+    finding, key = f
+    when = clock if clock is not None else _hms(finding["event_time"] / 1000)
+    truth = key["expected_action"] or "not critical"
+    return (
+        f"[{when}] FINDING         {finding['finding_id']}  {finding['cvss_score']:>4.1f}  "
+        f"{finding['repository']:<17}  {finding['cve_id']}  "
+        f"{finding['package']} {finding['installed_version']} -> {finding['fixed_version']}  [truth: {truth}]"
+    )
+
+
 def format_record(topic: str, record: dict, now: float, key: str | None = None) -> str:
     """One record as ops-sim sends it, for `--show-records`: the topic, the Kafka key (the
     raw service name unless `key` says otherwise: an answer-key record's is its ticket id)
@@ -117,6 +137,14 @@ class DryRunSink:
             self.out.write(json.dumps({"_stream": "support_tickets", **t.ticket}) + "\n")
             self.out.write(json.dumps({"_stream": "ticket_answer_key", **t.answer_key}) + "\n")
             self.log.write(format_ticket(t) + "\n")
+        self.log.flush()
+
+    def emit_findings(self, findings: list[NewFinding]) -> None:
+        """Each finding's two records, tagged with their topics, and its console line (D-070)."""
+        for f in findings:
+            self.out.write(json.dumps({"_stream": "cve_scans", **f.finding}) + "\n")
+            self.out.write(json.dumps({"_stream": "cve_answer_key", **f.answer_key}) + "\n")
+            self.log.write(format_finding(f) + "\n")
         self.log.flush()
 
     def emit_event(self, ev: Event) -> None:

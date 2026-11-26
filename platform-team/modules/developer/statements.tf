@@ -1,11 +1,12 @@
-# The workshop's tables and model, created as the platform team: the five source tables
-# (service_metrics, service_deployments, service_incidents, and checkout's support_tickets
-# and ticket_answer_key, D-068), the five output tables the labs fill with INSERT
-# statements (service_error_rate, service_health, remediation_decisions, and section 5's
-# p1_tickets and ticket_triage, D-068), and the model: 11 statements. With main.tf's five
-# resources and the root's name suffix, that is 17 resources per developer. A demo
-# environment (deploy_labs = true, D-069) also gets the labs' 12 statements, at the end of
-# this file: 23 statements, 29 resources.
+# The workshop's tables and model, created as the platform team: the seven source tables
+# (service_metrics, service_deployments, service_incidents, checkout's support_tickets
+# and ticket_answer_key, D-068, and the scanner's cve_scans and cve_answer_key, D-070),
+# the five output tables the labs fill with INSERT statements (service_error_rate,
+# service_health, remediation_decisions, and section 5's p1_tickets and ticket_triage,
+# D-068), and the model: 13 statements. With main.tf's five resources and the root's name
+# suffix, that is 19 resources per developer. A demo environment (deploy_labs = true,
+# D-069) also gets the labs' 12 statements, at the end of this file: 25 statements, 31
+# resources.
 # Each statement is signed with the Global key and runs as that key's owner (principal_id).
 #
 # The DDL is all IF NOT EXISTS, so re-running apply is a no-op for anything already
@@ -236,6 +237,90 @@ resource "confluent_flink_statement" "create_ticket_answer_key_table" {
   depends_on = [confluent_flink_statement.create_support_tickets_table]
 }
 
+resource "confluent_flink_statement" "create_cve_scans_table" {
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE TABLE IF NOT EXISTS `cve_scans` (
+      `event_time` TIMESTAMP(3) COMMENT 'When the scanner reported the finding; also the Kafka record timestamp',
+      `finding_id` STRING COMMENT 'The finding id: SCAN- and six digits, e.g. SCAN-000123',
+      `repository` STRING COMMENT 'The repository: web-gateway, checkout, payments, ci-tools or storefront-legacy (archived)',
+      `cve_id` STRING COMMENT 'The CVE, fictional: CVE-2026-4xxxx. The same CVE can be found in several repositories',
+      `package` STRING COMMENT 'The vulnerable package, e.g. urllib3',
+      `installed_version` STRING COMMENT 'The version the repository has',
+      `fixed_version` STRING COMMENT 'The first version without the vulnerability',
+      `cvss_score` DOUBLE COMMENT 'CVSS score, 0.0 to 10.0 with one decimal; critical at 9.0 or more (lab 6.1)',
+      `finding` STRING COMMENT 'What the scanner said: where the package sits and whether the vulnerable code is used',
+      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
+    )
+    DISTRIBUTED INTO 1 BUCKETS
+    WITH (
+      'changelog.mode' = 'append',
+      'connector' = 'confluent',
+      'kafka.cleanup-policy' = 'delete',
+      'kafka.consumer.isolation-level' = 'read-uncommitted',
+      'kafka.message-timestamp-type' = 'create-time',
+      'kafka.retention.time' = '24 h',
+      'scan.startup.mode' = 'earliest-offset',
+      'value.format' = 'avro-registry'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_ticket_answer_key_table]
+}
+
+resource "confluent_flink_statement" "create_cve_answer_key_table" {
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE TABLE IF NOT EXISTS `cve_answer_key` (
+      `event_time` TIMESTAMP(3) COMMENT 'When the finding was reported (its cve_scans event_time); also the Kafka record timestamp',
+      `finding_id` STRING COMMENT 'The finding this answers for (cve_scans.finding_id)',
+      `expected_action` STRING COMMENT 'For a critical finding (CVSS 9.0 or more), what the security agent should answer: PATCH (shipped in a deployed service and the vulnerable code is used) or DISMISS; NULL when not critical',
+      WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND
+    )
+    DISTRIBUTED INTO 1 BUCKETS
+    WITH (
+      'changelog.mode' = 'append',
+      'connector' = 'confluent',
+      'kafka.cleanup-policy' = 'delete',
+      'kafka.consumer.isolation-level' = 'read-uncommitted',
+      'kafka.message-timestamp-type' = 'create-time',
+      'kafka.retention.time' = '24 h',
+      'scan.startup.mode' = 'earliest-offset',
+      'value.format' = 'avro-registry'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_cve_scans_table]
+}
+
 resource "confluent_flink_statement" "create_service_error_rate_table" {
   organization { id = data.confluent_organization.main.id }
   environment { id = confluent_environment.main.id }
@@ -279,7 +364,7 @@ resource "confluent_flink_statement" "create_service_error_rate_table" {
     "sql.current-database" = confluent_kafka_cluster.main.display_name
   }
 
-  depends_on = [confluent_flink_statement.create_ticket_answer_key_table]
+  depends_on = [confluent_flink_statement.create_cve_answer_key_table]
 }
 
 resource "confluent_flink_statement" "create_service_health_table" {

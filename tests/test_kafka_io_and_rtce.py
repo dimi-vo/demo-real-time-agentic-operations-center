@@ -86,6 +86,24 @@ def test_kafka_sink_produces_a_ticket_and_its_answer_key_keyed_by_raw_strings(mo
     assert serializer_conf["auto.register.schemas"] is False
 
 
+def test_kafka_sink_produces_a_finding_and_its_answer_key_keyed_by_raw_strings(monkeypatch):
+    # D-070: no key schemas. A finding is keyed by its repository, as support_tickets is by its
+    # service; an answer-key record by its finding id. Both value schemas are looked up.
+    from opsgen.findings import NewFinding
+
+    sink, produced, serializer_conf = _kafka_sink(monkeypatch)
+    finding = {"event_time": 1_800_000_005_000, "finding_id": "SCAN-000007", "repository": "payments",
+               "cve_id": "CVE-2026-44052", "package": "pyyaml", "installed_version": "5.3.1",
+               "fixed_version": "5.4.1", "cvss_score": 9.7, "finding": "f"}  # fmt: skip
+    key = {"event_time": 1_800_000_005_000, "finding_id": "SCAN-000007", "expected_action": "DISMISS"}
+    sink.emit_findings([NewFinding(finding, key)])
+    assert produced == [
+        ("cve_scans", b"payments", ("cve_scans-value", finding), 1_800_000_005_000),
+        ("cve_answer_key", b"SCAN-000007", ("cve_answer_key-value", key), 1_800_000_005_000),
+    ]
+    assert serializer_conf["auto.register.schemas"] is False
+
+
 def _card():
     return {
         "AIOPS_RTCE_MCP_ENDPOINT": (

@@ -111,6 +111,8 @@ run "statements_signed_as_principal_in_the_developer_catalog" {
       contains(keys(output.flink_statements), "service_incidents") &&
       contains(keys(output.flink_statements), "support_tickets") &&
       contains(keys(output.flink_statements), "ticket_answer_key") &&
+      contains(keys(output.flink_statements), "cve_scans") &&
+      contains(keys(output.flink_statements), "cve_answer_key") &&
       contains(keys(output.flink_statements), "service_error_rate") &&
       contains(keys(output.flink_statements), "service_health") &&
       contains(keys(output.flink_statements), "remediation_decisions") &&
@@ -118,12 +120,12 @@ run "statements_signed_as_principal_in_the_developer_catalog" {
       contains(keys(output.flink_statements), "ticket_triage") &&
       contains(keys(output.flink_statements), "llm_textgen_model")
     )
-    error_message = "the module must create the five source tables, the five output tables and the model"
+    error_message = "the module must create the seven source tables, the five output tables and the model"
   }
 
   assert {
-    condition     = length(output.flink_statements) == 11
-    error_message = "the module must create ten tables and the model, and nothing else"
+    condition     = length(output.flink_statements) == 13
+    error_message = "the module must create twelve tables and the model, and nothing else"
   }
 }
 
@@ -158,6 +160,44 @@ run "the_ticket_source_tables_are_created" {
       can(regex("^CREATE TABLE IF NOT EXISTS `ticket_answer_key`", confluent_flink_statement.create_ticket_answer_key_table.statement))
     )
     error_message = "the two ticket source tables must be created"
+  }
+}
+
+# The scanner's findings and their answer key (D-070): append-only sources with
+# support_tickets' options and its 5 s watermark, no key columns, one bucket, after the
+# tickets' two in the chain.
+run "the_cve_source_tables_are_created" {
+  command = plan
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in [
+        confluent_flink_statement.create_cve_scans_table,
+        confluent_flink_statement.create_cve_answer_key_table,
+        ] : (
+        can(regex("'changelog.mode' = 'append'", s.statement)) &&
+        can(regex("'kafka.consumer.isolation-level' = 'read-uncommitted'", s.statement)) &&
+        can(regex("'kafka.cleanup-policy' = 'delete'", s.statement)) &&
+        can(regex("'kafka.retention.time' = '24 h'", s.statement)) &&
+        can(regex("DISTRIBUTED INTO 1 BUCKETS", s.statement)) &&
+        can(regex("WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND", s.statement)) &&
+        !can(regex("PRIMARY KEY", s.statement))
+      )
+    ])
+    error_message = "cve_scans and cve_answer_key must be append-only, read-uncommitted, delete-cleanup tables in one bucket with a 5 s watermark and no key"
+  }
+
+  assert {
+    condition = (
+      can(regex("^CREATE TABLE IF NOT EXISTS `cve_scans`", confluent_flink_statement.create_cve_scans_table.statement)) &&
+      can(regex("`cvss_score` DOUBLE", confluent_flink_statement.create_cve_scans_table.statement)) &&
+      can(regex("^CREATE TABLE IF NOT EXISTS `cve_answer_key`", confluent_flink_statement.create_cve_answer_key_table.statement))
+    )
+    error_message = "the two CVE source tables must be created, and cve_scans must have a DOUBLE cvss_score"
   }
 }
 
@@ -323,8 +363,8 @@ run "deploy_labs_runs_the_twelve_lab_statements_as_principal_in_the_developer_ca
   }
 
   assert {
-    condition     = length(output.flink_statements) == 23
-    error_message = "with deploy_labs, the module must create the ten tables, the model and the labs' 12 statements"
+    condition     = length(output.flink_statements) == 25
+    error_message = "with deploy_labs, the module must create the twelve tables, the model and the labs' 12 statements"
   }
 
   assert {

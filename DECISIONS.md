@@ -3470,3 +3470,72 @@ placeholder once, no section opened and the tunnel TODO; the CLI's defaults and 
 local `uv run patch-agent --min-delay 0 --max-delay 0` answered `curl` on both routes, and with
 the default delays one call took 9.5 s. `platform-team/` is unchanged: section 6 joins
 `deploy_labs` in issue 08.
+
+Issue 03 (the finding generator: templates, the scan clock, the answer key, the two source
+tables): `opsgen/finding_templates.py` (new; 20 templates as data, each a `FindingTemplate` with
+an expected action, a `DISMISS` reason, the repositories it may name and the scanner's sentence:
+6 `PATCH`, naming only web-gateway, checkout or payments, where the package is a runtime
+dependency of the deployed service and the vulnerable code is called; 6 `DISMISS`, 2 each for
+`dev_only` (test or build tooling only), `archived` (storefront-legacy only) and `not_called`
+(shipped, no call to the vulnerable function); 8 ordinary findings in any of the five
+repositories; no sentence says "patch" or "dismiss" or holds an apostrophe; the `Advisory` pools,
+6 critical and 6 ordinary, each a fictional `CVE-2026-4xxxx` on a real package with its installed
+and fixed versions, its vulnerable function and what the flaw does, the two pools sharing no CVE
+so a CVE is critical everywhere or nowhere, and `CVE-2026-41234` being the patch agent's urllib3
+example; the `{calls}` pool; `fill`, which draws the advisory, the other placeholders and the
+repository in sorted name order and returns the finding's columns), `opsgen/findings.py` (new;
+`ScanClock`: Poisson(1/15) a tick, 30 % critical, half of those `PATCH` and the rest `DISMISS`
+with the three reasons equally, CVSS 9.0–10.0 for a critical finding and 4.0–8.9 otherwise, one
+decimal, drawn in a fixed order; one id counter, `SCAN-000001` on, a `cve_scans` record and a
+`cve_answer_key` record per finding, both stamped with the tick; off with `--no-incidents`),
+`opsgen/simulation.py` (the clock on `Random(seed + 4)`, which nothing else used; `Tick` gains a
+fifth list, `findings`; `state_snapshot` saves `next_finding_number`, and a state file without it
+starts at 1; the class docstring lists the five generators), `opsgen/driver.py` (findings go to
+the sink; a tick with a finding saves the state; `--simulate` prints a line per finding and ends
+with `# findings: N in M min, X a minute` and the critical ones by expected action, or `#
+findings: off (--no-incidents)`; the banner adds `findings: 1/15s critical=30% PATCH=50%`, and
+reads `no incidents, no tickets, no findings`), `opsgen/sinks.py` (`DryRunSink.emit_findings`:
+the `cve_scans` and `cve_answer_key` stream tags and the console line `FINDING  SCAN-000001
+9.4  checkout  CVE-2026-41234  urllib3 1.26.4 -> 1.26.18  [truth: PATCH]`, or `[truth: not
+critical]`), `opsgen/kafka_io.py` (`FINDINGS_TOPIC` and `CVE_ANSWER_KEY_TOPIC`, their serializer
+contexts, `emit_finding`, `emit_cve_answer_key` and `emit_findings`; raw-string keys, `repository`
+and `finding_id`; schemas looked up, never registered), `opsgen/cli.py` (the live start line
+names the two topics; the docstring; no new flags, so `--show-records` shows no findings),
+docstrings in `opsgen/{__init__,state}.py`. Every caller that unpacked `Tick`'s four lists takes
+the fifth: `scripts/tuning/sweep.py` and the opsgen tests, with `emit_findings` on their recording
+sinks. The tables: `sql/source_cve_scans.sql` and `sql/source_cve_answer_key.sql` (new; the
+columns of spec decisions 8 and 9, `cvss_score` a `DOUBLE`, every column commented, and
+`support_tickets`' options, bucket and 5 s watermark; the answer key's header says it is for the
+wall and `evaluate` only), `schemas/cve_scans.avsc` and `schemas/cve_answer_key.avsc` (new),
+`platform-team/modules/developer/statements.tf` (two statements byte-identical to the SQL,
+chained after `ticket_answer_key` and before `service_error_rate`; the header's counts, 13
+statements and 19 resources, 25 and 31 with `deploy_labs`), `outputs.tf` (both in
+`flink_statements`), `modules/developer/main.tf`, the root `main.tf` and the root `outputs.tf`'s
+validation text (twelve tables). The topic lists, `reset` and the readiness check are issue 04's;
+the platform-team README's counts are issue 11's. Tests: `opsgen/tests/test_findings.py` (new:
+6/2/2/2/8 by category; the five repositories; `PATCH` and `not_called` naming only the three
+services, `archived` only storefront-legacy, ordinary ones any; every placeholder has a pool and
+every template fills with none left over, its columns the advisory it names; the same seed fills
+the same; fictional unique CVE ids, each fixed version above its installed one, the spec's
+urllib3 example; no "patch", "dismiss" or apostrophe; one or two sentences; each critical
+template's cues by keyword, shipped and called for `PATCH`, shipped and not called for
+`not_called`, dev or build tooling for `dev_only`, archived for `archived`, and no advisory or pool
+value adding one; the rate, the critical share and the `PATCH` share over 20 hours, and the three
+reasons about a third each; the scores' ranges and both ends; one answer key per finding on the
+same tick, null exactly when not critical; ids from `SCAN-000001`, increasing through a restart
+from the state file, saved on every tick with a finding, and from 1 with a pre-D-070 state file;
+findings on, off or 30 times as many leave metrics, deploys, incidents and tickets as they were;
+the clock on `seed + 4`; the same seed gives the same findings; `--no-incidents` gives none),
+`opsgen/tests/test_output.py` (the dry-run records and console lines, a live tick sending both
+streams with the DDL's columns, `--show-records` changing nothing for findings, the `--simulate`
+lines from the first minute, their summary, the banner, and both clocks off with
+`--no-incidents`), `opsgen/tests/test_tickets.py` (tickets on, off or many leave the findings
+too), `tests/test_kafka_io_and_rtce.py` (a finding to `cve_scans` keyed by its repository and its
+answer key to `cve_answer_key` keyed by its id, never registering), `tests/test_schema_vs_ddl.py`
+(both pairs, the columns in order, `support_tickets`' tail, every column commented and the answer
+key's header), `tests/test_platform_team_sync.py` (`COPIED_TABLES`, twelve tables, the chain), and
+in `platform-team/tests/` the counts (13, 25) and a plan run on the two tables' options.
+`uv run ops-sim --dry-run --simulate 15 --seed 1` gives 63 findings, 20 critical (13 `PATCH`, 7
+`DISMISS`), and leaving out the finding lines, the banner and the closing summary, the same output
+line for line as the branch's base. The templates wait on the user's approval (issue 03's
+Comments) before issue 06 takes its examples from them.

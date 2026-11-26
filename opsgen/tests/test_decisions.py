@@ -316,6 +316,9 @@ class _RecordingSink:
     def emit_tickets(self, tickets):
         self.out += [("ticket", t) for t in tickets]
 
+    def emit_findings(self, findings):
+        self.out += [("finding", f) for f in findings]
+
     def flush(self):
         pass
 

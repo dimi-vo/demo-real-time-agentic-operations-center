@@ -4,12 +4,14 @@ Mirrors the reference simulator: one `AvroSerializer` with `auto.register.schema
 off and `use.latest.version` on resolves whichever subject the `SerializationContext`
 names, so the latest schema Flink registered from the DDL is used for each of
 `service_metrics-value`, `service_deployments-value`, `service_deployments-key`,
-`service_incidents-value`, `support_tickets-value` and `ticket_answer_key-value`.
+`service_incidents-value`, `support_tickets-value`, `ticket_answer_key-value`,
+`cve_scans-value` and `cve_answer_key-value`.
 
 - `service_metrics` is append-only with no primary key: the Kafka message key is the
   raw `service_name` string (no key schema), like the reference `car_telemetry`.
   `service_incidents` and `support_tickets` are keyed the same way; `ticket_answer_key`
-  by the raw `ticket_id` string (D-068).
+  by the raw `ticket_id` string (D-068). `cve_scans` by the raw `repository` string and
+  `cve_answer_key` by the raw `finding_id` string (D-070).
 - `service_deployments` is a keyed upsert table: the key is Avro-encoded against the
   registered `service_deployments-key` subject (primitive or record, inspected once),
   like the reference `race_standings`.
@@ -29,6 +31,7 @@ from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroSerializer
 from confluent_kafka.serialization import MessageField, SerializationContext
 
+from opsgen.findings import NewFinding
 from opsgen.sinks import format_event
 from opsgen.tickets import NewTicket
 
@@ -37,6 +40,8 @@ DEPLOYMENTS_TOPIC = "service_deployments"
 INCIDENTS_TOPIC = "service_incidents"
 TICKETS_TOPIC = "support_tickets"  # checkout's tickets (D-068)
 ANSWER_KEY_TOPIC = "ticket_answer_key"
+FINDINGS_TOPIC = "cve_scans"  # the scanner's findings (D-070)
+CVE_ANSWER_KEY_TOPIC = "cve_answer_key"
 
 
 def key_payload(key_schema_str: str, service_name: str):
@@ -83,6 +88,8 @@ class KafkaSink:
         self._inc_value_ctx = SerializationContext(INCIDENTS_TOPIC, MessageField.VALUE)
         self._ticket_value_ctx = SerializationContext(TICKETS_TOPIC, MessageField.VALUE)
         self._answer_key_value_ctx = SerializationContext(ANSWER_KEY_TOPIC, MessageField.VALUE)
+        self._finding_value_ctx = SerializationContext(FINDINGS_TOPIC, MessageField.VALUE)
+        self._cve_answer_key_value_ctx = SerializationContext(CVE_ANSWER_KEY_TOPIC, MessageField.VALUE)
         self._dep_key_fn = self._build_deployments_key_fn()
 
     def _build_deployments_key_fn(self):
@@ -154,6 +161,34 @@ class KafkaSink:
         for t in tickets:
             self.emit_ticket(t.ticket)
             self.emit_answer_key(t.answer_key)
+        self._producer.poll(0)
+
+    def emit_finding(self, record: dict) -> None:
+        """One CVE scan finding. No key subject: the message key is the raw repository string,
+        as support_tickets is keyed by its service. The Kafka record timestamp is event_time."""
+        self._producer.produce(
+            FINDINGS_TOPIC,
+            key=record["repository"].encode("utf-8"),
+            value=self._serializer(record, self._finding_value_ctx),
+            timestamp=int(record["event_time"]),
+        )
+
+    def emit_cve_answer_key(self, record: dict) -> None:
+        """One finding's answer key. No key subject: the message key is the raw finding_id
+        string. The Kafka record timestamp is event_time (ms), the finding's."""
+        self._producer.produce(
+            CVE_ANSWER_KEY_TOPIC,
+            key=record["finding_id"].encode("utf-8"),
+            value=self._serializer(record, self._cve_answer_key_value_ctx),
+            timestamp=int(record["event_time"]),
+        )
+
+    def emit_findings(self, findings: list[NewFinding]) -> None:
+        """Each finding and its answer key, on the same tick. Live mode prints no line for
+        them."""
+        for f in findings:
+            self.emit_finding(f.finding)
+            self.emit_cve_answer_key(f.answer_key)
         self._producer.poll(0)
 
     def emit_event(self, ev) -> None:

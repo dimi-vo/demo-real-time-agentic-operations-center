@@ -1,5 +1,5 @@
 """platform-team/ must work when copied out of the repo, so its developer module
-carries its own copies of the ten CREATE TABLE statements (five source tables, five
+carries its own copies of the twelve CREATE TABLE statements (seven source tables, five
 output tables) and of the labs' twelve statements (D-069). This test keeps those copies in
 step with the single source of truth in sql/ (the tables with whitespace normalized, the
 labs character for character), the labs' statements behind deploy_labs, and the statements
@@ -21,6 +21,8 @@ COPIED_TABLES = (
     ("service_incidents", "sql/source_service_incidents.sql"),
     ("support_tickets", "sql/source_support_tickets.sql"),  # D-068
     ("ticket_answer_key", "sql/source_ticket_answer_key.sql"),
+    ("cve_scans", "sql/source_cve_scans.sql"),  # D-070
+    ("cve_answer_key", "sql/source_cve_answer_key.sql"),
     ("service_error_rate", "sql/sink_service_error_rate.sql"),  # D-067
     ("service_health", "sql/sink_service_health.sql"),
     ("remediation_decisions", "sql/sink_remediation_decisions.sql"),
@@ -82,13 +84,15 @@ def test_statements_tf_matches_sql_source(table, sql_path):
     )
 
 
-def test_all_ten_tables_are_present():
+def test_all_twelve_tables_are_present():
     assert set(_heredoc_tables()) == {
         "service_metrics",
         "service_deployments",
         "service_incidents",
         "support_tickets",
         "ticket_answer_key",
+        "cve_scans",
+        "cve_answer_key",
         "service_error_rate",
         "service_health",
         "remediation_decisions",
@@ -144,8 +148,9 @@ def test_only_the_lab_statements_are_behind_deploy_labs():
 
 
 def test_the_statements_run_one_after_another_sources_then_outputs_then_the_model_then_the_labs():
-    """D-037: one chain, each statement waiting for the one before. D-068: the sources first,
-    then the output tables in the order the labs fill them, and the model. D-069: then the
+    """D-037: one chain, each statement waiting for the one before. D-068: the sources first
+    (D-070's two CVE sources after the tickets'), then the output tables in the order the labs
+    fill them, and the model. D-069: then the
     labs' statements, in lab order."""
     text = STATEMENTS_TF.read_text()
     starts = [(m.start(), m.group(1)) for m in _RESOURCE.finditer(text)]
@@ -163,6 +168,8 @@ def test_the_statements_run_one_after_another_sources_then_outputs_then_the_mode
         "create_service_incidents_table",
         "create_support_tickets_table",
         "create_ticket_answer_key_table",
+        "create_cve_scans_table",
+        "create_cve_answer_key_table",
         "create_service_error_rate_table",
         "create_service_health_table",
         "create_remediation_decisions_table",

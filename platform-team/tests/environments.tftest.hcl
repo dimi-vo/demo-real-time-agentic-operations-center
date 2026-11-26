@@ -77,14 +77,14 @@ run "deploy_labs_reaches_every_environment" {
   }
 
   assert {
-    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 23])
+    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 25])
     error_message = "with deploy_labs, every developer's stack must run the labs' 12 statements"
   }
 }
 
 run "the_workshop_apply_runs_no_lab_statement" {
   assert {
-    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 11])
-    error_message = "by default, every developer's stack must run only the ten tables and the model"
+    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 13])
+    error_message = "by default, every developer's stack must run only the twelve tables and the model"
   }
 }

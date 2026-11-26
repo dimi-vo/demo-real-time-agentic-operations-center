@@ -4,7 +4,7 @@
   uv run ops-sim --dry-run               # print raw events to stdout, no Kafka
   uv run ops-sim --dry-run --simulate 60 # fast synthetic clock, window summaries
   uv run ops-sim --dry-run --seed 42     # reproducible schedule and traffic
-  uv run ops-sim --no-incidents          # baseline traffic only: no incidents, deploys or tickets
+  uv run ops-sim --no-incidents          # baseline traffic only: no incidents, deploys, tickets or findings
   uv run ops-sim --show-records payments # also print payments' service_metrics record every 5 s
   uv run ops-sim --show-records checkout # also print each ticket and its answer-key record
 
@@ -15,6 +15,11 @@ and no metrics, deploys or incidents (D-068): about 4 a minute from the first se
 Zendesk and ServiceNow, P1 30 %, P2 30 %, P3 40 %, and half the P1s really HIGH. Each one has an
 answer-key record in `ticket_answer_key` (`opsgen/tickets.py`). `--dry-run` prints a line per
 ticket, with its answer key set apart.
+
+A scanner also reports CVE findings in River Shop's repositories (D-070): about 4 a minute into
+`cve_scans`, 30 % of them critical (CVSS 9.0 or more), and half the critical ones worth patching.
+Each one has an answer-key record in `cve_answer_key` (`opsgen/findings.py`), and `--dry-run`
+prints a line per finding the same way.
 
 Live, ops-sim also tails `remediation_decisions`: an agent's correct answer resolves its
 incident on the next tick, and an incident nobody resolves expires at its 35 s cap (D-065).
@@ -102,8 +107,8 @@ def main(argv: list[str] | None = None) -> None:
     initial = load_state(state_path(root))
     sim = Simulation(args.seed, start=aligned_start(time.time()), config=config, initial_state=initial)
     print(
-        "Producing to service_metrics, service_deployments, service_incidents, support_tickets "
-        "and ticket_answer_key. Ctrl-C to stop."
+        "Producing to service_metrics, service_deployments, service_incidents, support_tickets, "
+        "ticket_answer_key, cve_scans and cve_answer_key. Ctrl-C to stop."
     )
     sink = KafkaSink(card)
     print("Reading remediation_decisions: a correct agent answer resolves its incident.")

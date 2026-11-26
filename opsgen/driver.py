@@ -10,12 +10,12 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from opsgen import tickets
+from opsgen import findings, tickets
 from opsgen.engine import DEPLOY_CLOCK_SERVICE, INCIDENT_TYPES, WINDOW_SECONDS, Config, next_window_boundary
 from opsgen.groundtruth import end_record, start_record
 from opsgen.services import TICKET_SERVICES, metric_service_names
 from opsgen.simulation import REEMIT_INTERVAL, Simulation
-from opsgen.sinks import format_event, format_record, format_ticket
+from opsgen.sinks import format_event, format_finding, format_record, format_ticket
 from opsgen.state import save_state, state_path
 
 if TYPE_CHECKING:  # the feed needs Kafka; --dry-run and --simulate never import it
@@ -51,15 +51,15 @@ def tick_once(
     show_records: str | None = None,
 ) -> None:
     """One second of live output: tick with the decisions read since the last tick (so a
-    resolving one ends its incident on this tick, D-065), emit the records, events and
-    tickets, and save the state (every 5 s, and on any event or ticket) when `st_path` is
-    given.
+    resolving one ends its incident on this tick, D-065), emit the records, events, tickets
+    and findings, and save the state (every 5 s, and on any event, ticket or finding) when
+    `st_path` is given.
 
     `show_records` names a service (`--show-records`). For a metric service, on the first
     tick and then every REEMIT_INTERVAL (5 s, with the deployment heartbeat), its
     service_metrics record goes to stderr as sent. For checkout, every ticket and its
     answer-key record go to stderr as they are produced (D-068)."""
-    metrics, deps, events, new_tickets = sim.tick(now, decisions.drain() if decisions is not None else ())
+    metrics, deps, events, new_tickets, new_findings = sim.tick(now, decisions.drain() if decisions is not None else ())
     if deps:
         sink.emit_deployments(deps)
     sink.emit_metrics(metrics)
@@ -85,8 +85,11 @@ def tick_once(
                 key = t.answer_key["ticket_id"]
                 sys.stderr.write(format_record("ticket_answer_key", t.answer_key, now, key=key) + "\n")
             sys.stderr.flush()
-    # A tick with a ticket saves too, so a restart never reuses its id (D-068).
-    if st_path is not None and (events or new_tickets or round(now - sim.start) % 5 == 0):
+    if new_findings:
+        sink.emit_findings(new_findings)
+    # A tick with a ticket or a finding saves too, so a restart never reuses its id (D-068,
+    # D-070).
+    if st_path is not None and (events or new_tickets or new_findings or round(now - sim.start) % 5 == 0):
         save_state(st_path, sim.state_snapshot())
     sink.flush()
 
@@ -134,17 +137,21 @@ def run_realtime(
 
 def schedule_settings(config: Config) -> str:
     """The schedule's settings on one line, for the start banner (D-060): payments'
-    incidents, web-gateway's deploy clock and checkout's ticket clock (D-068)."""
+    incidents, web-gateway's deploy clock, checkout's ticket clock (D-068) and the scan clock
+    (D-070)."""
     if config.no_incidents:
-        return "no incidents, no tickets"
+        return "no incidents, no tickets, no findings"
     rests = " ".join(f"{t}={config.rests[t]:g}s" for t in INCIDENT_TYPES)
     gaps = config.deploy_clock_gaps
     clock = f"{DEPLOY_CLOCK_SERVICE} deploys: first={config.deploy_clock_first:g}s every={min(gaps):g}-{max(gaps):g}s"
     prios = " ".join(f"{p}={w:.0%}" for p, w in zip(tickets.PRIORITIES, tickets.PRIORITY_WEIGHTS, strict=True))
     ticket_clock = f"{tickets.SERVICE} tickets: 1/{1 / tickets.RATE:g}s {prios} P1-HIGH={tickets.P1_HIGH_SHARE:.0%}"
+    scan_clock = (
+        f"findings: 1/{1 / findings.RATE:g}s critical={findings.CRITICAL_SHARE:.0%} PATCH={findings.PATCH_SHARE:.0%}"
+    )
     return (
         f"quiet={config.quiet_period:g}s max={config.max_duration:g}s gap={config.gap:g}s rests: {rests}; "
-        f"{clock}; {ticket_clock}"
+        f"{clock}; {ticket_clock}; {scan_clock}"
     )
 
 
@@ -161,13 +168,27 @@ def _ticket_summary(drawn: list[tickets.NewTicket], minutes: float) -> list[str]
     ]
 
 
+def _finding_summary(drawn: list[findings.NewFinding], minutes: float) -> list[str]:
+    """The `--simulate` closing lines for the scan clock: findings a minute, and the critical
+    ones by expected action (D-070)."""
+    actions = Counter(f.answer_key["expected_action"] for f in drawn)
+    critical = actions[findings.PATCH] + actions[findings.DISMISS]
+    per_minute = len(drawn) / minutes if minutes else 0.0
+    return [
+        f"# findings: {len(drawn)} in {minutes:g} min, {per_minute:.1f} a minute",
+        f"#   critical: {critical} (PATCH {actions[findings.PATCH]}, DISMISS {actions[findings.DISMISS]}), "
+        f"not critical: {actions[None]}",
+    ]
+
+
 def run_simulate(sim: Simulation, minutes: float, out=None) -> None:
     """Run a synthetic clock for `minutes` without sleeping, printing one summary line
     per metric service per 10-second window plus the deploy/incident log (brief section 4.5).
     A line sums up the window's metrics records the way the labs do: total traffic and
     average latency (lab 2.3), and the share of failed requests (lab 2.2) (D-058, D-067).
     Each of checkout's tickets gets its console line, and the run ends with the tickets
-    counted by priority and true severity (D-068)."""
+    counted by priority and true severity (D-068); each CVE scan finding too, counted by
+    expected action (D-070)."""
     out = out if out is not None else sys.stdout
     names = metric_service_names()
     total = round(minutes * 60)
@@ -177,15 +198,19 @@ def run_simulate(sim: Simulation, minutes: float, out=None) -> None:
 
     agg = fresh()
     drawn: list[tickets.NewTicket] = []
+    scanned: list[findings.NewFinding] = []
     out.write(f"# ops-sim --simulate {minutes:g}min  ({schedule_settings(sim.config)})\n")
     for k in range(total):
         now = sim.start + k
-        metrics, _deps, events, new_tickets = sim.tick(now)
+        metrics, _deps, events, new_tickets, new_findings = sim.tick(now)
         for ev in events:
             out.write(format_event(ev, clock=_mmss(round(ev.now - sim.start))) + "\n")
         for t in new_tickets:
             out.write(format_ticket(t, clock=_mmss(k)) + "\n")
+        for f in new_findings:
+            out.write(format_finding(f, clock=_mmss(k)) + "\n")
         drawn += new_tickets
+        scanned += new_findings
         for r in metrics:
             a = agg[r["service_name"]]
             a["traffic"] += r["traffic_count"]
@@ -207,4 +232,8 @@ def run_simulate(sim: Simulation, minutes: float, out=None) -> None:
         out.write("".join(line + "\n" for line in _ticket_summary(drawn, minutes)))
     else:
         out.write("# tickets: off (--no-incidents)\n")
+    if sim.scan_clock.on:
+        out.write("".join(line + "\n" for line in _finding_summary(scanned, minutes)))
+    else:
+        out.write("# findings: off (--no-incidents)\n")
     out.flush()

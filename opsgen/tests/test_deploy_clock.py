@@ -156,7 +156,7 @@ def test_a_bad_deploy_record_looks_like_a_good_one():
     sim = Simulation(3, start=0.0)
     seen = {}
     for k in range(600):
-        _, deps, events, _ = sim.tick(float(k))
+        _, deps, events, *_ = sim.tick(float(k))
         for e in events:
             if e.service_name == GATEWAY and e.kind in ("deploy", "bad_deploy"):
                 [rec] = [d for d in deps if d["service_name"] == GATEWAY]

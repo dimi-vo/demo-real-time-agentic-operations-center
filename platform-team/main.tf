@@ -2,7 +2,7 @@
 # Platform team: everything each developer's environment needs, one stack per
 # developer (modules/developer): a new, empty environment with a direct
 # EnvironmentAdmin role binding for the developer's own user account, a Kafka
-# cluster, a Flink compute pool, and the workshop's ten tables and model. With
+# cluster, a Flink compute pool, and the workshop's twelve tables and model. With
 # deploy_labs, the labs' statements too, for a demo environment (D-069).
 #
 # Run with a Global key owned by an OrganizationAdmin. It creates no service

@@ -406,7 +406,7 @@ def test_no_incidents_runs_an_hour_without_a_deploy():
     boot = {r["service_name"]: r for r in sim.bootstrap()}
     heartbeats = 0
     for k in range(3600):
-        _, deps, events, _ = sim.tick(float(k))
+        _, deps, events, *_ = sim.tick(float(k))
         assert events == [], events
         for r in deps:
             heartbeats += 1
