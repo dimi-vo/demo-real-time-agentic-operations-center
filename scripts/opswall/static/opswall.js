@@ -8,7 +8,7 @@
  *  detail slot on the right, then its body) and its Issues panel (svc.issues: injected,
  *  detected of injected with the missed line, the median times to detect and to remediate; the
  *  security row words them its own way), which moves below the row on a narrow screen. svc.row
- *  says which kind of row:
+ *  says which kind of row (ROW_KINDS, under "Rows", holds what differs between them):
  *  - "releases" (web-gateway, the design's deploy row) draws the laptop, the line and the
  *    Releases list on the left and its Errors chart (D-067) on the right, with "Running v…"
  *    in the header (see "Releases row" below);
@@ -516,20 +516,20 @@ function createRow() {
       <div class="issues-head"><h3>Issues</h3><span>Last 10 min</span></div>
       <div class="stats">
         <div class="stat">
-          <span class="stat-label">Injected</span>
+          <span class="stat-label"></span>
           <span class="stat-value" data-k="injected"></span>
         </div>
         <div class="stat">
-          <span class="stat-label">Detected</span>
+          <span class="stat-label"></span>
           <span class="stat-line"><span class="stat-value" data-k="detected"></span><span class="stat-of"></span></span>
           <span class="stat-missed"></span>
         </div>
         <div class="stat">
-          <span class="stat-label">Median time to detect</span>
+          <span class="stat-label"></span>
           <span class="stat-value" data-k="medianTimeToDetect"></span>
         </div>
         <div class="stat remediate">
-          <span class="stat-label">Median time to remediate</span>
+          <span class="stat-label"></span>
           <span class="stat-value" data-k="medianTimeToRemediate"></span>
         </div>
       </div>
@@ -539,8 +539,8 @@ function createRow() {
     main: row.querySelector(".row-main"), issues: row.querySelector(".issues"),
     name: row.querySelector("h2"), status, statusText: status.lastElementChild,
     stat: Object.fromEntries([...row.querySelectorAll(".stat-value")].map(n => [n.dataset.k, n])),
-    of: row.querySelector(".stat-of"), missed: row.querySelector(".stat-missed"),
-    remediate: row.querySelector(".stat.remediate"),
+    labels: [...row.querySelectorAll(".stat-label")], of: row.querySelector(".stat-of"),
+    missed: row.querySelector(".stat-missed"), remediate: row.querySelector(".stat.remediate"),
     charts: [], chartsKey: null,
   };
   return row;
@@ -573,25 +573,43 @@ function ensureCharts(row, kinds) {
   });
 }
 
+// What differs between the kinds of row (svc.row, see the top of this file), in one place: the
+// row's class, whether it draws the snapshot's charts (a row without them has no time axis
+// either), what makes and updates its body (made on its first update), and its Issues panel's
+// words, the four labels top to bottom and the tooltip on the time to remediate. A kind the page
+// doesn't know draws the frame and its charts.
+const INCIDENT_WORDS = {
+  labels: ["Injected", "Detected", "Median time to detect", "Median time to remediate"],
+  remediate: "Measured from the incident's start to the agent's answer",
+};
+const ROW_KINDS = {
+  releases: { cls: "releases-row", charts: true, update: updateReleaseRow, issues: INCIDENT_WORDS },
+  windows: { cls: "windows-row", charts: true, update: updateWindowsRow, issues: INCIDENT_WORDS },
+  tickets: {
+    cls: "ticket-row", charts: false, update: updateTicketRow,
+    issues: { ...INCIDENT_WORDS, remediate: "Measured from the ticket's creation to the responder's answer" },
+  },
+  security: {  // critical findings and decisions, not incidents: spec decision 26's words
+    cls: "security-row", charts: false, update: updateSecurityRow,
+    issues: {
+      labels: ["Critical findings", "Right decisions", "Median time to decide", "Median time to patch"],
+      remediate: "Measured from the finding's scan to the patch agent's finish, patched findings only",
+    },
+  },
+};
+const OTHER_ROW = { cls: "", charts: true, update: () => {}, issues: INCIDENT_WORDS };
+
 function updateRow(row, svc) {
-  const ui = row._ui, status = svc.status || "healthy", tickets = svc.row === "tickets";
-  const releases = svc.row === "releases", windows = svc.row === "windows", security = svc.row === "security";
-  ensureCharts(row, tickets || security ? [] : svc.charts || ["latency", "traffic"]);
-  setClass(row, `svc-row${tickets ? " ticket-row" : releases ? " releases-row" : windows ? " windows-row"
-    : security ? " security-row" : ""} ${status}`);
+  const ui = row._ui, status = svc.status || "healthy", kind = ROW_KINDS[svc.row] || OTHER_ROW;
+  ensureCharts(row, kind.charts ? svc.charts || ["latency", "traffic"] : []);
+  setClass(row, kind.cls ? `svc-row ${kind.cls} ${status}` : `svc-row ${status}`);
   setText(ui.name, svc.name);
   setAttr(ui.main, "aria-label", svc.name);
   setAttr(ui.issues, "aria-label", `${svc.name} issues in the last 10 minutes`);
   setClass(ui.status, `status ${status}`);
   setText(ui.statusText, svc.statusText || "");
-  renderIssues(ui, svc.issues || {});
-  setAttr(ui.remediate, "title", tickets ? "Measured from the ticket's creation to the responder's answer"
-    : security ? "Measured from the finding's scan to the patch agent's finish, patched findings only"
-    : "Measured from the incident's start to the agent's answer");
-  if (tickets) updateTicketRow(row, svc);
-  if (releases) updateReleaseRow(row, svc);
-  if (windows) updateWindowsRow(row, svc);
-  if (security) updateSecurityRow(row, svc);
+  renderIssues(ui, svc.issues || {}, kind.issues);
+  kind.update(row, svc);
   ui.charts.forEach((c, i) => {
     c.host._m = { ...metricModel(svc, c.kind), deployLabels: i === 0 };  // the design labels the top chart's markers
     c.host._draw();
@@ -609,6 +627,44 @@ function flowBody(row, cls, left, label) {
   const detail = row.querySelector(".detail");
   detail.innerHTML = `<span>${label} <span class="detail-value"></span></span>`;
   return { body, value: detail.querySelector(".detail-value"), q: sel => body.querySelector(sel) };
+}
+
+// ---------- Arrivals ----------
+// How a list row takes in what the snapshot brings (D-068): an item whose key the page hasn't
+// seen arrives, unless it is the first snapshot or the item is older than the row allows (a
+// backread). An arrival fades its list row in, once, and may ring its source box; each
+// animation replays by class.
+const FRESH_SECONDS = 10;  // a new id this old or younger animates; an older one (a backread) doesn't
+const FADE_MS = 4200;      // the design's fade on a new list row
+
+// The items of this snapshot's list that arrive, by key and age; holder.seen (null before the
+// first snapshot) becomes the list's keys.
+function freshItems(holder, list, keyOf, timeOf, maxAge = FRESH_SECONDS) {
+  const fresh = holder.seen ? list.filter(x => !holder.seen.has(keyOf(x)) && UPDATED - timeOf(x) <= maxAge) : [];
+  holder.seen = new Set(list.map(keyOf));
+  return fresh;
+}
+
+// A new list row's fade, once: the row's class says " fresh" while n._fresh holds.
+function fadeIn(n, ms = FADE_MS) {
+  n._fresh = true;
+  setTimeout(() => { n._fresh = false; n.classList.remove("fresh"); }, ms);
+}
+
+// A source box rings, lit ("busy") for a second.
+function ring(box) {
+  box.classList.add("busy");
+  replay(box, "ring");
+  clearTimeout(box._busy);
+  box._busy = setTimeout(() => box.classList.remove("busy"), 1000);
+}
+
+// Replay a CSS animation: the class flips between its -a and -b twins, which run the same
+// keyframes, so the animation starts again (the design's way).
+function replay(el, base) {
+  const next = el.classList.contains(`${base}-a`) ? `${base}-b` : `${base}-a`;
+  el.classList.remove(`${base}-a`, `${base}-b`);
+  el.classList.add(next);
 }
 
 // ---------- Releases row ----------
@@ -650,17 +706,12 @@ function updateReleaseRow(row, svc) {
   setText(rl.count, `${releases.count || 0} in 10 min`);
 
   // The keys this snapshot brings that the page hasn't seen: they animate (not on the first).
-  const first = rl.seen === null;
-  const fresh = first ? [] : list.filter(r => !rl.seen.has(r.key) && UPDATED - r.deployedAt <= FRESH_SECONDS);
-  rl.seen = new Set(list.map(r => r.key));
+  const fresh = freshItems(rl, list, r => r.key, r => r.deployedAt);
 
   sync(rl.rows, list, r => r.key, r => {
     const n = document.createElement("div");
     n.innerHTML = '<span class="rl-version"></span><span class="rl-at"></span><span class="rl-back"></span>';
-    if (fresh.includes(r)) {  // the design's fade, once, as the packet lands
-      n._fresh = true;
-      setTimeout(() => { n._fresh = false; n.classList.remove("fresh"); }, 4200);
-    }
+    if (fresh.includes(r)) fadeIn(n);  // as the packet lands
     return n;
   }, (n, r) => {
     const back = r.rolledBackAfter != null;
@@ -674,10 +725,7 @@ function updateReleaseRow(row, svc) {
   });
   if (fresh.length) {
     replay(rl.rows, "rpush");
-    rl.laptop.classList.add("busy");
-    replay(rl.laptop, "ring");
-    clearTimeout(rl.laptop._busy);
-    rl.laptop._busy = setTimeout(() => rl.laptop.classList.remove("busy"), 1000);
+    ring(rl.laptop);
     replay(rl.packet, "travel");
   }
 }
@@ -755,16 +803,12 @@ function updateWindowsRow(row, svc) {
 
   // The keys this snapshot brings that the page hasn't seen: they animate (not on the first).
   const first = ag.seen === null;
-  const fresh = first ? [] : list.filter(w => !ag.seen.has(w.key) && UPDATED - w.windowEnd <= WINDOW_FRESH_SECONDS);
-  ag.seen = new Set(list.map(w => w.key));
+  const fresh = freshItems(ag, list, w => w.key, w => w.windowEnd, WINDOW_FRESH_SECONDS);
 
   sync(ag.rows, list, w => w.key, w => {
     const n = document.createElement("div");
     n.innerHTML = '<div class="ag-json"></div>';
-    if (fresh.includes(w)) {  // the design's fade, once, as the packet lands
-      n._fresh = true;
-      setTimeout(() => { n._fresh = false; n.classList.remove("fresh"); }, 3800);
-    }
+    if (fresh.includes(w)) fadeIn(n, 3800);  // as the packet lands, which is sooner here
     return n;
   }, (n, w) => {
     const flagged = (w.flags || []).length > 0;
@@ -805,25 +849,20 @@ const SOURCE_LAYOUT = [
   { top: 170, labelTop: 196, path: "M40 190 H70 C105 190 110 140 145 140 H170",
     icon: '<path d="M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15z"></path><path d="M10 20.5a2 2 0 0 0 4 0"></path>' },
 ];
-// Where each lane of the snapshot (svc.lanes, by key) is drawn: its band's top in the plot.
-const LANES = [
-  { key: "classifier", top: 30 },
-  { key: "responder", top: 86 },
-];
-const FRESH_SECONDS = 10;  // a new id this old or younger animates; an older one (a backread) doesn't
 const pad2 = n => String(n).padStart(2, "0");
 const ticketTime = sec => {  // "24.11.2026 09:26", local time
   const d = new Date(sec * 1000);
   return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 };
 const prioClass = p => (p === "P1" || p === "P2" ? p.toLowerCase() : "p3");
-// Replay a CSS animation: the class flips between its -a and -b twins, which run the same
-// keyframes, so the animation starts again (the design's way).
-function replay(el, base) {
-  const next = el.classList.contains(`${base}-a`) ? `${base}-b` : `${base}-a`;
-  el.classList.remove(`${base}-a`, `${base}-b`);
-  el.classList.add(next);
-}
+// The ticket row's timeline (see updateTimeline): where each lane of the snapshot (svc.lanes, by
+// key) is drawn, its band's top in the plot; a mark per ticket, a P1 a full-height line with its
+// id, a P2 or P3 a short tick at the bottom; and a bar's tooltip.
+const TICKET_TIMELINE = {
+  lanes: [{ key: "classifier", top: 30 }, { key: "responder", top: 86 }],
+  mark: m => [prioClass(m.priority), m.priority === "P1" ? `P1 ${m.id}` : ""],
+  tip: runTip,
+};
 
 // A timeline of marks and agent runs over the last 2 minutes (the ticket row's, and the
 // security row's): its title, the plot with a band and a chip per lane (lanes: where each
@@ -846,11 +885,51 @@ function timelineHTML(title, label, lanes) {
     </div>`;
 }
 
-// A timeline's parts, for its row to update: the plot, the marks, the bars, the chips by lane.
-function timelineParts(body, lanes) {
-  const q = sel => body.querySelector(sel);
-  return { lanes, plot: q(".tk-plot"), marks: q(".tk-marks"), runs: q(".tk-runs"), agents: q(".tk-agents"),
+// A timeline's parts, for its row to update: what draws it (timeline: TICKET_TIMELINE or
+// SECURITY_TIMELINE) and its lanes, the plot, the marks, the bars, the chips by lane.
+function timelineParts(body, timeline) {
+  const q = sel => body.querySelector(sel), lanes = timeline.lanes;
+  return { timeline, lanes, plot: q(".tk-plot"), marks: q(".tk-marks"), runs: q(".tk-runs"), agents: q(".tk-agents"),
            chips: Object.fromEntries(lanes.map(l => [l.key, q(`.tk-chip.${l.key}`)])) };
+}
+
+// A position on a timeline's axis (seconds from its left edge) as a share of its width.
+const pct = t => `${(Math.max(0, Math.min(t, AXIS)) / AXIS * 100).toFixed(3)}%`;
+
+// A timeline from the snapshot, the ticket row's and the security row's alike: a mark per item
+// (svc.marks, by id), a bar per run in its agent's lane (svc.runs, by key: D-062), the lanes'
+// chips, then the labels placed. What differs is the row's (tl.timeline): where each lane is
+// drawn, a mark's class and label, and a bar's tooltip, given its lane's name; and, if it has
+// them, what a bar holds before its cap and label (bar), adds to its class (barClass) and draws
+// in it (drawBar).
+function updateTimeline(tl, svc) {
+  const { lanes, mark, bar = "", barClass, drawBar, tip } = tl.timeline;
+  sync(tl.marks, svc.marks || [], m => m.id, () => {
+    const n = document.createElement("div");
+    n.appendChild(document.createElement("span"));
+    return n;
+  }, (n, m) => {
+    const [cls, label] = mark(m);
+    setClass(n, `tk-mark ${cls}`);
+    setAttr(n, "style", `left: ${pct(m.t)}`);
+    setText(n.firstChild, label);
+  });
+  const top = Object.fromEntries(lanes.map(l => [l.key, l.top + 9]));
+  const laneName = Object.fromEntries((svc.lanes || []).map(l => [l.key, l.name]));
+  sync(tl.runs, svc.runs || [], r => r.key, () => {
+    const n = document.createElement("div");
+    n.tabIndex = 0;
+    n.innerHTML = `${bar}<span class="tk-cap"></span><span class="tk-run-label"></span>`;
+    return n;
+  }, (n, r) => {
+    setClass(n, `tk-run ${r.lane}${r.open ? " open" : ""}${barClass ? barClass(r) : ""}`);
+    setAttr(n, "style", `left: ${pct(r.start)}; width: ${pct(r.end - r.start)}; top: ${top[r.lane] ?? top[lanes[0].key]}px`);
+    if (drawBar) drawBar(n, r);
+    setText(n.lastChild, r.label || "");
+    n.setAttribute("data-tip", tip(r, laneName[r.lane] || r.lane));
+  });
+  updateChips(tl, svc.lanes);
+  placeLabels(tl);
 }
 
 // The lanes' chips: each lane's name and state, as the snapshot says them (svc.lanes).
@@ -894,11 +973,12 @@ function createTicketBody(row, svcSources) {
         <div class="list-view tk-view" aria-live="polite"><div class="tk-rows"></div></div>
       </div>
     </div>
-    ${timelineHTML("Tickets and agent runs", "Tickets over the last 2 minutes, with the runs of the two agents P1 tickets start", LANES)}`;
+    ${timelineHTML("Tickets and agent runs", "Tickets over the last 2 minutes, with the runs of the two agents P1 tickets start",
+      TICKET_TIMELINE.lanes)}`;
   row.querySelector(".row-main").appendChild(body);
   const q = sel => body.querySelector(sel);
   row._tk = {
-    ...timelineParts(body, LANES), body, rows: q(".tk-rows"), received: q(".list-count"),
+    ...timelineParts(body, TICKET_TIMELINE), body, rows: q(".tk-rows"), received: q(".list-count"),
     sources: Object.fromEntries(SOURCES.map(x => [x.key, q(`.tk-src[data-src="${x.key}"]`)])),
     packets: Object.fromEntries(SOURCES.map(x => [x.key, q(`.tk-packet[data-src="${x.key}"]`)])),
     merge: q(".tk-merge"), seen: null,  // the ids on the previous snapshot; null before the first
@@ -910,8 +990,7 @@ function createTicketBody(row, svcSources) {
 
 function updateTicketRow(row, svc) {
   if (!row._tk) createTicketBody(row, svc.sources || []);
-  const tk = row._tk, T = AXIS, list = (svc.tickets && svc.tickets.newest) || [];
-  const pct = t => `${(Math.max(0, Math.min(t, T)) / T * 100).toFixed(3)}%`;
+  const tk = row._tk, list = (svc.tickets && svc.tickets.newest) || [];
 
   // Header: open P1 tickets, in the accent above 0.
   const openP1 = svc.openP1 || 0;
@@ -919,8 +998,7 @@ function updateTicketRow(row, svc) {
   setClass(tk.openP1, openP1 ? "open-p1 some" : "open-p1");
 
   // The ids this snapshot brings that the page hasn't seen: they animate (not on the first).
-  const fresh = tk.seen ? list.filter(t => !tk.seen.has(t.id) && UPDATED - t.eventTime <= FRESH_SECONDS) : [];
-  tk.seen = new Set(list.map(t => t.id));
+  const fresh = freshItems(tk, list, t => t.id, t => t.eventTime);
 
   // The list: the newest tickets, by id.
   setText(tk.received, `${(svc.tickets && svc.tickets.received) || 0} received`);
@@ -928,10 +1006,7 @@ function updateTicketRow(row, svc) {
     const r = document.createElement("div");
     r.innerHTML = '<span class="tk-badge"></span><div class="tk-text"><span class="tk-title"></span>' +
       '<span class="tk-sub"><span class="tk-id"></span><span class="tk-from"></span></span></div>';
-    if (fresh.includes(t)) {  // the design's fade, once
-      r._fresh = true;
-      setTimeout(() => { r._fresh = false; r.classList.remove("fresh"); }, 4200);
-    }
+    if (fresh.includes(t)) fadeIn(r);
     return r;
   }, (r, t) => {
     setClass(r, `tk-row ${prioClass(t.priority)}${r._fresh ? " fresh" : ""}`);
@@ -945,48 +1020,16 @@ function updateTicketRow(row, svc) {
   if (fresh.length) replay(tk.rows, "push");
   for (const t of fresh.slice().reverse()) {  // oldest first, so the newest colours last
     const box = tk.sources[t.source], packet = tk.packets[t.source], cls = prioClass(t.priority);
-    if (box) {
-      box.dataset.prio = cls;
-      box.classList.add("busy");
-      replay(box, "ring");
-      clearTimeout(box._busy);
-      box._busy = setTimeout(() => box.classList.remove("busy"), 1000);
-    }
+    if (box) { box.dataset.prio = cls; ring(box); }
     if (packet) { packet.dataset.prio = cls; replay(packet, "pkt"); }
     tk.merge.dataset.prio = cls;
     replay(tk.merge, "merge");
   }
 
-  // The timeline: a mark per ticket (a P1 a full-height line with its id, a P2 or P3 a short
-  // tick at the bottom), then the runs, each a bar in its agent's lane, by key.
-  sync(tk.marks, svc.marks || [], m => m.id, () => {
-    const n = document.createElement("div");
-    n.appendChild(document.createElement("span"));
-    return n;
-  }, (n, m) => {
-    setClass(n, `tk-mark ${prioClass(m.priority)}`);
-    setAttr(n, "style", `left: ${pct(m.t)}`);
-    setText(n.firstChild, m.priority === "P1" ? `P1 ${m.id}` : "");
-  });
-  const top = Object.fromEntries(LANES.map(l => [l.key, l.top + 9]));
-  const laneName = Object.fromEntries((svc.lanes || []).map(l => [l.key, l.name]));
-  sync(tk.runs, svc.runs || [], r => r.key, () => {
-    const bar = document.createElement("div");
-    bar.tabIndex = 0;
-    bar.innerHTML = '<span class="tk-cap"></span><span class="tk-run-label"></span>';
-    return bar;
-  }, (bar, r) => {
-    setClass(bar, `tk-run ${r.lane}${r.open ? " open" : ""}`);
-    setAttr(bar, "style", `left: ${pct(r.start)}; width: ${pct(r.end - r.start)}; top: ${top[r.lane] ?? top.classifier}px`);
-    setText(bar.lastChild, r.label || "");
-    bar.setAttribute("data-tip", runTip(r, laneName[r.lane] || r.lane));
-  });
-
-  // The lanes' chips, and the words above the chart: the state said which lane works.
-  updateChips(tk, svc.lanes);
+  // The words above the timeline (the state said which lane works), then the timeline.
   setText(tk.agents, svc.agentsText || "");
   setClass(tk.agents, svc.agentsWorking ? "tk-agents working" : "tk-agents");
-  placeLabels(tk);
+  updateTimeline(tk, svc);
 }
 
 // Two tickets a second apart put their labels on top of each other, and a lane's chip covers
@@ -1054,14 +1097,19 @@ function runTip(r, agent) {
 // along the line, in the accent when critical, rings the laptop and fades its row in. Under
 // prefers-reduced-motion nothing moves (CSS). "Patch agent unreachable" is red (r.unreachable:
 // a FAILED patch, or a stopped patch agent's INVALID). The Issues panel takes spec decision 26's
-// words: critical findings, right decisions with the missed line, the median times to decide and
-// to patch.
-const SECURITY_LANES = [
-  { key: "security", top: 30 },
-  { key: "external", top: 86 },
-];
-// The Issues panel's labels, top to bottom, in place of the services' (spec decision 26).
-const ISSUE_WORDS_SECURITY = ["Critical findings", "Right decisions", "Median time to decide", "Median time to patch"];
+// words (ROW_KINDS): critical findings, right decisions with the missed line, the median times to
+// decide and to patch.
+// The row's timeline (see updateTimeline): our agent's lane above the patch agent's; a mark per
+// finding, a critical one a full-height line with its CVE id, the rest short ticks; a bar holds
+// the hatch, reads "Patch agent unreachable" in red, and has its tooltip.
+const SECURITY_TIMELINE = {
+  lanes: [{ key: "security-agent", top: 30 }, { key: "external", top: 86 }],
+  mark: m => [m.critical ? "critical" : "finding", m.critical ? m.cveId || m.id : ""],
+  bar: '<span class="sc-wait"></span>',
+  barClass: r => (r.unreachable ? " unreachable" : ""),
+  drawBar: drawHatch,
+  tip: findingRunTip,
+};
 
 function createSecurityBody(row) {
   const body = document.createElement("div");
@@ -1086,25 +1134,21 @@ function createSecurityBody(row) {
       </div>
     </div>
     ${timelineHTML("Findings and agent runs", "Findings over the last 2 minutes, with the runs of the security agent "
-      + "on the critical ones and of the external patch agent it calls", SECURITY_LANES)}`;
+      + "on the critical ones and of the external patch agent it calls", SECURITY_TIMELINE.lanes)}`;
   row.querySelector(".row-main").appendChild(body);
   const q = sel => body.querySelector(sel);
   row._sc = {
-    ...timelineParts(body, SECURITY_LANES), body, rows: q(".sc-rows"), scanned: q(".list-count"),
+    ...timelineParts(body, SECURITY_TIMELINE), body, rows: q(".sc-rows"), scanned: q(".list-count"),
     laptop: q(".sc-laptop"), packet: q(".sc-packet"), seen: null,  // the ids on the previous snapshot; null before the first
   };
   const detail = row.querySelector(".detail");
   detail.innerHTML = '<span>Open criticals <span class="open-crit"></span></span>';
   row._sc.open = detail.querySelector(".open-crit");
-  // The Issues panel counts critical findings and decisions, not incidents.
-  const labels = row.querySelectorAll(".issues .stat-label");
-  ISSUE_WORDS_SECURITY.forEach((words, i) => { labels[i].textContent = words; });
 }
 
 function updateSecurityRow(row, svc) {
   if (!row._sc) createSecurityBody(row);
-  const sc = row._sc, T = AXIS, findings = svc.findings || {}, list = findings.newest || [];
-  const pct = t => `${(Math.max(0, Math.min(t, T)) / T * 100).toFixed(3)}%`;
+  const sc = row._sc, findings = svc.findings || {}, list = findings.newest || [];
 
   // Header: the critical findings our agent is working on, in the accent above 0.
   const open = svc.openCriticals || 0;
@@ -1112,18 +1156,14 @@ function updateSecurityRow(row, svc) {
   setClass(sc.open, open ? "open-crit some" : "open-crit");
 
   // The ids this snapshot brings that the page hasn't seen: they animate (not on the first).
-  const fresh = sc.seen ? list.filter(f => !sc.seen.has(f.id) && UPDATED - f.eventTime <= FRESH_SECONDS) : [];
-  sc.seen = new Set(list.map(f => f.id));
+  const fresh = freshItems(sc, list, f => f.id, f => f.eventTime);
 
   // The list: the newest findings, by id.
   setText(sc.scanned, `${findings.scanned || 0} scanned`);
   sync(sc.rows, list, f => f.id, f => {
     const r = document.createElement("div");
     r.innerHTML = '<div class="sc-text"><span class="sc-repo"></span><span class="sc-sub"></span></div><span class="sc-score"></span>';
-    if (fresh.includes(f)) {  // the design's fade, once, as the packet lands
-      r._fresh = true;
-      setTimeout(() => { r._fresh = false; r.classList.remove("fresh"); }, 4200);
-    }
+    if (fresh.includes(f)) fadeIn(r);  // as the packet lands
     return r;
   }, (r, f) => {
     setClass(r, `sc-row${f.critical ? " critical" : ""}${r._fresh ? " fresh" : ""}`);
@@ -1136,47 +1176,24 @@ function updateSecurityRow(row, svc) {
     const crit = fresh.some(f => f.critical) ? "yes" : "no";  // a critical one among them takes the accent
     replay(sc.rows, "rpush");
     sc.laptop.dataset.crit = crit;
-    sc.laptop.classList.add("busy");
-    replay(sc.laptop, "ring");
-    clearTimeout(sc.laptop._busy);
-    sc.laptop._busy = setTimeout(() => sc.laptop.classList.remove("busy"), 1000);
+    ring(sc.laptop);
     sc.packet.dataset.crit = crit;
     replay(sc.packet, "travel");
   }
 
-  // The timeline: a mark per finding, then the bars, each in its lane, by key.
-  sync(sc.marks, svc.marks || [], m => m.id, () => {
-    const n = document.createElement("div");
-    n.appendChild(document.createElement("span"));
-    return n;
-  }, (n, m) => {
-    setClass(n, `tk-mark ${m.critical ? "critical" : "finding"}`);
-    setAttr(n, "style", `left: ${pct(m.t)}`);
-    setText(n.firstChild, m.critical ? m.cveId || m.id : "");
-  });
-  const top = Object.fromEntries(SECURITY_LANES.map(l => [l.key, l.top + 9]));
-  const laneName = Object.fromEntries((svc.lanes || []).map(l => [l.key, l.name]));
-  sync(sc.runs, svc.runs || [], r => r.key, () => {
-    const bar = document.createElement("div");
-    bar.tabIndex = 0;
-    bar.innerHTML = '<span class="sc-wait"></span><span class="tk-cap"></span><span class="tk-run-label"></span>';
-    return bar;
-  }, (bar, r) => {
-    setClass(bar, `tk-run ${r.lane}${r.open ? " open" : ""}${r.unreachable ? " unreachable" : ""}`);
-    setAttr(bar, "style", `left: ${pct(r.start)}; width: ${pct(r.end - r.start)}; top: ${top[r.lane] ?? top.security}px`);
-    // The hatch: the wait's span, as a share of the bar.
-    const wait = bar.firstChild, span = r.end - r.start;
-    const hatched = r.waitFrom != null && r.waitTo != null && r.waitTo > r.waitFrom && span > 0;
-    wait.hidden = !hatched;
-    if (hatched) {
-      const share = t => `${((t - r.start) / span * 100).toFixed(3)}%`;
-      setAttr(wait, "style", `left: ${share(r.waitFrom)}; right: calc(100% - ${share(r.waitTo)})`);
-    }
-    setText(bar.lastChild, r.label || "");
-    bar.setAttribute("data-tip", findingRunTip(r, laneName[r.lane] || r.lane));
-  });
-  updateChips(sc, svc.lanes);
-  placeLabels(sc);
+  updateTimeline(sc, svc);
+}
+
+// The hatch on our bar: the span our agent waited on the patch agent (r.waitFrom to r.waitTo), as
+// a share of the bar; hidden on a bar without one.
+function drawHatch(bar, r) {
+  const wait = bar.firstChild, span = r.end - r.start;
+  const hatched = r.waitFrom != null && r.waitTo != null && r.waitTo > r.waitFrom && span > 0;
+  wait.hidden = !hatched;
+  if (hatched) {
+    const share = t => `${((t - r.start) / span * 100).toFixed(3)}%`;
+    setAttr(wait, "style", `left: ${share(r.waitFrom)}; right: calc(100% - ${share(r.waitTo)})`);
+  }
 }
 
 // A finding's bar's tooltip. Ours: the finding, the security agent's action and its reason, the
@@ -1206,9 +1223,12 @@ function findingRunTip(r, lane) {
 
 // ---------- Issues ----------
 // A row's Issues panel (D-068): the numbers the state counted (svc.issues), whatever they
-// were counted from. Detected reads "x of y" over a missed line, amber when any was missed.
-// The durations come in words ("6s", "1m 05s", "—" with nothing to show).
-function renderIssues(ui, I) {
+// were counted from, under its kind's words (ROW_KINDS). Detected reads "x of y" over a missed
+// line, amber when any was missed. The durations come in words ("6s", "1m 05s", "—" with
+// nothing to show).
+function renderIssues(ui, I, words) {
+  ui.labels.forEach((n, i) => setText(n, words.labels[i]));
+  setAttr(ui.remediate, "title", words.remediate);
   const injected = I.injected ?? 0, missed = I.missed ?? 0;
   setText(ui.stat.injected, String(injected));
   setText(ui.stat.detected, String(I.detected ?? 0));

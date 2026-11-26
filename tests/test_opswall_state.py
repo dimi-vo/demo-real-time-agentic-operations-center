@@ -1354,8 +1354,8 @@ def test_a_patch_is_our_closed_bar_hatched_while_it_waits_with_the_external_bar_
     _patched(st, "SCAN-000123", at=FT + 12.6, started=FT + 3.1, finished=FT + 9.1)
     security, external = _sec(st)["runs"]
     assert security == {
-        "key": "security@SCAN-000123", "lane": "security", "findingId": "SCAN-000123", "repository": "checkout",
-        "cveId": "CVE-2026-41234", "cvssScore": 9.8, "start": pytest.approx(_tpos(FT + 0.6)),
+        "key": "security-agent@SCAN-000123", "lane": "security-agent", "findingId": "SCAN-000123",
+        "repository": "checkout", "cveId": "CVE-2026-41234", "cvssScore": 9.8, "start": pytest.approx(_tpos(FT + 0.6)),
         "end": pytest.approx(_tpos(FT + 12.6)), "open": False, "label": "Patched in 12s",
         "action": "PATCH", "outcome": "Patch", "reason": PATCH_REASON, "commit": COMMIT, "patchStatus": "PATCHED",
         "unreachable": False,
@@ -1380,7 +1380,7 @@ def test_a_dismiss_is_one_bar_and_no_external_one():
     _critical(st, "SCAN-000124", at=FT + 1)
     _dismissed(st, "SCAN-000124", at=FT + 9.4, reason="Only a dev dependency of the test suite.")
     [run] = _sec(st)["runs"]
-    assert (run["lane"], run["open"], run["label"]) == ("security", False, "Dismissed in 8s")
+    assert (run["lane"], run["open"], run["label"]) == ("security-agent", False, "Dismissed in 8s")
     assert (run["action"], run["outcome"], run["reason"]) == (
         "DISMISS", "Dismiss", "Only a dev dependency of the test suite.")
     assert (run["commit"], run["patchStatus"], run["unreachable"]) == (None, "N/A", False)
@@ -1447,9 +1447,10 @@ def test_the_external_bar_appears_only_once_our_agent_has_answered():
     _critical(st, "SCAN-000128", at=FT + 0.6)
     [run] = _sec(st, now=FT + 6)["runs"]  # the patch agent is patching right now
     assert (run["lane"], run["open"], run["label"], run["waitFrom"], run["waitTo"]) == (
-        "security", True, "Working 5s", None, None)
+        "security-agent", True, "Working 5s", None, None)
     _patched(st, "SCAN-000128", at=FT + 12.6, started=FT + 3.1, finished=FT + 9.1)
-    assert [(r["lane"], r["open"]) for r in _sec(st, now=FT + 13)["runs"]] == [("security", False), ("external", False)]
+    assert [(r["lane"], r["open"]) for r in _sec(st, now=FT + 13)["runs"]] == [("security-agent", False),
+                                                                           ("external", False)]
 
 
 def test_an_external_bar_needs_both_times():
@@ -1457,7 +1458,7 @@ def test_an_external_bar_needs_both_times():
     _critical(st, "SCAN-000129", at=FT + 1)
     _patch_decision(st, "SCAN-000129", at=FT + 12, started=FT + 3, finished=None, raw="Action: PATCH\nPatch: odd")
     [run] = _sec(st)["runs"]
-    assert (run["lane"], run["label"], run["waitFrom"]) == ("security", "Patched in 11s", None)
+    assert (run["lane"], run["label"], run["waitFrom"]) == ("security-agent", "Patched in 11s", None)
 
 
 def test_the_hatch_is_the_part_of_our_bar_the_patch_covers():
@@ -1526,7 +1527,7 @@ def test_the_header_counts_the_critical_findings_our_agent_works_on_and_the_lane
     st = OpsWallState()
     row = _sec(st)
     assert row["lanes"] == [
-        {"key": "security", "name": "Security agent", "working": False, "state": "Idle"},
+        {"key": "security-agent", "name": "Security agent", "working": False, "state": "Idle"},
         # the wall learns of the external call only when our agent answers (spec 24): no state
         {"key": "external", "name": "External · LangGraph · A2A", "working": False, "state": None},
     ]
@@ -1617,7 +1618,7 @@ def test_a_finding_fills_in_from_its_four_records_in_any_order():
             apply(st)
         row = _sec(st)
         assert [f["id"] for f in row["findings"]["newest"]] == ["SCAN-000180"]
-        assert [(r["lane"], r["label"]) for r in row["runs"]] == [("security", "Patched in 11s"),
+        assert [(r["lane"], r["label"]) for r in row["runs"]] == [("security-agent", "Patched in 11s"),
                                                                   ("external", f"{COMMIT} in 6s")]
         assert (row["issues"]["detected"], row["issues"]["medianTimeToDetect"],
                 row["issues"]["medianTimeToRemediate"]) == (1, pytest.approx(12.0), pytest.approx(9.0))

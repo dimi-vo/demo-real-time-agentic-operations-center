@@ -1060,10 +1060,10 @@ SECURITY_NAME = "Code security incidents"
 SECURITY_WAIT_SECONDS = 60.0  # our agent's run gives up this long after it started; checkout's 30 s is too short
 SCANNED_SECONDS = 600.0       # "N scanned" and the Issues panel count the findings reported this long ago or since
 FINDINGS_LISTED = 5           # the newest findings the list shows
-# The timeline's lanes, top to bottom. Our agent's lane has the key "security", the row kind's word, for
-# now (the page reads both). The patch agent is always "external" on the wall (spec Terms), and the wall
-# hears of its call only when our agent answers (spec decision 24), so its lane never says it is working.
-SECURITY_AGENT_LANE = Lane("security", "Security agent")
+# The timeline's lanes, top to bottom: our agent's, and the patch agent's. The patch agent is always
+# "external" on the wall (spec Terms), and the wall hears of its call only when our agent answers (spec
+# decision 24), so its lane never says it is working.
+SECURITY_AGENT_LANE = Lane("security-agent", "Security agent")
 EXTERNAL_LANE = Lane("external", "External · LangGraph · A2A", has_state=False)
 SECURITY_LANES = (SECURITY_AGENT_LANE, EXTERNAL_LANE)
 FINDING_FIELDS = ("repository", "cve_id", "package", "installed_version", "fixed_version", "cvss_score")

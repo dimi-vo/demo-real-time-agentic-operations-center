@@ -3946,4 +3946,26 @@ or a finding's record leaves empty is filled by a later one, which failed for th
 poll). Issue 10's harness gives the same snapshot JSON, byte for byte, before and after, 153
 snapshots of every row, checkout's runs and the six security frames at 16 moments and after
 `trim()` (`research/review-fix-2/`), `ops-sim --dry-run --simulate 30 --seed 7` prints the same,
-and 18 mutations of `state.py` are each caught.
+and 18 mutations of `state.py` are each caught. Pass 3, the page's smells, a refactor:
+`static/opswall.js` (M5: one `ROW_KINDS` table says what differs between the kinds of row, its
+class, its charts, its body's update and its Issues panel's words with the remediate tooltip, in
+place of `updateRow`'s tests on `svc.row` and the labels set apart in `createSecurityBody`; M2: one
+`updateTimeline` draws the ticket row's and the security row's timelines, marks and bars kept by key
+as before (D-062), each row giving its lanes, a mark's class and label and a bar's tooltip, and the
+security row the hatch and the red `unreachable` (`TICKET_TIMELINE`, `SECURITY_TIMELINE`); one
+`pct`; every list row takes its arrivals through one `freshItems`, `fadeIn` and `ring`, the releases
+and windows rows included, which held the same copies) and `state.py` (M4 and M6: our agent's lane
+key is "security-agent", so the snapshot says "security" only for the row kind). Declined, with the
+reasons in the review file: JS constants for the lane and action strings, and a tooltip function per
+lane in the page. Left open there, as a question to the user, since this pass kept the snapshot to
+the lane key: ending the second test of the lane and the action in `findingRunTip` needs the
+snapshot to carry our bar's tooltip sentence. Tests: `tests/test_opswall_state.py` takes the new
+key. Issue 10's 153 snapshots change in that key alone, each the same bytes once it is put back
+(`research/review-fix-3/`), and issue 10's harness, which now compares each row with HEAD's page
+drawn from HEAD's state, passes 308 of 308 checks: all four rows are the same PNG, byte for byte,
+and the same DOM but for the lane's class, at 1440 and 820 px, in ten scenes (the base state at T
+and at the two moments with checkout bars, the six frames, a PATCH with its hatch and external bar,
+a DISMISS, FAILED, INVALID, the unreachable INVALID and "No answer", and the PATCH frame 55 s on); a
+hovered bar shows its own tooltip; Shift+Tab reaches the security row's last bar and Tab a checkout
+bar, each showing its tooltip and keeping the focus as the snapshots come; and new tickets and
+windows arrive on our page as on HEAD's.
