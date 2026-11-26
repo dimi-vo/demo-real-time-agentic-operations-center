@@ -1249,6 +1249,8 @@ admin (the `install_fakes` fixture in `tests/conftest.py`). Wording that said th
 be gone before it empties anything, like `reset-health`: it used to rely on the table drops
 and the agent drops taking long enough, and a still-running INSERT would leave stray rows in
 the topics it has just emptied. A statement that stays up is reported as a problem.
+**Resolved by D-069.** The replacement is the platform team's `deploy_labs`, for a demo
+environment only; attendees still start the labs themselves.
 
 ### D-052 · DECISION · `uv run reset-health`: a clean slate for the detection and the agents
 **What.** An attendee who improves their `service_health` query and re-runs the INSERT
@@ -3305,3 +3307,53 @@ traffic chart draws their lines, and the other rows are as in issue 02's render.
 
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.
+
+### D-069 · DECISION · A demo environment: the platform team's Terraform starts the labs' statements behind `deploy_labs`
+**What.** Showing the finished pipeline meant starting the labs' twelve statements by hand,
+as in the live checks (`.scratch/checkout-tickets/issues/12-live-check.md`, "Start the
+statements"). D-051 removed `reset --with-labs` and left open whether anything replaces it.
+**Options.** (a) A `uv` command that submits the `sql/` files with the presenter's card.
+(b) The platform team's Terraform, behind a switch that is off by default.
+**Choice.** (b), decided with the user in a grilling session on 2026-11-25.
+- `deploy_labs`, a root variable that defaults to `false`, adds the labs' 12 statements to
+  every developer stack in the apply: the INSERTs of 2.2 and 2.5, the two agents of 4.2, the
+  three 4.3 legs, 5.1, then 5.2 and 5.3 (each its agent, then its INSERT). They continue
+  D-037's chain after the model, in lab order. A demo stack has 29 resources.
+- It is for a demo environment only, in its own state: a `demo` workspace with its own
+  `demo.tfvars` and one email. The workshop's apply never sets it, because attendees write
+  these statements (D-050), and the switch covers every environment in the apply.
+- The statements are copied into heredocs from `sql/`, from each statement's first line, and
+  `tests/test_platform_team_sync.py` checks them character for character, because the agents'
+  prompts are multi-line strings. The tables are still compared with whitespace normalized.
+- The agents keep a plain `CREATE AGENT`, as in `sql/`. Confluent's docs now list `CREATE AGENT
+  IF NOT EXISTS`, against D-051's "no `IF NOT EXISTS`". That is untested live, and it would
+  make the copies differ from what attendees type.
+- Everything runs as `principal_id`, like the tables. The developer's own key only exists
+  after `uv run deploy`.
+- Only on empty topics: in the apply that creates the environment, or right after `uv run
+  reset`. The agent INSERTs read from the latest offset, 2.2, 2.5 and 5.1 replay their
+  sources, and `depends_on` waits only until the statement before is RUNNING, not until it
+  has caught up. Over existing data, the agents would call the model for every replayed
+  anomaly and P1.
+- Starting over: stop ops-sim, `uv run reset`, then an apply with `-replace` on the four
+  `create_*_agent` statements, then start ops-sim. Their completed statements stay in state,
+  so only `-replace` runs them again. The INSERTs that `reset` deleted drop out of state and
+  come back on their own. `reset-health` and an apply would not do: the sources would replay
+  through the agents.
+**Why.** The other eleven Flink statements are already the platform team's Terraform, and
+the presenter runs `uv run deploy` and starts ops-sim either way, so a `uv` command saves no
+step. Terraform's costs were accepted for a short-lived demo environment: 12 more copies of
+the SQL, a separate state for the demo, eight long-running INSERTs owned by a person, a
+replaced statement for every SQL change, and the `-replace` on a restart.
+**Not checked live.** A demo apply, the restart's `-replace`, and whether deleting a completed
+`CREATE AGENT` statement leaves the agent (assumed, as for the tables).
+**Impact.** `platform-team/variables.tf` and `main.tf` (the switch, passed to the module);
+`platform-team/modules/developer/statements.tf` (12 resources with `count = var.deploy_labs ?
+1 : 0`), `variables.tf`, `outputs.tf` (`flink_statements` lists the labs' statements when they
+exist) and `main.tf`; `terraform.tfvars.example`; `platform-team/README.md` ("A demo
+environment"); `tests/test_platform_team_sync.py` (the exact copies, the switch, the chain);
+`platform-team/tests/developer_module.tftest.hcl` and `environments.tftest.hcl` (none without
+the switch, all twelve with it, in every environment).
+
+Amends D-051 (its open question) and D-068 ("Terraform runs no INSERT", now true only
+without `deploy_labs`).

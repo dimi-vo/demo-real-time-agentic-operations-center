@@ -2,7 +2,8 @@
 # Platform team: everything each developer's environment needs, one stack per
 # developer (modules/developer): a new, empty environment with a direct
 # EnvironmentAdmin role binding for the developer's own user account, a Kafka
-# cluster, a Flink compute pool, and the workshop's ten tables and model.
+# cluster, a Flink compute pool, and the workshop's ten tables and model. With
+# deploy_labs, the labs' statements too, for a demo environment (D-069).
 #
 # Run with a Global key owned by an OrganizationAdmin. It creates no service
 # accounts and no API keys: that one key is the provider credential and signs
@@ -74,6 +75,7 @@ module "developer" {
   region                     = var.region
   flink_max_cfu              = var.flink_max_cfu
   csp_hosted_model           = var.csp_hosted_model
+  deploy_labs                = var.deploy_labs
   principal_id               = local.principal_id
   confluent_cloud_api_key    = var.confluent_cloud_api_key
   confluent_cloud_api_secret = var.confluent_cloud_api_secret

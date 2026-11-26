@@ -3,7 +3,9 @@
 # and ticket_answer_key, D-068), the five output tables the labs fill with INSERT
 # statements (service_error_rate, service_health, remediation_decisions, and section 5's
 # p1_tickets and ticket_triage, D-068), and the model: 11 statements. With main.tf's five
-# resources and the root's name suffix, that is 17 resources per developer.
+# resources and the root's name suffix, that is 17 resources per developer. A demo
+# environment (deploy_labs = true, D-069) also gets the labs' 12 statements, at the end of
+# this file: 23 statements, 29 resources.
 # Each statement is signed with the Global key and runs as that key's owner (principal_id).
 #
 # The DDL is all IF NOT EXISTS, so re-running apply is a no-op for anything already
@@ -17,8 +19,9 @@
 # and the sql/ files.
 #
 # The statements are chained with depends_on in one line (D-037), in the order of this
-# file: the source tables, then the output tables in the order the labs fill them, and the
-# model last. tests/test_platform_team_sync.py checks the chain.
+# file: the source tables, then the output tables in the order the labs fill them, the
+# model, and then the labs' statements in lab order. tests/test_platform_team_sync.py checks
+# the chain.
 
 resource "confluent_flink_statement" "create_service_metrics_table" {
   organization { id = data.confluent_organization.main.id }
@@ -495,4 +498,791 @@ resource "confluent_flink_statement" "llm_textgen_model" {
   }
 
   depends_on = [confluent_flink_statement.create_ticket_triage_table]
+}
+
+# The labs' twelve statements, for a demo environment only (D-069): off unless deploy_labs is
+# true, because attendees write these statements themselves in the workshop. Each is copied
+# from its sql/ file, from the statement's first line to its end, and
+# tests/test_platform_team_sync.py checks the copies character for character.
+#
+# Turn deploy_labs on only while the environment's topics are empty: in the apply that
+# creates the environment, or right after `uv run reset`. The agent INSERTs (4.3, 5.2 and
+# 5.3) read from the latest offset, while 2.2, 2.5 and 5.1 replay their sources, and
+# depends_on waits only until the statement before is RUNNING, not until it has caught up.
+# Started over data that is already there, the agents would call the model for every
+# replayed anomaly and P1.
+#
+# Every statement here is replaced when its SQL changes (the provider's statement argument
+# forces a new resource): a replaced INSERT replays into its output topic, and a replaced
+# CREATE AGENT fails while the agent exists, since an agent, like a table, outlives the
+# statement that created it. CREATE AGENT has no IF NOT EXISTS here, as in sql/. So after
+# `uv run reset`, which stops the INSERTs and drops the agents, re-apply with -replace on the
+# four create_*_agent statements: platform-team/README.md, "A demo environment".
+
+# Lab 2.2 (sql/2.2_service_error_rate.sql): web-gateway's error-rate rule, written to service_error_rate.
+resource "confluent_flink_statement" "insert_service_error_rate" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    INSERT INTO `service_error_rate`
+    WITH enriched AS (
+      SELECT
+        m.event_time,
+        m.service_name,
+        m.traffic_count,
+        m.error_count,
+        d.version,
+        d.previous_version,
+        d.deployed_at,
+        d.last_change
+      FROM `service_metrics` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */ m
+      JOIN `service_deployments` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
+        FOR SYSTEM_TIME AS OF m.event_time AS d
+        ON m.service_name = d.service_name
+      WHERE m.service_name = 'web-gateway'
+    ),
+    windowed AS (
+      SELECT
+        window_start,
+        window_end,
+        service_name,
+        SUM(traffic_count) AS traffic_count,
+        SUM(error_count) AS error_count,
+        LAST_VALUE(version) AS version,
+        LAST_VALUE(previous_version) AS previous_version,
+        LAST_VALUE(last_change) AS last_change,
+        TIMESTAMPDIFF(SECOND, LAST_VALUE(deployed_at), window_end) AS seconds_since_deploy
+      FROM TABLE(TUMBLE(TABLE enriched, DESCRIPTOR(event_time), INTERVAL '10' SECOND))
+      GROUP BY window_start, window_end, service_name
+    )
+    SELECT
+      service_name,
+      window_start,
+      window_end,
+      traffic_count,
+      error_count,
+      CAST(error_count AS DOUBLE) / NULLIF(traffic_count, 0) AS error_rate,
+      CASE
+        WHEN traffic_count > 0 AND error_count >= 0.25 * traffic_count THEN 'HIGH'
+        ELSE 'NORMAL'
+      END AS error_status,
+      version,
+      previous_version,
+      last_change,
+      seconds_since_deploy,
+      -- When this row's verdict was made: an instant (TIMESTAMP_LTZ), evaluated per row, as in
+      -- service_health. Its gap to window_end is the real-time delay: the window has to close.
+      CURRENT_TIMESTAMP AS detected_at
+    FROM windowed;
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.llm_textgen_model]
+}
+
+# Lab 2.5 (sql/2.5_service_health.sql): payments' ARIMA detection, written to service_health.
+resource "confluent_flink_statement" "insert_service_health" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    INSERT INTO `service_health`
+    WITH enriched AS (
+      SELECT
+        m.event_time,
+        m.service_name,
+        m.traffic_count,
+        m.latency_ms,
+        d.version,
+        d.previous_version,
+        d.deployed_at,
+        d.last_change,
+        d.ready_replicas,
+        d.tier
+      FROM `service_metrics` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */ m
+      JOIN `service_deployments` /*+ OPTIONS('scan.startup.mode'='earliest-offset') */
+        FOR SYSTEM_TIME AS OF m.event_time AS d
+        ON m.service_name = d.service_name
+      WHERE m.service_name = 'payments'
+    ),
+    windowed AS (
+      SELECT
+        window_start,
+        window_end,
+        window_time,
+        service_name,
+        SUM(traffic_count) AS traffic_count,
+        AVG(latency_ms) AS avg_latency_ms,
+        LAST_VALUE(version) AS version,
+        LAST_VALUE(previous_version) AS previous_version,
+        LAST_VALUE(last_change) AS last_change,
+        TIMESTAMPDIFF(SECOND, LAST_VALUE(deployed_at), window_end) AS seconds_since_deploy,
+        LAST_VALUE(ready_replicas) AS ready_replicas,
+        LAST_VALUE(tier) AS tier
+      FROM TABLE(TUMBLE(TABLE enriched, DESCRIPTOR(event_time), INTERVAL '10' SECOND))
+      GROUP BY window_start, window_end, window_time, service_name
+    ),
+    anomaly AS (
+      SELECT
+        *,
+        ML_DETECT_ANOMALIES(
+          avg_latency_ms, window_time,
+          JSON_OBJECT('minTrainingSize' VALUE 12, 'maxTrainingSize' VALUE 360, 'confidencePercentage' VALUE 99.95, 'enableStl' VALUE FALSE, 'p' VALUE 1, 'd' VALUE 0, 'q' VALUE 0)
+        ) OVER (PARTITION BY service_name ORDER BY window_time RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS latency_result,
+        ML_DETECT_ANOMALIES(
+          CAST(traffic_count AS DOUBLE), window_time,
+          JSON_OBJECT('minTrainingSize' VALUE 12, 'maxTrainingSize' VALUE 360, 'confidencePercentage' VALUE 99.95, 'enableStl' VALUE FALSE, 'p' VALUE 1, 'd' VALUE 0, 'q' VALUE 0)
+        ) OVER (PARTITION BY service_name ORDER BY window_time RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS traffic_result
+      FROM windowed
+    )
+    SELECT
+      service_name,
+      window_start,
+      window_end,
+      traffic_count,
+      avg_latency_ms,
+      version,
+      previous_version,
+      last_change,
+      seconds_since_deploy,
+      ready_replicas,
+      tier,
+      CASE
+        WHEN latency_result.is_anomaly IS NULL THEN 'WARMING_UP'
+        WHEN latency_result.is_anomaly AND latency_result.actual_value > latency_result.upper_bound THEN 'HIGH'
+        ELSE 'NORMAL'
+      END AS latency_status,
+      latency_result.forecast_value AS expected_latency_ms,
+      latency_result.upper_bound AS latency_upper_bound,
+      CASE
+        WHEN traffic_result.is_anomaly IS NULL THEN 'WARMING_UP'
+        WHEN traffic_result.is_anomaly AND traffic_result.actual_value > traffic_result.upper_bound THEN 'HIGH'
+        WHEN traffic_result.is_anomaly AND traffic_result.actual_value < traffic_result.lower_bound THEN 'LOW'
+        ELSE 'NORMAL'
+      END AS traffic_status,
+      traffic_result.forecast_value AS expected_traffic_count,
+      traffic_result.lower_bound AS traffic_lower_bound,
+      traffic_result.upper_bound AS traffic_upper_bound,
+      -- When this row's verdict was made: an instant (TIMESTAMP_LTZ), evaluated per row. The
+      -- workspace shows it in your time zone, while the window columns are UTC; put
+      -- SET 'sql.local-time-zone' = 'UTC'; in front of the query to see both in UTC. Its gap to
+      -- window_end is the real-time delay: the window has to close and the watermark pass.
+      CURRENT_TIMESTAMP AS detected_at
+    FROM anomaly;
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.insert_service_error_rate]
+}
+
+# Lab 4.2 (sql/4.2_release_agent.sql): the release agent.
+resource "confluent_flink_statement" "create_release_agent" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE AGENT `release_agent`
+    USING MODEL `llm_textgen_model`
+    USING PROMPT 'OUTPUT FORMAT — respond with exactly these 3 labeled lines, in this order. Plain text only: no markdown, no bold, no bullet points, no blank lines, nothing before or after.
+
+    Action: [ROLLBACK | OBSERVE]
+    Target: [the version to roll back to if ROLLBACK, otherwise N/A]
+    Reason: [one or two sentences]
+
+    Correct ROLLBACK example:
+    Action: ROLLBACK
+    Target: 2.9.4
+    Reason: Payments latency is 893 ms against an expected 226 ms and the current version went live 10 seconds ago. Returning to 2.9.4 is the fastest safe fix.
+
+    Correct ROLLBACK example:
+    Action: ROLLBACK
+    Target: 3.4.3
+    Reason: Web-gateway failed 206 of 500 requests in this window, an error rate of 41.2 percent against a threshold of 25 percent, and the current version went live 10 seconds ago. Returning to 3.4.3 is the fastest safe fix.
+
+    Correct OBSERVE example:
+    Action: OBSERVE
+    Target: N/A
+    Reason: Payments latency is 251 ms against an upper bound of 248 ms and the last deploy went live 41 minutes ago, so there is no recent release to roll back. A single window this close to the band is more likely to be noise than a real regression.
+
+    ---
+
+    You are the release reliability engineer on call for River Shop, an online store running three microservices on Kubernetes. Each input below is one 10-second window of data for a single service that has just been flagged, and the Trigger line says how. LATENCY_HIGH: its average latency was flagged by a trained statistical detector (ML_DETECT_ANOMALIES, which compares the measured latency with a forecast and a confidence band learned from the recent history of this service), while its traffic is normal, so this is not a load problem. ERROR_RATE_HIGH: at least 25 percent of its requests in the window failed, a fixed threshold. Either way, decide what the on-call team should do about the release.
+
+    DECISION FRAMEWORK — apply the rules in this order and stop at the first one that matches:
+    1. ROLLBACK — only when ALL THREE hold: Last Change is DEPLOY, Seconds Since Deploy is less than 600, and Previous Version is not N/A. A deploy in the last ten minutes is the prime suspect for a latency regression or a burst of failing requests. Copy Previous Version into the Target line exactly as given.
+    2. OBSERVE — everything rule 1 does not cover: there was no deploy, the deploy is older than 600 seconds, or there is no previous version to return to. With no recent release to blame, there is nothing to roll back, so keep watching.
+
+    STRICT VALUES — the Action line must be exactly ROLLBACK or OBSERVE, with no extra words. The Target line is N/A unless the action is ROLLBACK. Use only the numbers given in the input; never invent a value, a version or a service name.'
+    WITH (
+      'handle_exception' = 'continue',
+      'max_consecutive_failures' = '3',
+      'request_timeout' = '60'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.insert_service_health]
+}
+
+# Lab 4.2 (sql/4.2_capacity_agent.sql): the capacity agent.
+resource "confluent_flink_statement" "create_capacity_agent" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE AGENT `capacity_agent`
+    USING MODEL `llm_textgen_model`
+    USING PROMPT 'OUTPUT FORMAT — respond with exactly these 3 labeled lines, in this order. Plain text only: no markdown, no bold, no bullet points, no blank lines, nothing before or after.
+
+    Action: [INVESTIGATE_UPSTREAM | OBSERVE]
+    Target: N/A
+    Reason: [one or two sentences]
+
+    Correct INVESTIGATE_UPSTREAM example:
+    Action: INVESTIGATE_UPSTREAM
+    Target: N/A
+    Reason: Payments received 31 requests in this window against an expected 298, a collapse rather than a surge. Adding replicas cannot help when work is not arriving, so the caller has to be investigated.
+
+    Correct OBSERVE example:
+    Action: OBSERVE
+    Target: N/A
+    Reason: Payments is at 374 requests per window against an expected 301 and an upper bound of 368, a marginal overshoot. No surge is expected, so more traffic than forecast is noise or the rebound after a drop, and there is no capacity action to take.
+
+    ---
+
+    You are the capacity and reliability engineer on call for River Shop, an online store running three microservices on Kubernetes. Each input below is one 10-second window of health data for a single service whose request count has just been flagged by a trained statistical detector (ML_DETECT_ANOMALIES, which compares the measured count with a forecast and a confidence band learned from the recent history of this service). The service it watches is payments, which normally takes about 300 requests per window on 2 replicas. The Trigger line tells you the direction: TRAFFIC_HIGH means more requests than expected, TRAFFIC_LOW means fewer. No traffic surge is expected at River Shop: more requests than forecast are either noise or the rebound right after a drop, and there is no capacity action to take for them. Decide what the on-call team should do.
+
+    DECISION FRAMEWORK — apply the rules in this order and stop at the first one that matches:
+    1. INVESTIGATE_UPSTREAM — the trigger is TRAFFIC_LOW. A collapse in requests means work is not arriving, so the caller or the upstream dependency has to be investigated.
+    2. OBSERVE — the trigger is TRAFFIC_HIGH. More requests than forecast are noise or the rebound after a drop, not a load problem, so keep watching.
+
+    STRICT VALUES — the Action line must be exactly INVESTIGATE_UPSTREAM or OBSERVE, with no extra words. The Target line is always N/A. Use only the numbers given in the input; never invent a value.'
+    WITH (
+      'handle_exception' = 'continue',
+      'max_consecutive_failures' = '3',
+      'request_timeout' = '60'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_release_agent]
+}
+
+# Lab 4.3, leg 1 (sql/4.3_insert_release_agent_errors.sql): error-rate breaches to the release agent.
+resource "confluent_flink_statement" "insert_release_agent_errors" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    INSERT INTO `remediation_decisions`
+    SELECT
+      h.`window_end`,
+      h.`service_name`,
+      'release_agent',
+      'ERROR_RATE_HIGH',
+      CASE
+        WHEN a.`agent_status` = 'SUCCESS'
+          AND UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
+              IN ('ROLLBACK', 'OBSERVE')
+          THEN UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
+        ELSE 'INVALID'
+      END,
+      NULLIF(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Target:\*{0,2}\s*([^\n]+)', 1)), 'N/A'),
+      TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Reason:\*{0,2}\s*([\s\S]+?)$', 1)),
+      a.`agent_response`,
+      CAST(NULL AS STRING)
+    FROM (
+      SELECT *
+      FROM `service_error_rate` /*+ OPTIONS('scan.startup.mode'='latest-offset') */
+      WHERE `error_status` = 'HIGH'
+    ) h,
+    LATERAL TABLE(AI_RUN_AGENT(
+      'release_agent',
+      CONCAT(
+        'SERVICE ', h.`service_name`, '\n',
+        'Trigger: ERROR_RATE_HIGH\n',
+        'Error Rate: ', CAST(ROUND(h.`error_rate` * 100, 1) AS STRING), ' %',
+        '  Threshold: 25 %\n',
+        'Errors: ', CAST(h.`error_count` AS STRING), ' of ', CAST(h.`traffic_count` AS STRING), ' requests\n',
+        'Last Change: ', COALESCE(h.`last_change`, 'N/A'),
+        '  Seconds Since Deploy: ', CAST(h.`seconds_since_deploy` AS STRING), '\n',
+        'Previous Version: ', COALESCE(h.`previous_version`, 'N/A')
+      )
+    )) AS a(`agent_status`, `agent_response`);
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_capacity_agent]
+}
+
+# Lab 4.3, leg 2 (sql/4.3_insert_release_agent.sql): latency anomalies to the release agent.
+resource "confluent_flink_statement" "insert_release_agent" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    INSERT INTO `remediation_decisions`
+    SELECT
+      h.`window_end`,
+      h.`service_name`,
+      'release_agent',
+      'LATENCY_HIGH',
+      CASE
+        WHEN a.`agent_status` = 'SUCCESS'
+          AND UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
+              IN ('ROLLBACK', 'OBSERVE')
+          THEN UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
+        ELSE 'INVALID'
+      END,
+      NULLIF(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Target:\*{0,2}\s*([^\n]+)', 1)), 'N/A'),
+      TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Reason:\*{0,2}\s*([\s\S]+?)$', 1)),
+      a.`agent_response`,
+      CAST(NULL AS STRING)
+    FROM (
+      SELECT *
+      FROM `service_health` /*+ OPTIONS('scan.startup.mode'='latest-offset') */
+      WHERE `latency_status` = 'HIGH' AND `traffic_status` NOT IN ('HIGH', 'LOW')
+    ) h,
+    LATERAL TABLE(AI_RUN_AGENT(
+      'release_agent',
+      CONCAT(
+        'SERVICE ', h.`service_name`, ' (', h.`tier`, ')\n',
+        'Trigger: LATENCY_HIGH\n',
+        'Average Latency: ', CAST(ROUND(h.`avg_latency_ms`, 1) AS STRING), ' ms',
+        '  Expected: ', CAST(ROUND(h.`expected_latency_ms`, 1) AS STRING), ' ms',
+        '  Expected Upper Bound: ', CAST(ROUND(h.`latency_upper_bound`, 1) AS STRING), ' ms\n',
+        'Last Change: ', COALESCE(h.`last_change`, 'N/A'),
+        '  Seconds Since Deploy: ', CAST(h.`seconds_since_deploy` AS STRING), '\n',
+        'Previous Version: ', COALESCE(h.`previous_version`, 'N/A')
+      )
+    )) AS a(`agent_status`, `agent_response`);
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.insert_release_agent_errors]
+}
+
+# Lab 4.3, leg 3 (sql/4.3_insert_capacity_agent.sql): traffic anomalies to the capacity agent.
+resource "confluent_flink_statement" "insert_capacity_agent" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    INSERT INTO `remediation_decisions`
+    SELECT
+      h.`window_end`,
+      h.`service_name`,
+      'capacity_agent',
+      CASE WHEN h.`traffic_status` = 'HIGH' THEN 'TRAFFIC_HIGH' ELSE 'TRAFFIC_LOW' END,
+      CASE
+        WHEN a.`agent_status` = 'SUCCESS'
+          AND UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
+              IN ('INVESTIGATE_UPSTREAM', 'OBSERVE')
+          THEN UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
+        ELSE 'INVALID'
+      END,
+      NULLIF(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Target:\*{0,2}\s*([^\n]+)', 1)), 'N/A'),
+      TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Reason:\*{0,2}\s*([\s\S]+?)$', 1)),
+      a.`agent_response`,
+      CAST(NULL AS STRING)
+    FROM (
+      SELECT *
+      FROM `service_health` /*+ OPTIONS('scan.startup.mode'='latest-offset') */
+      WHERE `traffic_status` IN ('HIGH', 'LOW')
+    ) h,
+    LATERAL TABLE(AI_RUN_AGENT(
+      'capacity_agent',
+      CONCAT(
+        'SERVICE ', h.`service_name`, ' (', h.`tier`, ')\n',
+        'Trigger: ', CASE WHEN h.`traffic_status` = 'HIGH' THEN 'TRAFFIC_HIGH' ELSE 'TRAFFIC_LOW' END, '\n',
+        'Traffic Count: ', CAST(h.`traffic_count` AS STRING),
+        '  Expected Traffic Count: ', CAST(ROUND(h.`expected_traffic_count`, 0) AS STRING),
+        '  Expected Band: ', CAST(ROUND(h.`traffic_lower_bound`, 0) AS STRING),
+        ' to ', CAST(ROUND(h.`traffic_upper_bound`, 0) AS STRING)
+      )
+    )) AS a(`agent_status`, `agent_response`);
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.insert_release_agent]
+}
+
+# Lab 5.1 (sql/5.1_p1_tickets.sql): the P1 tickets, copied to p1_tickets.
+resource "confluent_flink_statement" "insert_p1_tickets" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    INSERT INTO `p1_tickets`
+    SELECT `event_time`, `ticket_id`, `source`, `service_name`, `priority`, `subject`, `description`
+    FROM `support_tickets`
+    WHERE `priority` = 'P1';
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.insert_capacity_agent]
+}
+
+# Lab 5.2 (sql/5.2_ticket_classifier.sql): the ticket classifier.
+resource "confluent_flink_statement" "create_ticket_classifier" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE AGENT `ticket_classifier`
+    USING MODEL `llm_textgen_model`
+    USING PROMPT 'OUTPUT FORMAT — respond with exactly these 2 labeled lines, in this order. Plain text only: no markdown, no bold, no bullet points, no blank lines, nothing before or after.
+
+    Severity: [HIGH | LOW]
+    Reason: [one or two sentences]
+
+    Correct HIGH example:
+    TICKET INC0041861 from SERVICENOW
+    Priority: P1
+    Subject: Checkout crawling since the campaign email went out
+    Description: Since the campaign email went out at 18:35, checkout takes over a minute to load for all customers, and most of them give up before the order goes through. We have 80 complaints about the slowness already.
+    Answer:
+    Severity: HIGH
+    Reason: All customers have waited over a minute for checkout since 18:35 and most give up before the order goes through, so many customers cannot buy right now.
+
+    Correct LOW example:
+    TICKET ZD-48203 from ZENDESK
+    Priority: P1
+    Subject: Saved cards not loading for me
+    Description: My saved cards do not show up at checkout, so I have to type my card number in every time. Is something wrong with my account?
+    Answer:
+    Severity: LOW
+    Reason: One customer does not see their saved cards and can still pay by typing the card number, so checkout works.
+
+    Correct LOW example:
+    TICKET ZD-48209 from ZENDESK
+    Priority: P1
+    Subject: URGENT!!! DISCOUNT CODE NOT WORKING
+    Description: My code SPRING10 does not apply on order RS-484018. I am losing money on every minute of this, fix it NOW.
+    Answer:
+    Severity: LOW
+    Reason: One customer cannot apply a discount code to one order, and checkout works: they can still buy. The capitals and the urgent wording do not make it HIGH.
+
+    ---
+
+    You are the service desk triage engineer for River Shop, an online store, and you look after its checkout service. Each input below is one support ticket about checkout, from Zendesk or ServiceNow: its id and source, its priority, its subject and its description. Every ticket below was marked P1 by whoever filed it, and reporters over-prioritise: a customer who cannot use a discount code files a P1 as readily as a shop where nobody can pay. Decide how severe each ticket really is.
+
+    DECISION FRAMEWORK — apply the rules in this order and stop at the first one that matches:
+    1. HIGH — the ticket reports that many customers cannot complete checkout or pay, right now. It speaks for many customers (everyone, every order, every payment, a queue of callers), not only for the person who filed it.
+    2. LOW — everything else: one customer, a question, a request, something cosmetic. A problem only the reporter has is LOW, even when they cannot buy. Capitals, exclamation marks, the word "urgent" or the P1 itself never make a ticket HIGH.
+
+    STRICT VALUES — the Severity line must be exactly HIGH or LOW, with no extra words. Use only what the ticket says; never invent customers, numbers or causes.'
+    WITH (
+      'handle_exception' = 'continue',
+      'max_consecutive_failures' = '3',
+      'request_timeout' = '60'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.insert_p1_tickets]
+}
+
+# Lab 5.2 (sql/5.2_insert_ticket_classifier.sql): every P1 to the classifier, its verdict to ticket_triage.
+resource "confluent_flink_statement" "insert_ticket_classifier" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    INSERT INTO `ticket_triage`
+    SELECT
+      t.`event_time`, t.`ticket_id`, t.`source`, t.`service_name`, t.`priority`, t.`subject`, t.`description`,
+      CASE
+        WHEN a.`agent_status` = 'SUCCESS'
+          AND UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Severity:\*{0,2}\s*([^\n]+)', 1)))
+              IN ('HIGH', 'LOW')
+          THEN UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Severity:\*{0,2}\s*([^\n]+)', 1)))
+        ELSE 'INVALID'
+      END,
+      TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Reason:\*{0,2}\s*([\s\S]+?)$', 1)),
+      a.`agent_response`
+    FROM (
+      SELECT *
+      FROM `p1_tickets` /*+ OPTIONS('scan.startup.mode'='latest-offset') */
+    ) t,
+    LATERAL TABLE(AI_RUN_AGENT(
+      'ticket_classifier',
+      CONCAT(
+        'TICKET ', t.`ticket_id`, ' from ', t.`source`, '\n',
+        'Priority: ', t.`priority`, '\n',
+        'Subject: ', COALESCE(t.`subject`, 'N/A'), '\n',
+        'Description: ', COALESCE(t.`description`, 'N/A')
+      )
+    )) AS a(`agent_status`, `agent_response`);
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_ticket_classifier]
+}
+
+# Lab 5.3 (sql/5.3_ticket_responder.sql): the ticket responder.
+resource "confluent_flink_statement" "create_ticket_responder" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    CREATE AGENT `ticket_responder`
+    USING MODEL `llm_textgen_model`
+    USING PROMPT 'OUTPUT FORMAT — respond with exactly these 2 labeled lines, in this order. Plain text only: no markdown, no bold, no bullet points, no blank lines, nothing before or after.
+
+    Action: [ROLLBACK | SCALE_OUT | INVESTIGATE_UPSTREAM]
+    Reason: [one or two sentences]
+
+    There is no Target line: there is never a version or a replica count to give.
+
+    Correct ROLLBACK example:
+    TICKET ZD-48211 from ZENDESK
+    Priority: P1
+    Subject: Blank checkout page after the release
+    Description: Since the release at 09:15, the checkout page goes blank after the address step for everyone we have asked. 45 customers have called in the last half hour and none of them could place an order.
+    Classifier said: Since 09:15 the checkout page goes blank for everyone, and none of the 45 customers who called could place an order, so many customers cannot buy right now.
+    Answer:
+    Action: ROLLBACK
+    Reason: Checkout has gone blank for everyone since the release at 09:15, so the release is the cause. Rolling it back is the fastest fix.
+
+    Correct SCALE_OUT example:
+    TICKET INC0041864 from SERVICENOW
+    Priority: P1
+    Subject: Checkout times out during the flash sale
+    Description: Since the sale started at 14:10, checkout spins for a minute and then times out, for every customer we have talked to.
+    Classifier said: Checkout has timed out for every customer since 14:10, so many customers cannot buy right now.
+    Answer:
+    Action: SCALE_OUT
+    Reason: Checkout has been timing out for every customer since the flash sale started at 14:10, so it cannot keep up with the load. More capacity is the fastest fix.
+
+    Correct INVESTIGATE_UPSTREAM example:
+    TICKET INC0041867 from SERVICENOW
+    Priority: P1
+    Subject: Payment provider rejecting every payment
+    Description: Since 11:30, every payment attempt comes back from the payment provider with error E2210, whatever the card. Customers reach the last step and cannot pay.
+    Classifier said: Every payment attempt has failed since 11:30 and customers cannot pay at the last step, so many customers cannot pay right now.
+    Answer:
+    Action: INVESTIGATE_UPSTREAM
+    Reason: Every payment since 11:30 comes back from the payment provider with error E2210, whatever the card, so the fault is at the provider and not in checkout. The provider has to be investigated first.
+
+    ---
+
+    You are the incident commander for River Shop, an online store, and you own its checkout service. Each input below is one support ticket about checkout, from Zendesk or ServiceNow: its id and source, its priority, its subject, its description and what the classifier said. Each ticket below has already been classified high severity by the classifier, whose reason comes with it: many customers cannot complete checkout or pay, right now. Recommend the one action that fixes it fastest.
+
+    DECISION FRAMEWORK — apply the rules in this order and stop at the first one that matches:
+    1. ROLLBACK — the failure is tied to a release, an update, a deploy or a new version. Undoing the change is the fastest fix.
+    2. SCALE_OUT — checkout is slow or timing out under heavy load: a sale, a campaign, a peak or a rush. More capacity is the fastest fix.
+    3. INVESTIGATE_UPSTREAM — payments fail at a payment provider or a payment gateway. The fault is outside checkout, so the fix starts with the provider.
+
+    STRICT VALUES — the Action line must be exactly ROLLBACK, SCALE_OUT or INVESTIGATE_UPSTREAM, with no extra words. Use only what the ticket and the classifier say; never invent a cause, a version or a number.'
+    WITH (
+      'handle_exception' = 'continue',
+      'max_consecutive_failures' = '3',
+      'request_timeout' = '60'
+    );
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.insert_ticket_classifier]
+}
+
+# Lab 5.3 (sql/5.3_insert_ticket_responder.sql): every HIGH verdict to the responder, its answer to remediation_decisions.
+resource "confluent_flink_statement" "insert_ticket_responder" {
+  count = var.deploy_labs ? 1 : 0
+
+  organization { id = data.confluent_organization.main.id }
+  environment { id = confluent_environment.main.id }
+  compute_pool { id = confluent_flink_compute_pool.main.id }
+  principal { id = var.principal_id }
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = var.confluent_cloud_api_key
+    secret = var.confluent_cloud_api_secret
+  }
+
+  statement = <<-EOT
+    INSERT INTO `remediation_decisions`
+    SELECT
+      tr.`event_time`,
+      tr.`service_name`,
+      'ticket_responder',
+      'HIGH_SEVERITY_TICKET',
+      CASE
+        WHEN a.`agent_status` = 'SUCCESS'
+          AND UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
+              IN ('ROLLBACK', 'SCALE_OUT', 'INVESTIGATE_UPSTREAM')
+          THEN UPPER(TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Action:\*{0,2}\s*([^\n]+)', 1)))
+        ELSE 'INVALID'
+      END,
+      CAST(NULL AS STRING),
+      TRIM(REGEXP_EXTRACT(a.`agent_response`, '\*{0,2}Reason:\*{0,2}\s*([\s\S]+?)$', 1)),
+      a.`agent_response`,
+      tr.`ticket_id`
+    FROM (
+      SELECT *
+      FROM `ticket_triage` /*+ OPTIONS('scan.startup.mode'='latest-offset') */
+      WHERE `severity` = 'HIGH'
+    ) tr,
+    LATERAL TABLE(AI_RUN_AGENT(
+      'ticket_responder',
+      CONCAT(
+        'TICKET ', tr.`ticket_id`, ' from ', tr.`source`, '\n',
+        'Priority: ', tr.`priority`, '\n',
+        'Subject: ', COALESCE(tr.`subject`, 'N/A'), '\n',
+        'Description: ', COALESCE(tr.`description`, 'N/A'), '\n',
+        'Classifier said: ', COALESCE(tr.`reason`, 'N/A')
+      )
+    )) AS a(`agent_status`, `agent_response`);
+  EOT
+
+  properties = {
+    "sql.current-catalog"  = confluent_environment.main.display_name
+    "sql.current-database" = confluent_kafka_cluster.main.display_name
+  }
+
+  depends_on = [confluent_flink_statement.create_ticket_responder]
 }

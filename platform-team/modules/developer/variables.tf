@@ -23,6 +23,11 @@ variable "csp_hosted_model" {
   type        = string
 }
 
+variable "deploy_labs" {
+  description = "Also run the labs' 12 statements (statements.tf, D-069)"
+  type        = bool
+}
+
 variable "principal_id" {
   description = "Owner of the platform team's Global key; every statement runs as it"
   type        = string

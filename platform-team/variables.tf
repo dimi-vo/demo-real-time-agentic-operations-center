@@ -50,3 +50,9 @@ variable "csp_hosted_model" {
   type        = string
   default     = "anthropic.claude-sonnet-4-6"
 }
+
+variable "deploy_labs" {
+  description = "Also run the labs' 12 statements (the INSERTs and agents of labs 2.2 to 5.3) in every environment of this apply, for a demo environment (D-069). Never in the workshop's apply: attendees write these statements themselves. Turn it on only while the topics are empty, in the apply that creates the environment or right after `uv run reset` (README, \"A demo environment\")."
+  type        = bool
+  default     = false
+}

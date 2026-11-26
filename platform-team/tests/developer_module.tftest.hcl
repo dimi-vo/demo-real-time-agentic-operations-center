@@ -25,6 +25,7 @@ variables {
   region                     = "eu-central-1"
   flink_max_cfu              = 20
   csp_hosted_model           = "anthropic.claude-sonnet-4-6"
+  deploy_labs                = false
   principal_id               = "u-abc123"
   confluent_cloud_api_key    = "MOCKGLOBALKEY"
   confluent_cloud_api_secret = "mock-global-secret"
@@ -279,5 +280,84 @@ run "the_three_output_tables_are_created" {
       ] : can(regex("DISTRIBUTED INTO 1 BUCKETS", s.statement)) && can(regex("'kafka.retention.time' = '24 h'", s.statement))
     ])
     error_message = "every output table must use one bucket and 24 h retention, like the source tables"
+  }
+}
+
+# The labs' statements are for a demo environment only (D-069): attendees write them in the
+# workshop, so without deploy_labs the module plans none of them.
+run "no_lab_statements_without_deploy_labs" {
+  command = plan
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in [
+        confluent_flink_statement.insert_service_error_rate,
+        confluent_flink_statement.insert_service_health,
+        confluent_flink_statement.create_release_agent,
+        confluent_flink_statement.create_capacity_agent,
+        confluent_flink_statement.insert_release_agent_errors,
+        confluent_flink_statement.insert_release_agent,
+        confluent_flink_statement.insert_capacity_agent,
+        confluent_flink_statement.insert_p1_tickets,
+        confluent_flink_statement.create_ticket_classifier,
+        confluent_flink_statement.insert_ticket_classifier,
+        confluent_flink_statement.create_ticket_responder,
+        confluent_flink_statement.insert_ticket_responder,
+      ] : length(s) == 0
+    ])
+    error_message = "without deploy_labs, the module must plan none of the labs' statements"
+  }
+}
+
+run "deploy_labs_runs_the_twelve_lab_statements_as_principal_in_the_developer_catalog" {
+  variables {
+    deploy_labs = true
+  }
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition     = length(output.flink_statements) == 23
+    error_message = "with deploy_labs, the module must create the ten tables, the model and the labs' 12 statements"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in values(output.flink_statements) :
+      s.principal == "u-abc123" && s.catalog == "John-Doe-c21e_env" && s.database == "RIVER-OOPS-DEMO-CLUSTER"
+    ])
+    error_message = "every lab statement must run as principal_id in the developer's own environment and cluster"
+  }
+
+  assert {
+    condition = (
+      can(regex("^INSERT INTO `service_error_rate`\n", confluent_flink_statement.insert_service_error_rate[0].statement)) &&
+      can(regex("^INSERT INTO `service_health`\n", confluent_flink_statement.insert_service_health[0].statement)) &&
+      can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_release_agent_errors[0].statement)) &&
+      can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_release_agent[0].statement)) &&
+      can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_capacity_agent[0].statement)) &&
+      can(regex("^INSERT INTO `p1_tickets`\n", confluent_flink_statement.insert_p1_tickets[0].statement)) &&
+      can(regex("^INSERT INTO `ticket_triage`\n", confluent_flink_statement.insert_ticket_classifier[0].statement)) &&
+      can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_ticket_responder[0].statement))
+    )
+    error_message = "the eight lab INSERTs must write the output tables (heredoc indent stripped)"
+  }
+
+  assert {
+    condition = alltrue([
+      for pair in [
+        ["release_agent", confluent_flink_statement.create_release_agent[0].statement],
+        ["capacity_agent", confluent_flink_statement.create_capacity_agent[0].statement],
+        ["ticket_classifier", confluent_flink_statement.create_ticket_classifier[0].statement],
+        ["ticket_responder", confluent_flink_statement.create_ticket_responder[0].statement],
+      ] : can(regex("^CREATE AGENT `${pair[0]}`\nUSING MODEL `llm_textgen_model`\nUSING PROMPT 'OUTPUT FORMAT", pair[1]))
+    ])
+    error_message = "the four agents must be created on llm_textgen_model, with their prompts unindented"
   }
 }

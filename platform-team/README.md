@@ -13,6 +13,10 @@ This Terraform module builds **each developer's workshop stack**:
 - **a Flink compute pool**, `RIVER-OOPS-DEMO-pool`, that scales on demand up to `flink_max_cfu` CFUs (default 10), sized for the eight long-running statements of the workshop (the `INSERT`s of labs 2.2 and 2.5, the three agent legs of 4.3, and 5.1, 5.2 and 5.3) and ad-hoc queries;
 - **the workshop's tables and AI model:** five source tables, `service_metrics` (append-only, one metrics sample a second each for web-gateway and payments), `service_deployments` (upsert, keyed by `service_name`), `service_incidents` (the simulator's answer key), `support_tickets` (checkout's support tickets) and `ticket_answer_key` (their answer key), all empty until the developer runs `uv run ops-sim`; five output tables, `service_error_rate`, `service_health`, `remediation_decisions`, `p1_tickets` and `ticket_triage`, which the developer fills with `INSERT` statements in the labs (so the developer never writes a `CREATE TABLE`, and the ops wall can read all of its topics from the start); and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`).
 
+For a demo, `deploy_labs = true` also starts the labs' statements, so the finished
+pipeline runs without anyone typing them. That is for a separate demo environment only; see
+[A demo environment](#a-demo-environment).
+
 There is **no static/seed table**: unlike some workshops, this one builds all of its
 data live from the generator, so there is nothing to seed and nothing to count.
 
@@ -48,6 +52,7 @@ It creates nothing else in the environment. The full developer steps are in the
 | | [11. Developer access](#11-developer-access) |
 | During | [When a developer comes to you](#when-a-developer-comes-to-you) |
 | Afterwards | [12. Tear down](#12-tear-down) |
+| Any time, separately | [A demo environment](#a-demo-environment) |
 
 The clusters bill from the moment they're created, so apply everyone's stacks shortly
 before the workshop; the instructors' go first, for the rehearsal.
@@ -295,6 +300,95 @@ If a developer can't run step 1, their Kafka/SR keys are useless once the cluste
 gone, but their Global key keeps any other roles they hold — have them delete it under
 **API keys → My account**.
 
+## A demo environment
+
+To show the finished pipeline without typing the labs, build a demo environment where the
+labs' 12 statements are already running:
+- the `INSERT`s of labs 2.2 and 2.5;
+- the four agents of 4.2, 5.2 and 5.3;
+- the three agent legs of 4.3;
+- the `INSERT`s of 5.1, 5.2 and 5.3.
+
+`deploy_labs = true` adds them, copied from the repository's `sql/` files (D-069).
+
+**Never in the workshop's apply.** `deploy_labs` covers every environment in the apply, and
+attendees write these statements themselves. So the demo gets its own state, with one email:
+a `demo` workspace in this folder, with its own variables file.
+
+1. Create `demo.tfvars` next to `terraform.tfvars` (gitignored, like it). The key and secret
+   still come from `terraform.tfvars`.
+
+    ```hcl
+    developer_emails = ["presenter@example.com"]
+    deploy_labs      = true
+    ```
+
+2. Apply it in the `demo` workspace:
+
+    ```bash
+    terraform workspace new demo      # the first time; afterwards: terraform workspace select demo
+    terraform plan -var-file=demo.tfvars -out=terraform.tfplan
+    terraform apply terraform.tfplan
+    rm terraform.tfplan
+    terraform workspace select default
+    ```
+
+    The plan adds **29**: the 17 of [step 7](#7-create-the-instructors-environments), then
+    one Flink statement for each of the labs' statements. In the `demo` workspace, always
+    pass `-var-file=demo.tfvars`. Without it, the plan reads the workshop's emails with
+    `deploy_labs` off, so it would tear the demo down and build everyone's stacks in the
+    demo's state. Run `terraform workspace show` before every plan.
+
+3. The presenter runs `uv run deploy`, `uv run ops-sim` and `uv run ops-wall`, as in the
+   walkthrough. If they also have a workshop environment, `uv run deploy` asks which one is
+   theirs: pick the demo's, which `terraform output -raw handout` lists in the `demo`
+   workspace.
+
+`confluent flink statement list` then shows the eight `INSERT`s `RUNNING` and the other 15
+statements `COMPLETED`.
+
+**Only on empty topics.** Turn `deploy_labs` on only in the apply that creates the demo
+environment, or right after `uv run reset`, and never where `ops-sim` has already written
+data. The order the statements start in matters:
+- 2.2, 2.5 and 5.1 replay their sources from the earliest offset;
+- the agents' `INSERT`s read from the latest offset;
+- Terraform starts each statement once the one before is running, not once it has caught up.
+
+Over existing data, the agents would call the model for every replayed anomaly and P1.
+
+### Starting the demo over
+
+1. Stop `ops-sim`, then run `uv run reset`. It stops every statement, drops the four agents
+   and empties all ten topics.
+2. Re-apply in the `demo` workspace, with the four agents replaced. Terraform still holds
+   their completed `CREATE AGENT` statements, so it wouldn't run them again otherwise. The
+   eight `INSERT`s are gone, so the apply starts them again by itself.
+
+    ```bash
+    terraform workspace select demo
+    M='module.developer["presenter@example.com"].confluent_flink_statement'
+    terraform plan -var-file=demo.tfvars -out=terraform.tfplan \
+      -replace="$M.create_release_agent[0]" -replace="$M.create_capacity_agent[0]" \
+      -replace="$M.create_ticket_classifier[0]" -replace="$M.create_ticket_responder[0]"
+    terraform apply terraform.tfplan
+    rm terraform.tfplan
+    terraform workspace select default
+    ```
+
+    The plan says `12 to add, 0 to change, 4 to destroy`.
+3. Start `ops-sim` again.
+
+Don't use `uv run reset-health` and an apply instead: it empties only the output topics, so
+the sources' history would replay through the agents.
+
+The same steps bring in a lab's changed SQL. A plain apply would replace the changed
+statements in place: a replaced `INSERT` writes its output topic's rows a second time, and a
+replaced `CREATE AGENT` fails while its agent exists.
+
+**Tearing it down:** `terraform destroy -var-file=demo.tfvars` in the `demo` workspace, then
+`terraform workspace select default` and `terraform workspace delete demo`. Until then, the
+demo's statements keep running, and its agents call the model while `ops-sim` runs.
+
 <details>
 <summary>Reference</summary>
 
@@ -323,10 +417,10 @@ or use an encrypted backend (add a `backend` block before the first `init`).
 | File | Purpose |
 |---|---|
 | `versions.tf` / `providers.tf` | Version pins; the Confluent provider configured with your Global key |
-| `variables.tf` | Key/secret, `developer_emails` + validations, `region`, `flink_max_cfu`, `csp_hosted_model` |
+| `variables.tf` | Key/secret, `developer_emails` + validations, `region`, `flink_max_cfu`, `csp_hosted_model`, `deploy_labs` |
 | `main.tf` | User + key-owner lookups, name suffixes, one `modules/developer` per email |
 | `outputs.tf` | The `handout` table and the `validation` links |
-| `modules/developer/` | One developer's stack: environment, binding, cluster, pool, the five source tables, the five output tables and the model (`statements.tf`) |
+| `modules/developer/` | One developer's stack: environment, binding, cluster, pool, the five source tables, the five output tables and the model (`statements.tf`), and with `deploy_labs` the labs' 12 statements |
 | `tests/` | Offline `terraform test` checks (every provider mocked) |
 
 </details>

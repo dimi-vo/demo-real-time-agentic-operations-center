@@ -68,3 +68,23 @@ run "handout_lists_every_developer" {
     error_message = "the validation output must link to each service_metrics topic"
   }
 }
+
+# deploy_labs reaches every environment of the apply (D-069): the platform team keeps a demo
+# apply to one email, and the workshop's apply leaves it off.
+run "deploy_labs_reaches_every_environment" {
+  variables {
+    deploy_labs = true
+  }
+
+  assert {
+    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 23])
+    error_message = "with deploy_labs, every developer's stack must run the labs' 12 statements"
+  }
+}
+
+run "the_workshop_apply_runs_no_lab_statement" {
+  assert {
+    condition     = alltrue([for m in values(module.developer) : length(m.flink_statements) == 11])
+    error_message = "by default, every developer's stack must run only the ten tables and the model"
+  }
+}

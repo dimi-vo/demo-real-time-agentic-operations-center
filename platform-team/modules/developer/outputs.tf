@@ -10,12 +10,33 @@ output "cluster_id" {
   value = confluent_kafka_cluster.main.id
 }
 
+locals {
+  # The labs' statements that exist: all twelve with deploy_labs, none without (D-069).
+  lab_statements = {
+    for key, list in {
+      insert_service_error_rate   = confluent_flink_statement.insert_service_error_rate
+      insert_service_health       = confluent_flink_statement.insert_service_health
+      create_release_agent        = confluent_flink_statement.create_release_agent
+      create_capacity_agent       = confluent_flink_statement.create_capacity_agent
+      insert_release_agent_errors = confluent_flink_statement.insert_release_agent_errors
+      insert_release_agent        = confluent_flink_statement.insert_release_agent
+      insert_capacity_agent       = confluent_flink_statement.insert_capacity_agent
+      insert_p1_tickets           = confluent_flink_statement.insert_p1_tickets
+      create_ticket_classifier    = confluent_flink_statement.create_ticket_classifier
+      insert_ticket_classifier    = confluent_flink_statement.insert_ticket_classifier
+      create_ticket_responder     = confluent_flink_statement.create_ticket_responder
+      insert_ticket_responder     = confluent_flink_statement.insert_ticket_responder
+    } : key => list[0] if length(list) > 0
+  }
+}
+
 # A test can't reach resources inside a module, so the root's tests read the
 # statements' catalog and principal from here. The name is the provider's
-# auto-generated one, as listed in the Console.
+# auto-generated one, as listed in the Console. The labs' statements are listed only
+# when deploy_labs is on (D-069).
 output "flink_statements" {
   value = {
-    for key, s in {
+    for key, s in merge({
       service_metrics       = confluent_flink_statement.create_service_metrics_table
       service_deployments   = confluent_flink_statement.create_service_deployments_table
       service_incidents     = confluent_flink_statement.create_service_incidents_table
@@ -27,7 +48,7 @@ output "flink_statements" {
       p1_tickets            = confluent_flink_statement.create_p1_tickets_table
       ticket_triage         = confluent_flink_statement.create_ticket_triage_table
       llm_textgen_model     = confluent_flink_statement.llm_textgen_model
-    } :
+    }, local.lab_statements) :
     key => {
       name      = s.statement_name
       catalog   = s.properties["sql.current-catalog"]

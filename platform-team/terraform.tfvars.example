@@ -21,3 +21,7 @@ developer_emails = [
 # region           = "us-east-1"
 # flink_max_cfu    = 10
 # csp_hosted_model = "anthropic.claude-sonnet-4-6"
+
+# Only for a demo environment, in its own workspace and never in the workshop's
+# apply: also starts the labs' 12 statements (README, "A demo environment").
+# deploy_labs      = false
