@@ -98,7 +98,7 @@ def test_the_tool_and_the_connection_are_reported_like_the_agents(run_reset, cap
     run_reset()
     out = capsys.readouterr().out
     positions = [
-        out.index("Dropping the five agents..."),
+        out.index(f"Dropping the {len(reset.LAB_AGENTS)} agents..."),
         out.index("  security_agent: dropped"),
         out.index("Dropping lab 6.2's tool and connection..."),
         out.index("  patch_agent_tool: dropped"),

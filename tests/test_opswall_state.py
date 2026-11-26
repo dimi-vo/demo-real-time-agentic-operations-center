@@ -1635,6 +1635,21 @@ def test_a_record_written_twice_keeps_its_first_kafka_timestamp_and_the_scan_its
     assert (run["repository"], run["reason"]) == ("payments", "Archived.")  # the newer decision's words
 
 
+def test_a_field_a_record_leaves_empty_waits_for_a_record_that_carries_it():
+    # One rule for a ticket's fields and a finding's (the code review's M1): None or "" is no
+    # value, so a later record that copies the field fills it in; a CVSS of 0.0 is a score.
+    st = OpsWallState()
+    st.apply_ticket({**_fields("ZD-48216", TK), "subject": ""})
+    _p1(st, "ZD-48216", at=TK + 1)  # p1_tickets copies the subject
+    assert _row(st)["tickets"]["newest"][0]["subject"] == "Subject of ZD-48216"
+    st.apply_finding({**_scan_fields("SCAN-000182"), "repository": ""})
+    _critical(st, "SCAN-000182", at=FT + 1)  # critical_cves copies the repository
+    st.apply_finding({**_scan_fields("SCAN-000183", t=FT + 2), "cvss_score": 0.0})
+    newest = {f["id"]: f for f in _sec(st)["findings"]["newest"]}
+    assert newest["SCAN-000182"]["repository"] == "checkout"
+    assert (newest["SCAN-000183"]["cvssScore"], newest["SCAN-000183"]["critical"]) == (0.0, False)
+
+
 def test_trim_drops_the_findings_older_than_the_history_plus_the_margin():
     st = OpsWallState()
     _cve_story(st, "OLD", NOW - 680, action="DISMISS", truth="DISMISS", decided_after=19)  # last at NOW - 661
@@ -1643,6 +1658,24 @@ def test_trim_drops_the_findings_older_than_the_history_plus_the_margin():
     row = _sec(st, now=NOW - 100)
     assert [f["id"] for f in row["findings"]["newest"]] == ["KEPT"]
     assert row["findings"]["scanned"] == 1
+
+
+def test_trim_keeps_a_ticket_or_a_finding_while_the_last_thing_that_happened_to_it_is_recent():
+    # Each is 700 s old; trim keeps the last 660 s, and what kept each one happened 659 s ago.
+    st = OpsWallState()
+    _ticket(st, "ROUTED", NOW - 700)
+    _p1(st, "ROUTED", at=NOW - 659, t=NOW - 700)                                         # lab 5.1's record
+    _story(st, "CLASSIFIED", NOW - 700, truth="LOW", verdict="LOW", verdict_after=41)     # the verdict
+    _story(st, "ANSWERED", NOW - 700, verdict="HIGH", verdict_after=4, answer_after=41)   # the responder's action
+    _story(st, "DROPPED", NOW - 700, verdict="HIGH", verdict_after=4, answer_after=39)
+    _scan(st, "ROUTED", t=NOW - 700)
+    _critical(st, "ROUTED", at=NOW - 659, t=NOW - 700)                                   # lab 6.1's record
+    _cve_story(st, "DECIDED", NOW - 700, truth="DISMISS", action="DISMISS", decided_after=41)  # lab 6.4's
+    _cve_story(st, "PATCHED", NOW - 700, action="PATCH", decided_after=30, finished_after=41)  # the patch's finish
+    _cve_story(st, "GONE", NOW - 700, action="PATCH", decided_after=39, finished_after=35)
+    st.trim(NOW)
+    assert {t["id"] for t in _row(st, now=NOW - 100)["tickets"]["newest"]} == {"ROUTED", "CLASSIFIED", "ANSWERED"}
+    assert {f["id"] for f in _sec(st, now=NOW - 100)["findings"]["newest"]} == {"ROUTED", "DECIDED", "PATCHED"}
 
 
 def test_a_run_that_ended_before_the_timeline_is_left_out_and_one_open_since_before_it_starts_at_its_edge():

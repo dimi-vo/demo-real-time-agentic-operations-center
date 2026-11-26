@@ -455,9 +455,9 @@ def test_dry_run_writes_each_finding_and_its_answer_key_and_a_console_line():
     out, log = io.StringIO(), io.StringIO()
     DryRunSink(out=out, log=log).emit_findings([PATCH_FINDING, ORDINARY_FINDING])
     assert [json.loads(line) for line in out.getvalue().splitlines()] == [
-        {"_stream": "cve_scans", **PATCH_FINDING.finding},
+        {"_stream": "cve_scans", **PATCH_FINDING.scan},
         {"_stream": "cve_answer_key", **PATCH_FINDING.answer_key},
-        {"_stream": "cve_scans", **ORDINARY_FINDING.finding},
+        {"_stream": "cve_scans", **ORDINARY_FINDING.scan},
         {"_stream": "cve_answer_key", **ORDINARY_FINDING.answer_key},
     ]
     # The answer key is set apart, so nobody takes it for part of the finding.

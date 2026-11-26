@@ -40,10 +40,10 @@ ID_FORMAT = "SCAN-{:06d}"
 
 
 class NewFinding(NamedTuple):
-    """One finding as the simulator writes it: the `cve_scans` record and its
+    """One finding as the simulator writes it: its scan, the `cve_scans` record, and its
     `cve_answer_key` record, both on the same tick."""
 
-    finding: dict
+    scan: dict
     answer_key: dict
 
 
@@ -83,7 +83,7 @@ class ScanClock:
         score = rng.randint(*(CRITICAL_SCORES if template.critical else ORDINARY_SCORES)) / 10
         finding_id = ID_FORMAT.format(self.next_number)
         self.next_number += 1
-        finding = {
+        scan = {
             "event_time": event_time_ms,
             "finding_id": finding_id,
             "repository": filled["repository"],
@@ -95,4 +95,4 @@ class ScanClock:
             "finding": filled["finding"],
         }
         answer_key = {"event_time": event_time_ms, "finding_id": finding_id, "expected_action": action}
-        return NewFinding(finding, answer_key)
+        return NewFinding(scan, answer_key)

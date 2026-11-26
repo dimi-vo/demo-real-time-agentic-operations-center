@@ -54,24 +54,24 @@ def test_the_repositories_are_river_shops_three_services_ci_tools_and_storefront
 
 def test_patch_names_only_the_three_services_archived_only_storefront_legacy():
     for t in TEMPLATES:
-        assert t.repositories and set(t.repositories) <= set(REPOSITORIES), t.finding
+        assert t.repositories and set(t.repositories) <= set(REPOSITORIES), t.sentence
         if t.expected_action == "PATCH":
-            assert t.repositories == SERVICES, t.finding
+            assert t.repositories == SERVICES, t.sentence
         if t.dismiss_reason == "archived":
-            assert t.repositories == ("storefront-legacy",), t.finding
+            assert t.repositories == ("storefront-legacy",), t.sentence
         if t.dismiss_reason == "not_called":  # shipped, so in a deployed service
-            assert t.repositories == SERVICES, t.finding
+            assert t.repositories == SERVICES, t.sentence
         if t.expected_action is None:  # an ordinary finding, any repository
-            assert t.repositories == REPOSITORIES, t.finding
+            assert t.repositories == REPOSITORIES, t.sentence
 
 
 def test_every_placeholder_in_every_template_has_a_pool():
     used = set()
     for t in TEMPLATES:
-        names = _placeholders(t.finding)
-        assert "" not in names, f"positional placeholder in {t.finding!r}"
+        names = _placeholders(t.sentence)
+        assert "" not in names, f"positional placeholder in {t.sentence!r}"
         known = {"repository", *ADVISORY_FIELDS, *POOLS}
-        assert names <= known, (names - known, t.finding)
+        assert names <= known, (names - known, t.sentence)
         used |= names
     assert all(POOLS[name] for name in POOLS), "an empty pool"
     assert set(POOLS) <= used, f"pools no template uses: {set(POOLS) - used}"
@@ -92,7 +92,7 @@ def test_every_template_fills_without_leftover_placeholders():
                 advisory.installed_version,
                 advisory.fixed_version,
             )
-            for name in _placeholders(t.finding) & {"repository", "package", "installed_version"}:
+            for name in _placeholders(t.sentence) & {"repository", "package", "installed_version"}:
                 assert filled[name] in filled["finding"], (name, filled["finding"])
 
 
@@ -131,7 +131,7 @@ def test_the_spec_example_is_an_advisory():
 def test_no_template_says_patch_or_dismiss_or_holds_an_apostrophe():
     # The answer must come from where the package sits, not from the word. No apostrophes, so
     # lab 6.3 can take its examples from the templates (an agent prompt cannot hold one).
-    texts = [t.finding for t in TEMPLATES]
+    texts = [t.sentence for t in TEMPLATES]
     texts += [v for a in (*ADVISORIES[True], *ADVISORIES[False]) for v in (a.function, a.flaw)]
     texts += [v for pool in POOLS.values() for v in pool]
     for text in texts:
@@ -141,9 +141,9 @@ def test_no_template_says_patch_or_dismiss_or_holds_an_apostrophe():
 
 def test_a_finding_is_one_or_two_sentences():
     for t in TEMPLATES:
-        sentences = re.findall(r"[.!?]+(?=\s|$)", t.finding)
-        assert 1 <= len(sentences) <= 2, t.finding
-        assert "\n" not in t.finding and t.finding.endswith(".")
+        sentences = re.findall(r"[.!?]+(?=\s|$)", t.sentence)
+        assert 1 <= len(sentences) <= 2, t.sentence
+        assert "\n" not in t.sentence and t.sentence.endswith(".")
 
 
 # Spec decision 16's rules. PATCH: the package ships in a deployed service and the vulnerable
@@ -164,15 +164,15 @@ def _cues(text):
 
 def test_every_critical_template_says_exactly_what_decides_it():
     for t in TEMPLATES:
-        cues = _cues(t.finding)
+        cues = _cues(t.sentence)
         if t.expected_action == "PATCH":
-            assert cues == {"SHIPPED", "USED"}, (cues, t.finding)
+            assert cues == {"SHIPPED", "USED"}, (cues, t.sentence)
         elif t.dismiss_reason == "not_called":
-            assert {"SHIPPED", "NOT_USED"} <= cues <= {"SHIPPED", "NOT_USED", "USED"}, (cues, t.finding)
+            assert {"SHIPPED", "NOT_USED"} <= cues <= {"SHIPPED", "NOT_USED", "USED"}, (cues, t.sentence)
         elif t.dismiss_reason == "dev_only":
-            assert cues <= {"DEV", "USED"} and "DEV" in cues, (cues, t.finding)
+            assert cues <= {"DEV", "USED"} and "DEV" in cues, (cues, t.sentence)
         elif t.dismiss_reason == "archived":
-            assert cues == {"ARCHIVED"}, (cues, t.finding)
+            assert cues == {"ARCHIVED"}, (cues, t.sentence)
 
 
 def test_no_advisory_or_pool_value_carries_a_cue():
@@ -225,14 +225,14 @@ def test_the_three_dismiss_reasons_come_equally_often(monkeypatch):
 def test_critical_scores_are_9_to_10_and_the_rest_4_to_8_9_with_one_decimal():
     drawn = _run_clock(13, 6 * 3600)
     for f in drawn:
-        score = f.finding["cvss_score"]
+        score = f.scan["cvss_score"]
         assert isinstance(score, float) and round(score, 1) == score
         if f.answer_key["expected_action"] is None:
             assert 4.0 <= score <= 8.9, f
         else:
             assert 9.0 <= score <= 10.0, f
-    critical = {f.finding["cvss_score"] for f in drawn if f.answer_key["expected_action"]}
-    ordinary = {f.finding["cvss_score"] for f in drawn if not f.answer_key["expected_action"]}
+    critical = {f.scan["cvss_score"] for f in drawn if f.answer_key["expected_action"]}
+    ordinary = {f.scan["cvss_score"] for f in drawn if not f.answer_key["expected_action"]}
     assert {9.0, 10.0} <= critical and {4.0, 8.9} <= ordinary  # both ends are drawn
 
 

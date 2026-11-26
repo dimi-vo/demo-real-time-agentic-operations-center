@@ -622,7 +622,7 @@ def _critical_template(example: dict[str, str]) -> FindingTemplate:
         for t in finding_templates.TEMPLATES
         if t.critical
         and example["repository"] in t.repositories
-        and any(t.finding.format(**values, **drawn) == example["finding"] for drawn in draws)
+        and any(t.sentence.format(**values, **drawn) == example["finding"] for drawn in draws)
     ]
     return template
 

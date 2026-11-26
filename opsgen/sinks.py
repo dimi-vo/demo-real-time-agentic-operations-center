@@ -77,13 +77,13 @@ def format_finding(f: NewFinding, clock: str | None = None) -> str:
 
     on one line. A finding that isn't critical reads `[truth: not critical]`.
     """
-    finding, key = f
-    when = clock if clock is not None else _hms(finding["event_time"] / 1000)
+    scan, key = f
+    when = clock if clock is not None else _hms(scan["event_time"] / 1000)
     truth = key["expected_action"] or "not critical"
     return (
-        f"[{when}] FINDING         {finding['finding_id']}  {finding['cvss_score']:>4.1f}  "
-        f"{finding['repository']:<17}  {finding['cve_id']}  "
-        f"{finding['package']} {finding['installed_version']} -> {finding['fixed_version']}  [truth: {truth}]"
+        f"[{when}] FINDING         {scan['finding_id']}  {scan['cvss_score']:>4.1f}  "
+        f"{scan['repository']:<17}  {scan['cve_id']}  "
+        f"{scan['package']} {scan['installed_version']} -> {scan['fixed_version']}  [truth: {truth}]"
     )
 
 
@@ -142,7 +142,7 @@ class DryRunSink:
     def emit_findings(self, findings: list[NewFinding]) -> None:
         """Each finding's two records, tagged with their topics, and its console line (D-070)."""
         for f in findings:
-            self.out.write(json.dumps({"_stream": "cve_scans", **f.finding}) + "\n")
+            self.out.write(json.dumps({"_stream": "cve_scans", **f.scan}) + "\n")
             self.out.write(json.dumps({"_stream": "cve_answer_key", **f.answer_key}) + "\n")
             self.log.write(format_finding(f) + "\n")
         self.log.flush()

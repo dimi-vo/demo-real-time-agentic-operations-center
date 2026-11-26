@@ -3917,4 +3917,33 @@ tooltip says "The patch agent could not be reached, so no decision came back." i
 PATCH or DISMISS came back. No commit came back." (`static/opswall.js`; the harness checks the
 sentence, 1 of 182 checks failing before and 182 of 182 after, `research/review-fix-1b/`, the
 service rows byte for byte as before), and the spec's Pending list gives what issue 02 answered
-as answered and keeps the rest.
+as answered and keeps the rest. Pass 2, the Python smells, a refactor: `scripts/opswall/state.py` (M1:
+a ticket's runs and a finding's share one `_Run` and one `_run`, the answered, open and "No
+answer" logic, given the row's wait, `TICKET_WAIT_SECONDS` (30 s, was `RUN_WAIT_SECONDS`) or
+`SECURITY_WAIT_SECONDS` (60 s), and what an answer reads; one `_run_json` for a bar's key, lane,
+place and label, each row adding its ticket's or finding's fields and the lane's tooltip; one
+`_lanes_json`; one `_latest` for what `trim()` drops them by; one `_fill`, with one rule: a field
+a record leaves empty, None or "", waits for a record that carries it, as a ticket's did, where a
+finding's kept an empty string, and a CVSS of 0.0 is still a score; M6: a `Lane`, its key, name
+and whether the page says Working or Idle, for each of the four lanes, so the security row no
+longer reads `SECURITY_LANES[0][1]` or writes its lanes by hand, and `PATCH` and `DISMISS` come
+from `opsgen.finding_templates`; M4 and M5: our agent's lane is `SECURITY_AGENT_LANE`, apart from
+the row kind `SECURITY_ROW` though the snapshot still says "security" for both, `_wait` is
+`_hatch`, our bar's words come from `DECIDED_WORDS`, and `Finding` no longer keeps the scanner's
+sentence, which the wall never read), `opsgen/findings.py`, `sinks.py` and `kafka_io.py` (M4:
+`NewFinding.finding` is `NewFinding.scan`, the `cve_scans` record; M3: one `KafkaSink._produce`
+for every record keyed by a raw string, so `emit_ticket`, `emit_answer_key`, `emit_finding` and
+`emit_cve_answer_key` are gone, and `FINDINGS_TOPIC` is `CVE_SCANS_TOPIC`),
+`opsgen/finding_templates.py` (M4: `FindingTemplate.finding` is `.sentence`), `scripts/reset.py`
+(M4: `_drop_agents` is `_drop_lab_objects`; M7: "Dropping the 5 agents..." and `--keep-source`'s
+"7 source topics" count with `len`). Declined, with the reasons in the review file: sharing
+`_by_category` and `placeholders` or `public_url.rstrip("/")` (M3), one lane test left in
+`_finding_run_json` and the snapshot's "security" lane key (M5, pass 3's with the JS), and the
+topic plumbing and the prose counts (M7). Tests: `tests/test_opswall_state.py` (a field a ticket's
+or a finding's record leaves empty is filled by a later one, which failed for the finding before;
+`trim()` keeps a ticket or a finding by each of its moments), `tests/test_kafka_io_and_rtce.py`
+(metrics, deployments and incidents with their keys, subjects and timestamps, and each batch's
+poll). Issue 10's harness gives the same snapshot JSON, byte for byte, before and after, 153
+snapshots of every row, checkout's runs and the six security frames at 16 moments and after
+`trim()` (`research/review-fix-2/`), `ops-sim --dry-run --simulate 30 --seed 7` prints the same,
+and 18 mutations of `state.py` are each caught.

@@ -365,7 +365,7 @@ def test_a_record_from_each_finding_topic_reaches_the_security_row(registry):
     sim = Simulation(1, start=start)
     new = next(n for k in range(3600) for n in sim.tick(start + k).findings
                if n.answer_key["expected_action"] == "PATCH")
-    reported = new.finding["event_time"] / 1000
+    reported = new.scan["event_time"] / 1000
 
     deser = make_deserializer(registry)
     st = OpsWallState()
@@ -373,19 +373,19 @@ def test_a_record_from_each_finding_topic_reaches_the_security_row(registry):
     def through(topic: str, record: dict) -> dict:
         return decode_record(_produce(registry, topic, MessageField.VALUE, record), None, topic, deser)
 
-    finding = through("cve_scans", new.finding)  # what ops-sim produces
-    assert isinstance(finding["event_time"], datetime) and finding["cvss_score"] >= 9.0
-    st.apply_finding(finding)
+    scan = through("cve_scans", new.scan)  # what ops-sim produces
+    assert isinstance(scan["event_time"], datetime) and scan["cvss_score"] >= 9.0
+    st.apply_finding(scan)
     st.apply_cve_answer_key(through("cve_answer_key", new.answer_key))
     # what labs 6.1 and 6.4 write, with each record's Kafka timestamp
-    st.apply_critical_cve(through("critical_cves", finding), kafka_ts=reported + 1)
-    f = new.finding
+    st.apply_critical_cve(through("critical_cves", scan), kafka_ts=reported + 1)
+    f = new.scan
     request = f"PATCH {f['repository']} {f['cve_id']} {f['package']} {f['installed_version']} -> {f['fixed_version']}"
     began, ended = reported + 4, reported + 10
     reply = format_reply(request, datetime.fromtimestamp(began, tz=timezone.utc),
                          datetime.fromtimestamp(ended, tz=timezone.utc))
     st.apply_patch_decision(through("patch_decisions", {
-        **{k: finding[k] for k in ("event_time", "finding_id", "repository", "cve_id", "cvss_score")},
+        **{k: scan[k] for k in ("event_time", "finding_id", "repository", "cve_id", "cvss_score")},
         "action": "PATCH", "reason": "It ships and the code is called.", "patch_status": "PATCHED",
         "commit_sha": commit_for(request), "patch_started_at": _naive(began), "patch_finished_at": _naive(ended),
         "raw_response": f"Action: PATCH\nReason: It ships and the code is called.\nPatch: {reply}"}),

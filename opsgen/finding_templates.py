@@ -46,7 +46,7 @@ class FindingTemplate:
     expected_action: str | None  # PATCH | DISMISS for a critical finding, None for an ordinary one
     dismiss_reason: str | None  # one of DISMISS_REASONS for a DISMISS, else None
     repositories: tuple[str, ...]  # the repositories it may name
-    finding: str  # the scanner's sentence
+    sentence: str  # the scanner's sentence: cve_scans.finding, once filled
 
     @property
     def critical(self) -> bool:
@@ -70,16 +70,16 @@ class Advisory:
 ADVISORY_FIELDS: tuple[str, ...] = tuple(f.name for f in fields(Advisory))
 
 
-def _patch(finding: str) -> FindingTemplate:
-    return FindingTemplate(PATCH, None, SERVICES, finding)
+def _patch(sentence: str) -> FindingTemplate:
+    return FindingTemplate(PATCH, None, SERVICES, sentence)
 
 
-def _dismiss(reason: str, repositories: tuple[str, ...], finding: str) -> FindingTemplate:
-    return FindingTemplate(DISMISS, reason, repositories, finding)
+def _dismiss(reason: str, repositories: tuple[str, ...], sentence: str) -> FindingTemplate:
+    return FindingTemplate(DISMISS, reason, repositories, sentence)
 
 
-def _ordinary(finding: str) -> FindingTemplate:
-    return FindingTemplate(None, None, REPOSITORIES, finding)
+def _ordinary(sentence: str) -> FindingTemplate:
+    return FindingTemplate(None, None, REPOSITORIES, sentence)
 
 
 TEMPLATES: tuple[FindingTemplate, ...] = (
@@ -274,7 +274,7 @@ POOLS: dict[str, tuple[str, ...]] = {
 
 def placeholders(template: FindingTemplate) -> list[str]:
     """The placeholder names in a template's sentence, sorted."""
-    return sorted({name for _, name, _, _ in string.Formatter().parse(template.finding) if name is not None})
+    return sorted({name for _, name, _, _ in string.Formatter().parse(template.sentence) if name is not None})
 
 
 def fill(template: FindingTemplate, rng: random.Random) -> dict[str, str]:
@@ -296,5 +296,5 @@ def fill(template: FindingTemplate, rng: random.Random) -> dict[str, str]:
         "package": advisory.package,
         "installed_version": advisory.installed_version,
         "fixed_version": advisory.fixed_version,
-        "finding": template.finding.format(**values),
+        "finding": template.sentence.format(**values),
     }

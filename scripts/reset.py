@@ -110,8 +110,10 @@ def _drop(session: FlinkSession, heading: str, objects: list[tuple[str, str]]) -
     return problems
 
 
-def _drop_agents(session: FlinkSession) -> list[str]:
-    problems = _drop(session, "Dropping the five agents...", [("AGENT", agent) for agent in LAB_AGENTS])
+def _drop_lab_objects(session: FlinkSession) -> list[str]:
+    """Drop what the labs create with no `IF NOT EXISTS`: the agents, then lab 6.2's tool and
+    connection; returns the problems found."""
+    problems = _drop(session, f"Dropping the {len(LAB_AGENTS)} agents...", [("AGENT", agent) for agent in LAB_AGENTS])
     return problems + _drop(session, "Dropping lab 6.2's tool and connection...", list(LAB_TOOLS_AND_CONNECTIONS))
 
 
@@ -121,8 +123,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--keep-source",
         action="store_true",
-        help="Keep the accumulated data in the seven source topics, and the generator state that numbers past it "
-        "(the output topics are always emptied)",
+        help=f"Keep the accumulated data in the {len(SOURCE_TOPICS)} source topics, and the generator state that "
+        "numbers past it (the output topics are always emptied)",
     )
     parser.add_argument("--force", action="store_true", help="Reset even if a local ops-sim seems to be running")
     args = parser.parse_args(argv)
@@ -143,7 +145,7 @@ def main(argv: list[str] | None = None) -> None:
     session = FlinkSession(card)
     problems: list[str] = []
     problems += _stop_running_statements(session)
-    problems += _drop_agents(session)
+    problems += _drop_lab_objects(session)
     if not args.keep_source:
         problems += empty_topics(card, SOURCE_TOPICS, "Emptying the source topics...")
     problems += empty_topics(card, OUTPUT_TOPICS, "Emptying the output topics (the tables stay)...")
