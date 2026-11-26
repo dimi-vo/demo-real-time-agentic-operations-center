@@ -18,9 +18,12 @@
 -- finding (`patch_decisions rows` tracks `critical_cves rows`, about 1.2 a minute), and the
 -- patch agent on the laptop one call per PATCH decision (about half of them). Lab 6.4 reads
 -- from the latest offset, like 5.2, so a gap left by 6.1's replay is expected. `PATCHED
--- decisions` short of `PATCH decisions` means a patch agent call that brought no commit back:
--- the patch agent or its tunnel was down, or the security agent did not copy the reply
--- exactly (patch_status FAILED).
+-- decisions` short of `PATCH decisions` means PATCH decisions with no commit in their Patch
+-- line (patch_status FAILED): the call to the patch agent failed or timed out, or the
+-- security agent did not copy the reply exactly. A stopped patch agent shows up elsewhere:
+-- Flink fetches its agent card on every call, and when that fails the whole agent call fails
+-- before the model answers, so lab 6.4 writes INVALID, not PATCH, and `PATCH decisions` fall
+-- behind half of `patch_decisions rows`.
 --
 -- Plain aggregates on purpose: `remediation_decisions` declares no watermark, so a
 -- window TVF over it has no time attribute to use. The totals keep updating while the

@@ -1392,6 +1392,8 @@ def test_a_dismiss_is_one_bar_and_no_external_one():
     ("PATCH", "FAILED", "Action: PATCH\nReason: r\nPatch: FAILED, the call timed out", "Patch agent unreachable",
      "Patch", True),
     ("INVALID", "N/A", "I am not sure.", "Invalid answer", "Invalid", False),
+    # Flink's error for a patch agent it could not reach, but not the whole answer: the agent answered
+    ("INVALID", "N/A", f"Action: unsure\nPatch: {A2A_ERROR}", "Invalid answer", "Invalid", False),
 ])
 def test_a_failed_patch_and_an_invalid_answer_read_their_words(action, status, raw, label, outcome, unreachable):
     st = OpsWallState()
@@ -1402,19 +1404,23 @@ def test_a_failed_patch_and_an_invalid_answer_read_their_words(action, status, r
     assert run["end"] == pytest.approx(_tpos(FT + 31))
 
 
-def test_a_stopped_patch_agent_reads_invalid_answer_as_lab_6_4_writes_it():
+@pytest.mark.parametrize("truth", ["PATCH", "DISMISS"])
+def test_a_stopped_patch_agent_reads_patch_agent_unreachable_in_red_and_is_a_miss(truth):
     # Issue 02's step 5: Flink fetches the agent card on every call, so a stopped patch agent
     # fails the whole agent call before the model answers, and lab 6.4 writes INVALID and N/A,
-    # not FAILED (issue 07). Spec 24's red words are for FAILED alone, so this reads "Invalid
-    # answer", draws no external bar, and is a miss.
+    # not FAILED (issue 07), whatever the finding called for. The user's decision (the code
+    # review, S-c1): such an INVALID reads "Patch agent unreachable", red like FAILED, and is
+    # still a miss. It draws no external bar.
     st = OpsWallState()
     _scan(st, "SCAN-000126")
-    _cve_truth(st, "SCAN-000126", "PATCH")
+    _cve_truth(st, "SCAN-000126", truth)
     _critical(st, "SCAN-000126", at=FT + 1)
     _patch_decision(st, "SCAN-000126", at=FT + 2, action="INVALID", status="N/A", reason=None, raw=A2A_ERROR)
     row = _sec(st)
     [run] = row["runs"]
-    assert (run["label"], run["unreachable"], run["waitFrom"]) == ("Invalid answer", False, None)
+    assert (run["label"], run["unreachable"], run["action"], run["outcome"]) == (
+        "Patch agent unreachable", True, "INVALID", "Invalid")
+    assert (run["commit"], run["waitFrom"], run["waitTo"]) == (None, None, None)
     assert (row["issues"]["injected"], row["issues"]["detected"], row["issues"]["missed"]) == (1, 0, 1)
 
 
@@ -1576,6 +1582,24 @@ def test_the_issues_panel_scores_the_critical_findings_of_the_last_10_minutes_ag
         "medianTimeToRemediate": pytest.approx(12.0),   # 9, 15: the finding -> the patch's finish, PATCHED only
         "medianTimeToDetectText": "10s", "medianTimeToRemediateText": "12s",
     }
+
+
+def test_a_right_decision_that_comes_after_60_s_is_a_miss():
+    # Spec 26: missed is wrong, INVALID, or none within 60 s. Our bar gives up 60 s after lab 6.1's
+    # record, so a decision after that is a miss however right it is; checkout's rule would have
+    # counted it as detected (the code review, S-c3).
+    st = OpsWallState()
+    _cve_story(st, "A", NOW - 300, action="PATCH", decided_after=61, finished_after=9)    # 60 s after 6.1: in time
+    _cve_story(st, "B", NOW - 280, truth="DISMISS", action="DISMISS", decided_after=61.5)  # 60.5 s after it: late
+    _cve_story(st, "C", NOW - 260, action="PATCH", decided_after=90, finished_after=9)    # late
+    _cve_story(st, "D", NOW - 240, action="DISMISS", decided_after=70)                    # wrong and late: one miss
+    # never routed: the 60 s run from the finding, as for one never decided
+    _cve_story(st, "E", NOW - 220, truth="DISMISS", action="DISMISS", decided_after=60.5, routed=False)
+    issues = _sec(st)["issues"]
+    assert (issues["injected"], issues["detected"], issues["missed"]) == (5, 1, 4)
+    # The times still count the late decisions: that is how long they took.
+    assert issues["medianTimeToDetect"] == pytest.approx(61.5)     # 60.5, 61, 61.5, 70, 90
+    assert issues["medianTimeToRemediate"] == pytest.approx(9.0)   # A and C, both patched
 
 
 def test_a_finding_fills_in_from_its_four_records_in_any_order():

@@ -93,18 +93,20 @@ transaction wrote comes again when the statement replays, D-063).
   through ``apply_decision``: nothing in ``remediation_decisions``' routing changes.
 - Its **runs**: the security agent's, from the ``critical_cves`` record (the finding's
   ``event_time`` if only the decision has come) to the decision: "Patched in 12s", "Dismissed
-  in 8s", "Patch agent unreachable" (``FAILED``) or "Invalid answer" (``INVALID``, which is
-  also what a stopped patch agent gives: Flink fails at the agent card before the model
-  answers, issue 02). Open ("Working 3s") until 60 s after it started, then "No answer". The
-  external lane's, from the patch's start to its finish, once the decision has brought both
-  (spec decision 24: the external bar appears when our agent answers, not while the patch
-  runs); our run carries the part of its bar that span covers, the hatch. The row is "Agent on
-  critical CVE" while a run of ours is open, and ``openCriticals`` counts their findings. Its
+  in 8s", "Patch agent unreachable" (``FAILED``, and an ``INVALID`` whose answer is Flink's
+  error for a patch agent it could not reach: a stopped one fails the whole call at its agent
+  card, before the model answers, issue 02) or "Invalid answer" (any other ``INVALID``). Open
+  ("Working 3s") until 60 s after it started, then "No answer". The external lane's, from the
+  patch's start to its finish, once the decision has brought both (spec decision 24: the
+  external bar appears when our agent answers, not while the patch runs); our run carries the
+  part of its bar that span covers, the hatch. The row is "Agent on critical CVE" while a run
+  of ours is open, and ``openCriticals`` counts their findings. Its
   **Issues panel** scores the critical findings reported in the last 10 minutes that have an
-  answer key: right (the action expected), missed (another action, ``INVALID``, or no decision
-  60 s after lab 6.1's record), the median finding -> decision, and finding -> the patch's
-  finish for the ``PATCHED`` ones. Its list is the newest 5 findings and the count of the last
-  10 minutes; its marks are the findings of the last 2 minutes, critical or not.
+  answer key: right (the action expected, within 60 s of lab 6.1's record), missed (another
+  action, ``INVALID``, or no decision within those 60 s, a late right one included), the median
+  finding -> decision, and finding -> the patch's finish for the ``PATCHED`` ones. Its list is
+  the newest 5 findings and the count of the last 10 minutes; its marks are the findings of the
+  last 2 minutes, critical or not.
 
 State stores absolute epoch seconds everywhere. The snapshot turns positions into the
 axis-relative seconds the page draws with: ``t - (now - CHART_SECONDS)``, clipped to
@@ -273,6 +275,7 @@ class Finding:
     patch_started_at: float | None = None  # the patch's start and finish, from the patch agent's reply
     patch_finished_at: float | None = None
     reply: str | None = None               # the answer's Patch line: the patch agent's reply, as copied
+    card_failed: bool = False              # the answer is Flink's error for the patch agent's card (issue 02)
     decided_at: float | None = None        # the patch_decisions record's Kafka timestamp
 
     @property
@@ -560,6 +563,7 @@ class OpsWallState:
                 finding.patch_started_at = _to_seconds(record.get("patch_started_at"))
                 finding.patch_finished_at = _to_seconds(record.get("patch_finished_at"))
                 finding.reply = _patch_line(record.get("raw_response"))
+                finding.card_failed = str(record.get("raw_response") or "").startswith(CARD_FAILED_ANSWER)
                 finding.decided_at = _earliest(finding.decided_at, _written(kafka_ts, finding))
 
     def _finding(self, record: dict) -> Finding | None:
@@ -1025,6 +1029,9 @@ FINDINGS_LISTED = 5           # the newest findings the list shows
 SECURITY_LANES = (("security", "Security agent"), ("external", "External · LangGraph · A2A"))
 SECURITY_ACTION_WORDS = {"PATCH": "Patch", "DISMISS": "Dismiss", INVALID: "Invalid"}
 PATCHED, FAILED = "PATCHED", "FAILED"  # lab 6.4's patch_status, besides N/A
+# How Flink's answer starts when it can't fetch the patch agent's card: the whole agent call
+# fails before the model answers, so lab 6.4 writes INVALID (issue 02's step 5, a stopped patch agent).
+CARD_FAILED_ANSWER = "Exception while initializing A2A client"
 # The answer's Patch line, as lab 6.4 finds it (a markdown bold label allowed): what the patch
 # agent replied, which the security agent copies there.
 PATCH_LINE = re.compile(r"\*{0,2}Patch:\*{0,2}[ \t]*([^\n]+)")
@@ -1100,13 +1107,20 @@ def _finding_runs(finding: Finding, now: float) -> list[_FindingRun]:
 
 def _security_label(finding: Finding, took: float) -> str:
     """What our closed bar reads: the outcome, and how long it took when it is an answer."""
-    if finding.patch_status == FAILED:
+    if _unreachable(finding):
         return "Patch agent unreachable"
     if finding.action == "PATCH":
         return f"Patched in {_dur_words(took)}"
     if finding.action == "DISMISS":
         return f"Dismissed in {_dur_words(took)}"
     return "Invalid answer"
+
+
+def _unreachable(finding: Finding) -> bool:
+    """A PATCH that brought no commit back (FAILED), or an INVALID that is Flink's error for a
+    patch agent it could not reach, which is what a stopped one gives (the user's decision, the
+    code review's S-c1). Our bar reads "Patch agent unreachable", in red, for both."""
+    return finding.patch_status == FAILED or (finding.action == INVALID and finding.card_failed)
 
 
 def _wait(run: _FindingRun) -> tuple[float, float] | None:
@@ -1145,7 +1159,7 @@ def _finding_run_json(run: _FindingRun, left: float) -> dict:
             "reason": f.reason,
             "commit": f.commit_sha,
             "patchStatus": f.patch_status,
-            "unreachable": f.patch_status == FAILED,  # the page draws these words in red
+            "unreachable": _unreachable(f),  # the page draws these words in red
             "waitFrom": pos(wait[0]) if wait else None,
             "waitTo": pos(wait[1]) if wait else None,
         })
@@ -1164,14 +1178,19 @@ def _finding_run_json(run: _FindingRun, left: float) -> dict:
 def _finding_issues(findings: list[Finding], now: float) -> dict:
     """The security row's Issues panel (spec decision 26), over the critical findings reported
     in the last 10 minutes that have an answer key: injected, all of them; detected, those whose
-    action is the one expected; missed, those given another action or INVALID, or no decision
-    60 s after lab 6.1's record (after the finding, if lab 6.1 never wrote one); the median
-    finding -> decision, whatever the action, and finding -> the patch's finish, PATCHED only."""
+    action is the one expected and came within 60 s of lab 6.1's record (of the finding, if lab
+    6.1 never wrote one), when our bar gives up; missed, those given another action or INVALID,
+    or no decision within those 60 s, a late right one included; the median finding -> decision,
+    whatever the action and however late, and finding -> the patch's finish, PATCHED only."""
     scored = [f for f in findings if f.critical and f.expected_action is not None
               and f.event_time is not None and now - SCANNED_SECONDS <= f.event_time <= now]
-    right = [f for f in scored if f.action == f.expected_action]
-    missed = [f for f in scored if (f.action is not None and f.action != f.expected_action)
-              or (f.action is None and now - (f.critical_at or f.event_time) > SECURITY_WAIT_SECONDS)]
+
+    def in_time(f: Finding) -> bool:  # decided, or still waiting, within the 60 s
+        decided = f.decided_at if f.decided_at is not None else now
+        return decided - (f.critical_at or f.event_time) <= SECURITY_WAIT_SECONDS
+
+    right = [f for f in scored if f.action == f.expected_action and in_time(f)]
+    missed = [f for f in scored if (f.action is not None and f.action != f.expected_action) or not in_time(f)]
     return _issues_json(
         len(scored), len(right), len(missed),
         [f.decided_at - f.event_time for f in scored if f.decided_at is not None],

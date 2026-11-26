@@ -6,8 +6,9 @@
  *  The frame is the target design's (D-068): a header, then one full-width row per service
  *  in the snapshot's order. A row is its main panel (name and status chip on the left, a
  *  detail slot on the right, then its body) and its Issues panel (svc.issues: injected,
- *  detected of injected with the missed line, the median times to detect and to remediate),
- *  which moves below the row on a narrow screen. svc.row says which kind of row:
+ *  detected of injected with the missed line, the median times to detect and to remediate; the
+ *  security row words them its own way), which moves below the row on a narrow screen. svc.row
+ *  says which kind of row:
  *  - "releases" (web-gateway, the design's deploy row) draws the laptop, the line and the
  *    Releases list on the left and its Errors chart (D-067) on the right, with "Running v…"
  *    in the header (see "Releases row" below);
@@ -1051,11 +1052,16 @@ function runTip(r, agent) {
 // drawn when our agent's answer lands, not while the patch runs (spec decision 24). A finding id
 // the page hasn't seen (not on the first snapshot, at most FRESH_SECONDS old) sends a packet
 // along the line, in the accent when critical, rings the laptop and fades its row in. Under
-// prefers-reduced-motion nothing moves (CSS).
+// prefers-reduced-motion nothing moves (CSS). "Patch agent unreachable" is red (r.unreachable:
+// a FAILED patch, or a stopped patch agent's INVALID). The Issues panel takes spec decision 26's
+// words: critical findings, right decisions with the missed line, the median times to decide and
+// to patch.
 const SECURITY_LANES = [
   { key: "security", top: 30 },
   { key: "external", top: 86 },
 ];
+// The Issues panel's labels, top to bottom, in place of the services' (spec decision 26).
+const ISSUE_WORDS_SECURITY = ["Critical findings", "Right decisions", "Median time to decide", "Median time to patch"];
 
 function createSecurityBody(row) {
   const body = document.createElement("div");
@@ -1090,6 +1096,9 @@ function createSecurityBody(row) {
   const detail = row.querySelector(".detail");
   detail.innerHTML = '<span>Open criticals <span class="open-crit"></span></span>';
   row._sc.open = detail.querySelector(".open-crit");
+  // The Issues panel counts critical findings and decisions, not incidents.
+  const labels = row.querySelectorAll(".issues .stat-label");
+  ISSUE_WORDS_SECURITY.forEach((words, i) => { labels[i].textContent = words; });
 }
 
 function updateSecurityRow(row, svc) {

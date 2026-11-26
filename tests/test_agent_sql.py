@@ -1098,6 +1098,22 @@ def test_the_security_insert_header_says_what_it_costs_and_how_its_times_compare
         assert words in header, words
 
 
+def test_the_call_rate_check_reads_a_stopped_patch_agent_as_lab_6_4_writes_it():
+    """A stopped patch agent fails the whole agent call at its agent card (issue 02), so lab 6.4
+    writes INVALID and N/A, never a PATCH without a commit. The call-rate check's header says so,
+    and puts `PATCHED decisions` short of `PATCH decisions` down to FAILED patches alone."""
+    for status in ("SUCCESS", "FAILED"):
+        decision = _decision(_A2A_ERROR, status=status)
+        assert (decision["action"], decision["patch_status"]) == ("INVALID", "N/A")
+    sql = read("checks/remediation_call_rate.sql")
+    header = " ".join(line.removeprefix("--").strip() for line in sql[: sql.index("SELECT")].splitlines())
+    sentences = re.split(r"(?<=\.) ", header)
+    [short] = [s for s in sentences if "short of `PATCH decisions`" in s]
+    assert "FAILED" in short and "down" not in short and "tunnel" not in short, short
+    [stopped] = [s for s in sentences if "stopped patch agent" in s.lower()]
+    assert "agent card" in stopped and "INVALID" in stopped, stopped
+
+
 @pytest.mark.parametrize("name", INSERTS)
 def test_no_input_label_holds_a_label_the_answer_is_parsed_by(name):
     """Each INSERT parses the answer with REGEXP_EXTRACT on its labels (`Action:`, `Reason:`, ...),

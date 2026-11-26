@@ -3418,7 +3418,14 @@ branches that mattered:
   "git" under it, a stream with a dot per finding, a "Scan findings" list (repository and
   score), and a timeline with a "Security agent" lane and an external lane, dashed, in its
   own colour, chipped "External · LangGraph · A2A". Our bar is hatched while it waits on the
-  patch agent. Its Issues panel scores against `cve_answer_key`.
+  patch agent. It reads "Patch agent unreachable", in red, for a `FAILED` patch and for an
+  `INVALID` whose answer starts "Exception while initializing A2A client", which is what a
+  stopped patch agent gives: Flink fails at its agent card before the model answers, so lab 6.4
+  can't write `FAILED` for it. Any other `INVALID` reads "Invalid answer". Its Issues panel
+  scores against `cve_answer_key`, in spec decision 26's words: critical findings, right
+  decisions, missed ones (wrong, `INVALID`, the unreachable ones among them, or none within 60 s
+  of lab 6.1's record, so a right one that comes later too), and the median times to decide and
+  to patch.
 - **Terraform** creates the four tables and turns RTCE on for `patch_decisions`
   (`confluent_rtce_topic`). `remediation_decisions` stays a Console step for attendees, as in
   the reference workshop. Section 6 joins `deploy_labs`, with a `patch_agent_url` variable.
@@ -3428,10 +3435,21 @@ branches that mattered:
 **Why.** It shows the A2A pattern on a story that needs a model (free text decides, not a
 score), keeps the four tuned agents and their readers untouched, and keeps the external side
 trivial, since the showcase is the call, not what the external agent can do.
-**Not checked live.** Whether a Confluent-hosted model calls A2A tools; whether Flink calls
-the agent card's URL or the connection endpoint, and which A2A version it speaks; whether
-`security_agent` copies the reply exactly; whether `patch_decisions` records get their
-Kafka timestamp when written (D-068's Pending, again).
+**Not checked live.** Issue 02's smoke test (2026-11-26: a throwaway agent on
+`llm_textgen_model` with `patch_agent_tool` and a one-line prompt, `patch-agent` behind a
+cloudflared quick tunnel) answered the first questions. A Confluent-hosted model calls an A2A
+tool, and that agent copied the reply exactly, `→` included. Flink fetches the card at the
+connection's endpoint plus `agent_card_path` on every call, then posts `message/send` (A2A 0.3)
+to `/`, with Basic auth from the connection's username and password on both, and never used the
+card's `http://localhost:8001/` interface. A stopped patch agent fails at the card fetch, before
+the model answers, so the whole agent call's answer is Flink's error alone ("Exception while
+initializing A2A client for agent: … ERROR: Failed to obtain agent card: 502"), which lab 6.4
+writes as `INVALID` and `N/A`, not `FAILED`. Still unchecked: whether `security_agent`, with its
+own prompt and three lines, copies the reply exactly; whether `message/send` goes to the card's
+URL or the connection's endpoint (the same host there); whether a stopped patch agent fails
+`DISMISS` findings too, as the error's place suggests, with which `agent_status` and after how
+long; whether `patch_decisions` records get their Kafka timestamp when written (D-068's
+Pending, again).
 **Impact.** Filled in by the issues under `.scratch/code-security-incidents/issues/`.
 
 Issue 01 (`uv run patch-agent` and lab 6.2's SQL): `pyproject.toml` (`a2a-sdk[http-server]>=1.3.1`
@@ -3860,3 +3878,38 @@ nor "17 per person", "eleven statements", "five source tables", "five output tab
 section 6's two. The repo still has no markdown link check. A one-off check of the 32 relative
 links and anchors in its tracked markdown finds the same five as D-068's: `PLAN.md` (gitignored)
 and the four `docs/tracks/PRE-PROVISIONED.md` links, which stay until the walkthrough is written.
+
+Code review fixes (the review of issues 01–11 on 2026-11-26,
+`.scratch/code-security-incidents/review-2026-11-26.md`, fixed in three passes). Pass 1, the
+spec's findings: `scripts/opswall/state.py` (S-c1, the user's decision: our bar reads "Patch
+agent unreachable", flagged `unreachable` for the page's red, for `FAILED` and now also for an
+`INVALID` whose answer starts "Exception while initializing A2A client", `CARD_FAILED_ANSWER`,
+read from `raw_response` into the finding's `card_failed`, since that is what a stopped patch
+agent gives; it is still a miss, as every `INVALID` is; S-c3: a right decision is the expected
+action within 60 s of lab 6.1's record, of the finding without one, when our bar gives up, and
+one that comes later is missed however right it is, where checkout's rule counted it as
+detected; the time to decide still counts it; the module docstring), `static/opswall.js` (S-a1:
+the security row's Issues panel takes spec decision 26's words, "Critical findings", "Right
+decisions", "Median time to decide" and "Median time to patch", set once when its body is made,
+so the services' labels and `updateRow` are as they were; the comments),
+`sql/checks/remediation_call_rate.sql` (S-c2: the header puts `PATCHED decisions` short of
+`PATCH decisions` down to `FAILED` patches alone, a call that failed or timed out or a reply not
+copied exactly, and says a stopped patch agent shows up as `INVALID` instead, with `PATCH
+decisions` falling behind half of `patch_decisions rows`). This entry: "Not checked live" says
+what issue 02 found and keeps what it left open (S-a2), and the Choice's wall bullet says what
+is built (S-c1), as spec decisions 24 and 26 now do. Tests: `tests/test_opswall_state.py` (a
+stopped patch agent's `INVALID`, on a `PATCH` and on a `DISMISS` finding, reads "Patch agent
+unreachable" with `unreachable`, no commit and no hatch, and is a miss; an `INVALID` that quotes
+the error after an answer of its own stays "Invalid answer"; a right decision 60 s after lab
+6.1's record is right, and 60.5 s after it, 89 s after it, wrong and late, or late with no lab
+6.1 record, missed, each once, with the time to decide and to patch counting the late ones),
+`tests/test_agent_sql.py` (lab 6.4 writes issue 02's error as `INVALID` and `N/A`, with `SUCCESS`
+or another status, and the call-rate check's header says a stopped patch agent gives `INVALID`
+and blames `PATCHED` short of `PATCH` on `FAILED` alone). Offline render with issue 10's
+harness, given an "unreachable" frame (issue 02's error as the whole answer) and the Issues
+panel's words (`research/review-fix-1/`): 8 of 182 checks failed before the change (the labels
+in all six frames, and that frame's label and tooltip) and 182 of 182 pass after it; the
+stopped patch agent's bar reads "Patch agent unreachable" in red, with no external bar and "1
+missed"; the labels fit at 1440 and 820 px; and the three service rows are the same PNG, byte
+for byte, as HEAD's page draws them, at 1440 and 820 px, at T and at the two moments with
+checkout bars.
