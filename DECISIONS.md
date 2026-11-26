@@ -3615,3 +3615,45 @@ against `cve_scans`' earliest-offset default; the header's first line opens sect
 counterpart of 6.2's test that it doesn't; the module docstring names section 6). Nothing else
 needed the lab: `reset`, `reset-health`, the call-rate check and its README name 6.1 since issue
 04, and `deploy_labs` starts none of section 6's statements until issue 08.
+
+Issue 06 (lab 6.3, the security agent): `sql/6.3_security_agent.sql` (new; `CREATE AGENT
+security_agent USING MODEL llm_textgen_model`, the prompt, then `USING TOOLS patch_agent_tool`,
+the only `USING TOOLS` in the workshop, and a `WITH` block of its own: `handle_exception`
+continue, `max_consecutive_failures` 3, `max_iterations` 3, which no other agent sets, and
+`request_timeout` 60. The prompt in 5.2's and 5.3's order: the three lines, `Action: [PATCH |
+DISMISS]`, `Reason: [one or two sentences]` and `Patch: [the answer from patch_agent_tool, copied
+exactly | N/A]`, reworded from "the patch agent's answer" for the apostrophe rule; four examples,
+each a finding shown as lab 6.4 will show it (`FINDING <id> in <repository>`, `CVE: <cve_id>
+(CVSS <score>)`, `Package: <package> <installed_version>, fixed in <fixed_version>`, `Scanner
+said:`) and filled in from an approved template and a critical advisory: `PATCH` from template 3,
+jsonwebtoken in payments, with the request it sends (`PATCH payments CVE-2026-46471 jsonwebtoken
+8.5.1 -> 9.0.0`) and the reply patch-agent gives that request (commit `e73f47b`, a 6.4 s patch),
+copied into its Patch line; `dev_only` from template 7, jackson-databind in checkout; `archived`
+from template 10, lodash in storefront-legacy; and `not_called` from template 12, the same
+jsonwebtoken CVE in web-gateway, so one critical flaw shows up on both sides and only where the
+package sits tells them apart; the role, River Shop's application security engineer; rule 1,
+`PATCH` when both hold (a runtime dependency of a deployed service, and the vulnerable code used),
+rule 2, `DISMISS` when any of the three reasons holds, then "The CVSS score is always critical
+here. It never decides on its own."; the tool, only for `PATCH`: one call with exactly the
+request line and nothing else, its answer copied exactly into the Patch line, `Patch: FAILED` and
+a few words if the call fails, never a commit the tool did not return, and on `DISMISS` no call
+and `Patch: N/A`; strict values. The header: the input and the output, why a critical score is
+not enough, the tool and why only this agent has `max_iterations`, the 60 s against the wall's
+give-up and the tool's 30 s, that the tool and `patch-agent` must exist, and that `uv run reset`
+drops the agent). Tests: `tests/test_agent_sql.py` (the security agent joins `AGENT_FILES`,
+`OUTPUT_LINES` with `Action:`, `Reason:` and `Patch:`, and `ALLOWED_ANSWERS` with `PATCH` and
+`DISMISS` from `opsgen/finding_templates.py`, where lab 6.4's tests will find them, so the
+per-agent tests hold it to its lines in order and no other agent's, an example per action and no
+other, the actions stated in STRICT VALUES, no apostrophe and the failure handling; the prompt is
+read up to `USING TOOLS` or `WITH`; its own tests: the three lines; the rules in order with their
+cues; `USING TOOLS` naming the tool lab 6.2 creates, the prompt naming it too, no other file in
+`sql/` with `USING TOOLS` and no other agent with `max_iterations`; the tool rules; the stated
+request line holds `REQUEST`'s fields in its order and, filled in with any critical advisory,
+parses back into them; one `PATCH` example and one `DISMISS` per reason, each an approved
+critical template expecting its action, filled with the advisory its CVE line names, a
+repository the template may name and a value of each pool, with no placeholder left, a critical
+score and an id of its own; the `PATCH` example's request is the stated line filled in from its
+finding, its reply is `format_reply`'s for that request with a delay within patch-agent's
+bounds, and its Patch line is that reply; the `DISMISS` examples call nothing and write `N/A`;
+each Reason names its cue; the four `WITH` options, and a `request_timeout` longer than the
+tool's). `platform-team/` is unchanged: section 6 joins `deploy_labs` in issue 08.

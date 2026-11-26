@@ -13,14 +13,25 @@ never a Target, with one example per action, also filled in from the templates. 
 is a fourth writer of `remediation_decisions`: one decision per HIGH verdict, with the
 ticket's id, the trigger `HIGH_SEVERITY_TICKET` and a null target. The rules each INSERT
 follows are keyed by its file, and the output lines and allowed answers by its agent.
+
+Section 6 (D-070) adds the security agent (6.3), the only agent with a tool. Its prompt
+answers an Action, `PATCH` or `DISMISS`, a Reason and a Patch line. On `PATCH` it calls lab
+6.2's `patch_agent_tool` with the request line `scripts.patchagent.reply` parses and copies
+the patch agent's reply into the Patch line, which lab 6.4 parses back. Its examples are one
+`PATCH` and one `DISMISS` per reason, each an approved critical finding template filled in
+with a real advisory.
 """
 
+import itertools
 import re
 import string
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
+from opsgen import finding_templates
+from opsgen.finding_templates import ARCHIVED, DEV_ONLY, DISMISS, DISMISS_REASONS, NOT_CALLED, PATCH, FindingTemplate
 from opsgen.ticket_templates import POOLS, TEMPLATES, Template
 from scripts.evaluation.decisions import (
     ACTIONS,
@@ -35,17 +46,22 @@ from scripts.evaluation.decisions import (
     TICKET_RESPONDER,
 )
 from scripts.evaluation.tickets import HIGH, LOW
+from scripts.patchagent.graph import DEFAULT_MAX_DELAY, DEFAULT_MIN_DELAY
+from scripts.patchagent.reply import REPLY_FINISHED, REPLY_STARTED, REQUEST, format_reply
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL = ROOT / "sql"
 
 TICKET_CLASSIFIER = "ticket_classifier"  # lab 5.2 (D-068)
+SECURITY_AGENT = "security_agent"  # lab 6.3 (D-070)
 AGENT_FILES = {
     RELEASE_AGENT: "4.2_release_agent.sql",
     CAPACITY_AGENT: "4.2_capacity_agent.sql",
     TICKET_CLASSIFIER: "5.2_ticket_classifier.sql",
     TICKET_RESPONDER: "5.3_ticket_responder.sql",
+    SECURITY_AGENT: "6.3_security_agent.sql",
 }
+TOOL_FILE = "6.2_patch_agent_tool.sql"  # the connection and the tool the security agent calls
 # Each INSERT: the agent it calls and the table it reads. The release agent has two legs:
 # error-rate breaches (lab 2.2's table, D-067) and latency anomalies. The classifier reads
 # lab 5.1's P1 tickets, and the responder the classifier's verdicts (D-068).
@@ -66,15 +82,18 @@ TABLE_FILE = "sink_remediation_decisions.sql"
 
 # Each agent's answer, line by line: brief section 5.5, cut down in D-034, for the metric
 # agents; a severity and a reason for the classifier, and an action and a reason for the
-# responder, which never has a target (D-068).
+# responder, which never has a target (D-068); an action, a reason and the patch agent's reply
+# for the security agent, which lab 6.4 parses (D-070).
 OUTPUT_LINES = {
     RELEASE_AGENT: ("Action:", "Target:", "Reason:"),
     CAPACITY_AGENT: ("Action:", "Target:", "Reason:"),
     TICKET_CLASSIFIER: ("Severity:", "Reason:"),
     TICKET_RESPONDER: ("Action:", "Reason:"),
+    SECURITY_AGENT: ("Action:", "Reason:", "Patch:"),
 }
-# What the first line may say: a metric agent's action, or the classifier's verdict.
-ALLOWED_ANSWERS = {**ALLOWED_ACTIONS, TICKET_CLASSIFIER: (HIGH, LOW)}
+# What the first line may say: a metric agent's action, the classifier's verdict, or the
+# security agent's action, which the CVE answer key also uses.
+ALLOWED_ANSWERS = {**ALLOWED_ACTIONS, TICKET_CLASSIFIER: (HIGH, LOW), SECURITY_AGENT: (PATCH, DISMISS)}
 # D-034's eight, then the ticket a ticket_responder decision is about (D-068).
 DECISION_COLUMNS = (
     "window_end", "service_name", "agent_name", "trigger",
@@ -84,6 +103,13 @@ DECISION_COLUMNS = (
 
 def read(name: str) -> str:
     return (SQL / name).read_text()
+
+
+def _prompt(sql: str) -> str:
+    """An agent file's USING PROMPT string, without its quotes. It ends before USING TOOLS, if
+    the agent has tools, or before WITH."""
+    start = sql.index("USING PROMPT '") + len("USING PROMPT '")
+    return sql[start : start + re.search(r"'\n(?:USING TOOLS [^\n]+\n)?WITH \(\n", sql[start:]).start()]
 
 
 def _written_columns(sql: str) -> list[str]:
@@ -461,6 +487,217 @@ def test_the_responder_input_is_the_ticket_and_the_triage_reason():
     assert positions == sorted(positions)
 
 
+# --- lab 6.3: the security agent (D-070) ---------------------------------------------------
+
+
+def test_the_security_agent_answers_an_action_a_reason_and_the_patch_agent_reply():
+    """Spec decision 16: three labelled lines, plain text. The Patch line holds the patch agent's
+    reply as it came, for lab 6.4 to parse, or N/A. Their order and the allowed actions are
+    checked with the other agents', from OUTPUT_LINES and ALLOWED_ANSWERS, which lab 6.4's
+    tests read too."""
+    prompt = _prompt(read(AGENT_FILES[SECURITY_AGENT]))
+    assert (
+        "Action: [PATCH | DISMISS]\nReason: [one or two sentences]\n"
+        "Patch: [the answer from patch_agent_tool, copied exactly | N/A]\n"
+    ) in prompt
+    assert "nothing before or after" in prompt
+
+
+def test_the_security_agent_patches_a_shipped_used_package_and_dismisses_the_rest():
+    """Spec decision 16: PATCH needs both, a runtime dependency of a deployed service and the
+    vulnerable code used; DISMISS takes any of the three reasons the templates carry. Every
+    finding it reads is critical (lab 6.1), so the score never decides."""
+    prompt = _prompt(read(AGENT_FILES[SECURITY_AGENT]))
+    patch, dismiss, strict = (prompt.index(s) for s in ("1. PATCH — ", "2. DISMISS — ", "STRICT VALUES"))
+    assert patch < dismiss < strict
+    for cue in ("both of these hold", "runtime dependencies of a deployed service", "the vulnerable code is used"):
+        assert cue in prompt[patch:dismiss], cue
+    for cue in ("any of these holds", "only a development, test or build dependency",
+                "archived or not deployed", "no call to the vulnerable code"):  # fmt: skip
+        assert cue in prompt[dismiss:strict], cue
+    assert "stop at the first one that matches" in prompt
+    assert "The CVSS score is always critical here. It never decides on its own." in prompt
+    assert "Use only what the finding says" in prompt[strict:]
+
+
+def test_the_security_agent_calls_lab_62s_tool_and_is_the_only_agent_with_tools():
+    """USING TOOLS names the tool lab 6.2 creates, and the prompt names it too, so the model knows
+    what to call. No other file in sql/ has USING TOOLS, and no other agent sets max_iterations,
+    which bounds tool calls (D-033): the other agents reason over their input alone."""
+    tool = re.search(r"^CREATE TOOL `(\w+)`", read(TOOL_FILE), re.MULTILINE).group(1)
+    sql = read(AGENT_FILES[SECURITY_AGENT])
+    statement = sql[sql.index("\nCREATE AGENT ") + 1 :]
+    assert statement.startswith("CREATE AGENT `security_agent`\nUSING MODEL `llm_textgen_model`\nUSING PROMPT '")
+    assert f"'\nUSING TOOLS `{tool}`\nWITH (\n" in statement
+    assert tool in _prompt(sql)
+    with_tools = [p.name for p in sorted(SQL.glob("*.sql")) if re.search(r"^USING TOOLS ", p.read_text(), re.MULTILINE)]
+    assert with_tools == [AGENT_FILES[SECURITY_AGENT]]
+    for agent, name in AGENT_FILES.items():
+        assert ("'max_iterations'" in read(name)) == (agent == SECURITY_AGENT), name
+
+
+def test_the_security_agent_calls_the_tool_once_on_patch_only_and_copies_its_answer():
+    """Spec decision 16: one call, with the request line and nothing else, and its answer copied
+    exactly into the Patch line. A failed call says FAILED and why, and a commit is never made up:
+    lab 6.4 derives FAILED from a PATCH without a commit. On DISMISS, no call and N/A."""
+    prompt = _prompt(read(AGENT_FILES[SECURITY_AGENT]))
+    rules = prompt[prompt.index("PATCH AGENT — ") : prompt.index("STRICT VALUES")]
+    for wording in ("Use it only for PATCH", "Call patch_agent_tool once, with exactly this line and nothing else",
+                    "copy that answer exactly into the Patch line",
+                    "If the call fails, write Patch: FAILED and a few words on why.",
+                    "Never write a commit the tool did not return.",
+                    "For DISMISS, never call the tool, and write Patch: N/A."):  # fmt: skip
+        assert wording in rules, wording
+
+
+# The request line as the prompt states it: PATCH, then the request's fields in angle brackets.
+_STATED_REQUEST = re.compile(r"PATCH(?: (?:<\w+>|->))+")
+
+
+def _stated_request(prompt: str) -> str:
+    [stated] = set(_STATED_REQUEST.findall(prompt))
+    return stated
+
+
+def _request_for(stated: str, fields: dict[str, str]) -> str:
+    """The stated request line, each placeholder replaced by the field it names."""
+    return re.sub(r"<(\w+)>", lambda m: fields[m[1]], stated)
+
+
+def test_the_stated_request_line_is_the_one_the_patch_agent_parses():
+    """The placeholders are REQUEST's fields, in its order, and the line filled in with any
+    critical advisory is a request patch-agent parses back into the same values, so the bump and
+    the commit in its reply are about the finding (D-070)."""
+    stated = _stated_request(_prompt(read(AGENT_FILES[SECURITY_AGENT])))
+    assert re.findall(r"<(\w+)>", stated) == sorted(REQUEST.groupindex, key=REQUEST.groupindex.get)
+    for advisory in finding_templates.ADVISORIES[True]:
+        fields = {"repository": "checkout"} | {
+            k: getattr(advisory, k) for k in ("cve_id", "package", "installed_version", "fixed_version")
+        }
+        request = REQUEST.fullmatch(_request_for(stated, fields))
+        assert request and request.groupdict() == fields, advisory.cve_id
+
+
+# A security agent example shows its finding as lab 6.4's input shows one (issue 07), then, for
+# a PATCH, the call to the tool and the patch agent's reply, then the answer.
+_EXAMPLE_FINDING = re.compile(
+    r"\nFINDING (?P<finding_id>SCAN-\d{6}) in (?P<repository>[\w-]+)\n"
+    r"CVE: (?P<cve_id>CVE-\d{4}-\d{4,}) \(CVSS (?P<cvss_score>\d+\.\d)\)\n"
+    r"Package: (?P<package>\S+) (?P<installed_version>\S+), fixed in (?P<fixed_version>\S+)\n"
+    r"Scanner said: (?P<finding>[^\n]+)\n"
+    r"(?:You call patch_agent_tool with: (?P<request>[^\n]+)\npatch_agent_tool replies: (?P<reply>[^\n]+)\n)?"
+    r"Answer:\nAction: (?P<action>\w+)\nReason: (?P<reason>[^\n]+)\nPatch: (?P<patch>[^\n]+)\n"
+)
+
+
+def _critical_template(example: dict[str, str]) -> FindingTemplate:
+    """The approved critical template an example's scanner sentence fills in: with the advisory its
+    CVE line names, the repository its FINDING line names, and a value of each other pool."""
+    [advisory] = [a for a in finding_templates.ADVISORIES[True] if a.cve_id == example["cve_id"]]
+    assert [advisory.package, advisory.installed_version, advisory.fixed_version] == [
+        example["package"], example["installed_version"], example["fixed_version"]
+    ], example["cve_id"]  # fmt: skip
+    values = {f: getattr(advisory, f) for f in finding_templates.ADVISORY_FIELDS}
+    values["repository"] = example["repository"]
+    pools = finding_templates.POOLS
+    draws = [dict(zip(pools, values_drawn, strict=True)) for values_drawn in itertools.product(*pools.values())]
+    [template] = [
+        t
+        for t in finding_templates.TEMPLATES
+        if t.critical
+        and example["repository"] in t.repositories
+        and any(t.finding.format(**values, **drawn) == example["finding"] for drawn in draws)
+    ]
+    return template
+
+
+def _security_examples() -> list[tuple[str, FindingTemplate, dict[str, str | None]]]:
+    """(action, the approved template its finding fills in, the example's parts) per example."""
+    found = []
+    for action, text in _examples(read(AGENT_FILES[SECURITY_AGENT])):
+        assert not re.search(r"[{}]|<\w+>", text), f"a placeholder is left in the {action} example"
+        example = _EXAMPLE_FINDING.fullmatch(text.rstrip("\n") + "\n")
+        assert example, text
+        assert example["action"] == action
+        found.append((action, _critical_template(example.groupdict()), example.groupdict()))
+    return found
+
+
+def test_the_security_agent_examples_are_approved_critical_findings_filled_in():
+    """One PATCH and one DISMISS per reason (spec decision 16), each a critical template the user
+    approved (issue 03) that expects the example's action, filled in with a critical advisory, a
+    repository the template may name and a value of its pools. The scores are critical and the
+    finding ids are distinct."""
+    examples = _security_examples()
+    expected = [(PATCH, None), *((DISMISS, reason) for reason in DISMISS_REASONS)]
+    assert sorted((a, t.dismiss_reason or "") for a, t, _ in examples) == sorted((a, r or "") for a, r in expected)
+    for action, template, example in examples:
+        assert template.expected_action == action, example["finding"]
+        assert 9.0 <= float(example["cvss_score"]) <= 10.0, example["cvss_score"]
+    assert len({example["finding_id"] for *_, example in examples}) == len(examples)
+
+
+def test_the_patch_example_sends_the_request_line_and_copies_a_real_reply():
+    """The example's request is the stated line filled in from its finding, which patch-agent
+    parses back. The reply is what patch-agent answers that request (its commit, its format, a
+    delay within its bounds), and the Patch line is that reply, copied exactly."""
+    stated = _stated_request(_prompt(read(AGENT_FILES[SECURITY_AGENT])))
+    [example] = [example for action, _, example in _security_examples() if action == PATCH]
+    fields = {k: example[k] for k in REQUEST.groupindex}
+    assert example["request"] == _request_for(stated, fields)
+    assert REQUEST.fullmatch(example["request"]).groupdict() == fields
+    reply = example["reply"]
+    started, finished = (
+        datetime.fromisoformat(pattern.search(reply).group(1).replace("Z", "+00:00"))
+        for pattern in (REPLY_STARTED, REPLY_FINISHED)
+    )
+    assert reply == format_reply(example["request"], started, finished)
+    assert DEFAULT_MIN_DELAY <= (finished - started).total_seconds() <= DEFAULT_MAX_DELAY
+    assert example["patch"] == reply
+
+
+def test_the_dismiss_examples_call_nothing_and_have_no_patch():
+    examples = [(template, example) for action, template, example in _security_examples() if action == DISMISS]
+    assert examples
+    for template, example in examples:
+        assert example["request"] is None and example["reply"] is None, template.dismiss_reason
+        assert example["patch"] == "N/A", template.dismiss_reason
+
+
+# What each example's Reason names (spec decision 16): where the package sits, and for a PATCH
+# that the vulnerable code is reached.
+SECURITY_CUES = {
+    PATCH: ("deployed", "call path"),
+    DEV_ONLY: ("dev dependency",),
+    ARCHIVED: ("archived",),
+    NOT_CALLED: ("no code path",),
+}
+
+
+def test_each_security_example_reason_names_where_the_package_sits():
+    examples = _security_examples()
+    assert examples
+    for action, template, example in examples:
+        for cue in SECURITY_CUES[template.dismiss_reason or action]:
+            assert cue in example["reason"], (action, template.dismiss_reason, example["reason"])
+
+
+def test_the_security_agent_sets_its_own_with_block():
+    """Spec decision 16: the other agents' failure handling, max_iterations for a tool call and
+    then the answer, and a 60 s request_timeout, longer than the tool's own (lab 6.2)."""
+    sql = read(AGENT_FILES[SECURITY_AGENT])
+    options = re.findall(r"^  '(\w+)' = '([^']*)'", sql[sql.index("\nWITH (\n") :], re.MULTILINE)
+    assert options == [
+        ("handle_exception", "continue"),
+        ("max_consecutive_failures", "3"),
+        ("max_iterations", "3"),
+        ("request_timeout", "60"),
+    ]
+    tool_sql = read(TOOL_FILE)
+    tool = dict(re.findall(r"^  '(\w+)' = '([^']*)'", tool_sql[tool_sql.index("CREATE TOOL") :], re.MULTILINE))
+    assert int(tool["request_timeout"]) < int(dict(options)["request_timeout"])
+
+
 @pytest.mark.parametrize("name", INSERTS)
 def test_no_input_label_holds_a_label_the_answer_is_parsed_by(name):
     """Each INSERT parses the answer with REGEXP_EXTRACT on its labels (`Action:`, `Reason:`, ...),
@@ -500,9 +737,7 @@ def test_prompt_is_a_single_quoted_string_without_apostrophes(agent):
     """No escaping rule for a literal apostrophe inside USING PROMPT is documented
     (D-033), so the prompts avoid them; the SQL is one statement per file."""
     sql = read(AGENT_FILES[agent])
-    start = sql.index("USING PROMPT '") + len("USING PROMPT '")
-    end = sql.index("'\nWITH (", start)
-    assert "'" not in sql[start:end], "an apostrophe would close the prompt literal early"
+    assert "'" not in _prompt(sql), "an apostrophe would close the prompt literal early"
     assert sql.rstrip().endswith(");"), "one statement per file: an attendee pastes one file per statement"
 
 
