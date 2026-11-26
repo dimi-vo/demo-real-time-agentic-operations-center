@@ -3357,3 +3357,72 @@ the switch, all twelve with it, in every environment).
 
 Amends D-051 (its open question) and D-068 ("Terraform runs no INSERT", now true only
 without `deploy_labs`).
+
+### D-070 · DECISION · Code security incidents: a Streaming Agent that calls an external agent over A2A
+**What.** The workshop shows Streaming Agents that only reason over their input. It should
+also show one that calls an agent running somewhere else and waits for its answer: the
+hierarchical pattern of the user's `dimi-vo/multi-agent-architectures` repo
+(`hierarchical-workflow`), where a Flink agent calls LangGraph agents over A2A. Spec:
+`.scratch/code-security-incidents/spec.md`.
+**Options.** Decided with the user in a grilling session on 2026-11-26 (four rounds). The
+branches that mattered:
+- The external agent on each participant's laptop behind a tunnel they open, or one shared
+  agent. → On each laptop; the presenter's machine and URL are the fallback on the day.
+- What the Streaming Agent checks: whether the vulnerable package ships and is used (free
+  text), a fixed version existing, known exploitation (KEV/EPSS), or production exposure. →
+  The free text. The other three are field checks a `WHERE` can do, so they need no model.
+- One agent that calls the tool and waits, or a decision stage and a separate call stage. →
+  One agent.
+- The external agent with a small local model, or none. → None for now: a LangGraph graph
+  whose one node is a function. A model can come later without changing the Flink side.
+- How the wall learns the external call's start and finish: in the reply, copied by our
+  agent into its answer (a); a Kafka record the external agent writes (b); a local file the
+  wall reads (c). → (a). It works the same in the fallback, where (b) and (c) would lose the
+  external bar on the participants' walls.
+- The decisions in `remediation_decisions`, or a table of their own. → Their own: every
+  reader of `remediation_decisions` would misread them (the wall routes any `ticket_id` to
+  checkout and drops unknown services; `FIX_ACTIONS` keys a label dict; `evaluate` counts
+  unknown agents as misrouted).
+**Choice.**
+- **Story.** `ops-sim` streams CVE scan findings for River Shop's repositories into
+  `cve_scans`, about 4 a minute on their own clock, with a `cve_answer_key`. Lab 6.1 keeps
+  CVSS ≥ 9.0 in `critical_cves`. Lab 6.3's `security_agent` reads the scanner's sentence and
+  answers `PATCH` or `DISMISS`. On `PATCH` it calls `patch_agent_tool` (lab 6.2) with one
+  fixed line, `PATCH <repository> <cve_id> <package> <installed_version> -> <fixed_version>`,
+  waits, and copies the reply into a `Patch:` line. Lab 6.4 writes `patch_decisions`, with
+  the commit and the patch's start and finish parsed out of that line.
+- **`patch_agent`** is started with `uv run patch-agent --public-url <tunnel URL>`: a
+  LangGraph graph with no model, served over A2A by `a2a-sdk` (the latest release), in the
+  main dependencies. It waits 4–10 s, then answers "Patched … in commit <7 hex digits of the
+  request's SHA-1>, started …Z, finished …Z", or echoes a request it can't parse. It accepts
+  any credentials, prints each call, and prints lab 6.2's SQL with its URL filled in, since
+  `ALTER CONNECTION` can't change an endpoint.
+- **Section 6**, "A third architecture: code security incidents". RTCE and Lightning move to
+  sections 7–9, as they moved to 6–8 when the tickets became section 5.
+- **`patch_status`** is derived by the INSERT: `PATCHED` with a commit, `FAILED` for a
+  `PATCH` without one, `N/A` otherwise. The agent is never asked to invent a commit.
+- **Agent settings.** Its own `WITH` block: `max_iterations` 3, `request_timeout` 60. The
+  tool: `request_timeout` 30 and `max_retries` 0, since a retry would patch twice. That keeps
+  one decision under the wall's 60 s give-up.
+- **The model** is `llm_textgen_model`. Confluent's docs don't say that a Confluent-hosted
+  model can call tools, so a live smoke test comes first; if it fails, a Bedrock connection
+  model, as in the multi-agent repo, is brought back to the user before anything builds on it.
+- **The wall** gets a fourth row, "Code security incidents", at the bottom: a laptop with
+  "git" under it, a stream with a dot per finding, a "Scan findings" list (repository and
+  score), and a timeline with a "Security agent" lane and an external lane, dashed, in its
+  own colour, chipped "External · LangGraph · A2A". Our bar is hatched while it waits on the
+  patch agent. Its Issues panel scores against `cve_answer_key`.
+- **Terraform** creates the four tables and turns RTCE on for `patch_decisions`
+  (`confluent_rtce_topic`). `remediation_decisions` stays a Console step for attendees, as in
+  the reference workshop. Section 6 joins `deploy_labs`, with a `patch_agent_url` variable.
+- **`reset`** drops `security_agent`, then the tool, then the connection (all three take
+  `IF EXISTS`), and empties the four topics.
+- **Deferred.** `evaluate` scoring for the findings, and which tunnel the lab recommends.
+**Why.** It shows the A2A pattern on a story that needs a model (free text decides, not a
+score), keeps the four tuned agents and their readers untouched, and keeps the external side
+trivial, since the showcase is the call, not what the external agent can do.
+**Not checked live.** Whether a Confluent-hosted model calls A2A tools; whether Flink calls
+the agent card's URL or the connection endpoint, and which A2A version it speaks; whether
+`security_agent` copies the reply exactly; whether `patch_decisions` records get their
+Kafka timestamp when written (D-068's Pending, again).
+**Impact.** Filled in by the issues under `.scratch/code-security-incidents/issues/`.
