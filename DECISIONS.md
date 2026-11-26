@@ -3829,3 +3829,34 @@ and external bar beside an open run, a `DISMISS`, a `FAILED`, an `INVALID`, a "N
 two tooltips on hover, the dots live (none on the first snapshot, accent, bright, none for a
 25 s-old backread), and the three service rows byte for byte as HEAD's page draws them, at
 1440 and 820 px, at three moments, two of them with checkout bars.
+
+Issue 11 (the docs): `README.md` (the opening paragraph tells four stories with five Streaming
+Agents, three lines longer: a scanner reports CVEs in River Shop's repositories, Flink keeps the
+critical ones, and a security agent decides whether each matters; when one does, it calls an
+external LangGraph agent on your laptop over A2A and records the commit it returns in
+`patch_decisions`; coding agents reach that table and `remediation_decisions` through the
+Real-Time Context Engine, and Lightning Queries read them over REST; `ticket_triage` is no longer
+named, to keep the length), `platform-team/README.md` (the Real-Time Context Engine and Lightning
+are sections 7–9, in steps 5 and 8; "What this does": the pool sized for ten long-running
+statements, 6.1 and 6.4 among them and not yet checked against 10, seven source and seven output
+tables, and RTCE on `patch_decisions`, with `remediation_decisions` still a Console step; step 6:
+developers run `uv run patch-agent` and a tunnel in front of it in section 6, so their laptops
+need outbound access for the tunnel, which tunnel is still a TODO, what the smoke test saw (a
+cloudflared quick tunnel registered only with `--protocol http2`, on a network that blocks
+outbound UDP on port 7844, which QUIC, its default transport, uses), and the presenter's patch
+agent as the fallback; step 7: 22 resources per person and their list, the four tables and the
+RTCE topic among them, and all fifteen statements `COMPLETED`; step 9: 22 per new person;
+"Updating stacks you built earlier": a stack applied before D-070 needs nothing dropped; the
+readiness row: fourteen tables; the cost paragraph: about 72 security-agent decisions an hour per
+developer, about 36 of them, the ones it patches, making a second model call after the patch
+agent answers, and the patch agent calls no model; the demo's 39 point at step 7's list alone; the
+files table; issue 08 had already written `patch_agent_url` and the demo restart's seven
+`-replace`s), `platform-team/modules/developer/statements.tf` (a comment: the agent SQL that names
+`llm_textgen_model` is sections 4 to 6). No test: the issue is docs. A grep of the tracked tree,
+apart from `DECISIONS.md`, `PLAN.md`, `checkpoints/` and `inspiration/`, finds no "three
+stories", "four Streaming Agents", "four agents", "sections 6–8", "ten tables" or "ten topics",
+nor "17 per person", "eleven statements", "five source tables", "five output tables" or "sections
+4 and 5"; "eight long-running statements" stays in `flink_max_cfu`'s description, which adds
+section 6's two. The repo still has no markdown link check. A one-off check of the 32 relative
+links and anchors in its tracked markdown finds the same five as D-068's: `PLAN.md` (gitignored)
+and the four `docs/tracks/PRE-PROVISIONED.md` links, which stay until the walkthrough is written.

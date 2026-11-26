@@ -670,7 +670,7 @@ resource "confluent_rtce_topic" "patch_decisions" {
 
 # CSP Hosted Flink Model Inference only: Confluent runs the model, so there is no
 # connection and no cloud key. The name llm_textgen_model is what the agent SQL
-# (sections 4 and 5 of the walkthrough) references.
+# (sections 4 to 6 of the walkthrough) references.
 locals {
   llm_textgen_with = join(", ", [
     "'provider' = 'confluent'",
