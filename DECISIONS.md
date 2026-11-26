@@ -3912,4 +3912,9 @@ in all six frames, and that frame's label and tooltip) and 182 of 182 pass after
 stopped patch agent's bar reads "Patch agent unreachable" in red, with no external bar and "1
 missed"; the labels fit at 1440 and 820 px; and the three service rows are the same PNG, byte
 for byte, as HEAD's page draws them, at 1440 and 820 px, at T and at the two moments with
-checkout bars.
+checkout bars. Pass 1's two loose ends, in a commit of their own: the stopped patch agent's
+tooltip says "The patch agent could not be reached, so no decision came back." in place of "No
+PATCH or DISMISS came back. No commit came back." (`static/opswall.js`; the harness checks the
+sentence, 1 of 182 checks failing before and 182 of 182 after, `research/review-fix-1b/`, the
+service rows byte for byte as before), and the spec's Pending list gives what issue 02 answered
+as answered and keeps the rest.

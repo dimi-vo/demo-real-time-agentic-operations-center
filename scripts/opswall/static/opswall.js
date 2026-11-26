@@ -1192,10 +1192,12 @@ function findingRunTip(r, lane) {
       : "";
     return head + when + (r.reply ? `<span class="reason">${esc(clip(String(r.reply), 240))}</span>` : "");
   }
-  const answer = r.action === "INVALID" ? "No PATCH or DISMISS came back."
+  const lost = r.action === "INVALID" && r.unreachable;  // a stopped patch agent: Flink's agent card error
+  const answer = lost ? "The patch agent could not be reached, so no decision came back."
+    : r.action === "INVALID" ? "No PATCH or DISMISS came back."
     : r.outcome != null ? `Action: ${esc(r.outcome)}.`
     : r.open ? "Waiting for the security agent." : "The security agent gave no answer.";
-  const commit = r.commit ? ` Commit ${esc(r.commit)}.` : r.unreachable ? " No commit came back." : "";
+  const commit = r.commit ? ` Commit ${esc(r.commit)}.` : r.unreachable && !lost ? " No commit came back." : "";
   const wait = r.waitFrom != null && r.waitTo != null
     ? `<em>Waiting on patch agent for ${dur(r.waitTo - r.waitFrom)}, the hatched part.</em>` : "";
   return `${head}<em>${answer}${commit}</em>${wait}` +
