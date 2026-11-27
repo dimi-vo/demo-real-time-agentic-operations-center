@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Findings and agent runs — timeline redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f4f4f2; --card:#ffffff; --border:#e3e3df; --text:#18181b; --muted:#6b6b72; --faint:#a3a3aa;
+  --lane:#f2f2ef; --grid:#e4e4e0; --track:#d9d9d4; --chip:#efefec; --pill:#ffffff; --pill-stroke:rgba(201,138,6,.45);
+  --amber:#c08304; --amber-wait:rgba(192,131,4,.10); --violet:#6d4fe8; --violet-soft:rgba(109,79,232,.12);
+  --green:#1d8f4e; --focus:#6d4fe8;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#08080a; --card:#111114; --border:#24242a; --text:#ececef; --muted:#8c8c95; --faint:#55555d;
+    --lane:#16161a; --grid:#24242a; --track:#2c2c33; --chip:#1c1c21; --pill:#17171b; --pill-stroke:rgba(242,181,58,.38);
+    --amber:#f2b53a; --amber-wait:rgba(242,181,58,.07); --violet:#9d8af7; --violet-soft:rgba(157,138,247,.10);
+    --green:#5fcf8a; --focus:#9d8af7;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#08080a; --card:#111114; --border:#24242a; --text:#ececef; --muted:#8c8c95; --faint:#55555d;
+  --lane:#16161a; --grid:#24242a; --track:#2c2c33; --chip:#1c1c21; --pill:#17171b; --pill-stroke:rgba(242,181,58,.38);
+  --amber:#f2b53a; --amber-wait:rgba(242,181,58,.07); --violet:#9d8af7; --violet-soft:rgba(157,138,247,.10);
+  --green:#5fcf8a; --focus:#9d8af7;
+  color-scheme:dark;
+}
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*,*::before,*::after{box-sizing:inherit}
+body{margin:0;background:var(--bg);color:var(--text);font:400 14px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+main{max-width:1180px;margin:0 auto;padding:40px 24px 64px}
+h1{font-size:22px;font-weight:600;letter-spacing:-.01em;margin:0 0 6px}
+.lede{color:var(--muted);margin:0 0 28px;max-width:68ch}
+
+.toolbar{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center;margin-bottom:14px}
+.group{display:flex;align-items:center;gap:8px}
+.group > span{color:var(--muted);font-size:13px}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;padding:2px;background:var(--card)}
+.seg button,.btn{font:inherit;font-size:13px;color:var(--muted);background:transparent;border:0;border-radius:6px;padding:5px 11px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--chip);color:var(--text)}
+.btn{border:1px solid var(--border);background:var(--card);color:var(--text)}
+.btn:hover,.seg button:hover{color:var(--text)}
+button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:22px 22px 14px}
+.card-head{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px 24px;align-items:baseline;margin-bottom:10px}
+.card-head h2{font-size:15px;font-weight:500;margin:0}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend svg{display:block}
+.scroll{overflow-x:auto;margin:0 -6px}
+#chart{display:block;min-width:760px;width:100%;height:auto;user-select:none;touch-action:pan-x}
+.inspector{border-top:1px solid var(--border);margin-top:4px;padding-top:10px;min-height:44px;font-size:13px;color:var(--muted)}
+.inspector b{color:var(--text);font-weight:500}
+.inspector .id{color:var(--amber)}
+
+/* svg text */
+.gn{font:500 13px Inter,system-ui,sans-serif;fill:var(--text)}
+.gs{font:400 11px "JetBrains Mono",ui-monospace,monospace;fill:var(--faint)}
+.gl{font:500 12px Inter,system-ui,sans-serif;fill:var(--muted)}
+.ax{font:400 11.5px "JetBrains Mono",ui-monospace,monospace;fill:var(--muted)}
+.chipt{font:500 11px "JetBrains Mono",ui-monospace,monospace}
+.pid{font:500 12px "JetBrains Mono",ui-monospace,monospace;fill:var(--amber)}
+.pst{font:400 12px Inter,system-ui,sans-serif;fill:var(--muted)}
+.pnum{font:600 10.5px Inter,system-ui,sans-serif}
+
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:28px 40px;margin-top:36px}
+.notes h3{font-size:14px;font-weight:600;margin:0 0 10px}
+.notes ol,.notes ul{margin:0;padding-left:18px;color:var(--muted)}
+.notes li{margin-bottom:8px;max-width:60ch}
+.notes li b{color:var(--text);font-weight:500}
+@media (prefers-reduced-motion: reduce){ .pulse{animation:none} }
+</style>
+</head>
+<body>
+<main>
+  <h1>Findings and agent runs</h1>
+  <p class="lede">A live mock of the redesigned timeline. Labels sit outside the plot, findings get their own short markers, and the two agents are pulled apart so every call down and every reply up has room to be drawn.</p>
+
+  <div class="toolbar" role="toolbar" aria-label="Prototype controls">
+    <div class="group"><span>Finding labels</span>
+      <div class="seg" id="variant">
+        <button aria-pressed="true" data-v="callout">Sticky callouts</button>
+        <button aria-pressed="false" data-v="pins">Fixed labels + pins</button>
+      </div>
+    </div>
+    <div class="group"><span>Time</span>
+      <button class="btn" id="play">Pause</button>
+      <div class="seg" id="speed">
+        <button aria-pressed="true" data-s="1">1×</button>
+        <button aria-pressed="false" data-s="4">4×</button>
+      </div>
+    </div>
+    <button class="btn" id="inject">Add a finding</button>
+  </div>
+
+  <section class="card" aria-label="Findings and agent runs chart">
+    <div class="card-head">
+      <h2>Findings and agent runs</h2>
+      <div class="legend" aria-hidden="true">
+        <span><svg width="18" height="10"><rect width="18" height="10" rx="2" style="fill:var(--amber)"/></svg>Working</span>
+        <span><svg width="18" height="10"><defs><pattern id="lh" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" style="fill:var(--amber-wait)"/><line x1="0" y1="0" x2="0" y2="5" style="stroke:var(--amber);stroke-width:1.6;opacity:.6"/></pattern></defs><rect x=".5" y=".5" width="17" height="9" rx="2" style="fill:url(#lh);stroke:var(--amber);stroke-opacity:.6"/></svg>Waiting on external</span>
+        <span><svg width="18" height="10"><rect width="18" height="10" rx="2" style="fill:var(--violet)"/></svg>External working</span>
+        <span><svg width="10" height="14"><line x1="5" y1="0" x2="5" y2="9" style="stroke:var(--amber);stroke-width:1.5"/><path d="M1 8 L5 14 L9 8Z" style="fill:var(--amber)"/></svg>Call</span>
+        <span><svg width="10" height="14"><line x1="5" y1="5" x2="5" y2="14" style="stroke:var(--violet);stroke-width:1.5"/><path d="M1 6 L5 0 L9 6Z" style="fill:var(--violet)"/></svg>Reply</span>
+      </div>
+    </div>
+    <div class="scroll"><svg id="chart" role="img" aria-label="Timeline of findings, security agent runs and external agent calls over the last two minutes"></svg></div>
+    <div class="inspector" id="inspector" aria-live="polite">Hover a finding, bar or arrow to see its details here.</div>
+  </section>
+
+  <div class="notes">
+    <div>
+      <h3>What changed</h3>
+      <ol>
+        <li><b>No text inside the plot.</b> Agent names and their live status (Idle, Running, Waiting) moved to a fixed gutter on the left.</li>
+        <li><b>Short finding markers.</b> Findings get their own track above the lanes. A short dotted link ties each marker to the run it started, replacing the full-height lines.</li>
+        <li><b>A gap for the handoff.</b> The lanes are pulled apart. An amber arrow drops when the security agent calls out, a violet arrow rises when the external agent replies, and a soft band spans the round trip.</li>
+        <li><b>Blocked vs working.</b> While it waits for the reply, the caller’s bar turns hatched, so you can see who is actually busy.</li>
+        <li><b>Outcome lives in the label.</b> “Dismissed in 1s” moved from the plot into the finding’s label.</li>
+        <li><b>Details on demand.</b> Hovering anything highlights the whole chain for that finding and fills the line under the axis.</li>
+      </ol>
+    </div>
+    <div>
+      <h3>The two label options</h3>
+      <ul>
+        <li><b>Sticky callouts.</b> The label rides with its marker and its caret always points straight at it. At the plot edges, or when labels would collide, the label stops and the caret slides along its edge instead.</li>
+        <li><b>Fixed labels + pins.</b> Closest to your idea: labels never move. They stack from the right, newest first, and a numbered pin travels with each marker. Order is preserved, so pins and labels read in the same sequence.</li>
+      </ul>
+      <h3 style="margin-top:22px">Assumptions in this mock</h3>
+      <ul>
+        <li>The dashed ticks at the bottom of your chart are scans; they now sit in their own strip.</li>
+        <li>Each finding starts one security-agent run, and a run makes at most one external call.</li>
+        <li>The window is a rolling two minutes.</li>
+      </ul>
+    </div>
+  </div>
+</main>
+
+<script>
+(() => {
+  const WINDOW = 120;
+  const Y = { rail:8, pillH:26, event:62, aTop:88, aBot:124, bTop:188, bBot:224, scanTop:242, scanBot:252, axis:262, label:282, H:294 };
+  const BAR_PAD = 8, BAR_H = 20;
+  const G = 200;
+  const svg = document.getElementById('chart');
+  const inspector = document.getElementById('inspector');
+  const mctx = document.createElement('canvas').getContext('2d');
+  const MONO12 = '500 12px "JetBrains Mono", ui-monospace, monospace';
+  const SANS12 = '400 12px Inter, system-ui, sans-serif';
+  const MONO11 = '500 11px "JetBrains Mono", ui-monospace, monospace';
+  const tw = (s, f) => { mctx.font = f; return mctx.measureText(s).width; };
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = a => a[Math.floor(Math.random() * a.length)];
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const fmt = s => s < 10 ? s.toFixed(1) + 's' : Math.round(s) + 's';
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const repos = ['storefront-legacy', 'checkout', 'ci-tools', 'payments-api', 'auth-service'];
+  const S = { now:0, playing:true, speed:1, variant:'callout', findings:[], scans:[], seq:0,
+              nextFinding:0, nextScan:0, agentFreeAt:-1e9, mouse:null, hits:[], hoverKey:null, W:900 };
+
+  function makeFinding(t, forceCall) {
+    S.seq++;
+    const start = Math.max(t + 0.6, S.agentFreeAt + 0.4);
+    const analyze = rand(1.5, 4);
+    const calls = forceCall ?? Math.random() < 0.6;
+    let call = null, end, outcome;
+    if (calls) {
+      const cs = start + analyze, ce = cs + rand(5, 13);
+      call = { start: cs, end: ce };
+      end = ce + rand(1, 2.5);
+      outcome = Math.random() < 0.5 ? 'Escalated' : 'Fix PR opened';
+    } else {
+      end = start + rand(0.6, 1.8);
+      outcome = 'Dismissed';
+    }
+    S.agentFreeAt = end;
+    S.findings.push({ key:S.seq, n:((S.seq - 1) % 9) + 1, id:'CVE-2026-' + Math.floor(rand(40000, 49999)), t,
+      repo:pick(repos), cvss:rand(7, 9.9).toFixed(1), run:{ start, end, call }, outcome, ax:null });
+    S.scans.push(t);
+  }
+
+  function step() {
+    while (S.nextScan <= S.now) { S.scans.push(S.nextScan); S.nextScan += rand(3, 7); }
+    while (S.nextFinding <= S.now) { makeFinding(S.nextFinding); S.nextFinding += rand(16, 32); }
+    const cut = S.now - WINDOW - 4;
+    S.findings = S.findings.filter(f => f.run.end > cut || f.t > cut);
+    S.scans = S.scans.filter(t => t > cut);
+  }
+
+  // seed a readable starting state
+  S.nextScan = -126; S.nextFinding = 1e9; step();
+  makeFinding(-104, false); makeFinding(-70, true); makeFinding(-34, true); makeFinding(-7, true);
+  S.nextFinding = rand(12, 18);
+
+  function status(f) {
+    const r = f.run, now = S.now;
+    if (now < r.start) return { text:'Queued', live:true };
+    if (r.call && now >= r.call.start && now < r.call.end) return { text:'Waiting on external…', live:true };
+    if (now < r.end) return { text:'Analyzing…', live:true };
+    return { text:`${f.outcome} in ${fmt(r.end - r.start)}`, live:false, outcome:f.outcome };
+  }
+  const outcomeColor = o => o === 'Escalated' ? 'var(--amber)' : o === 'Fix PR opened' ? 'var(--green)' : 'var(--muted)';
+
+  function chip(xr, cy, label, color, active, pulse) {
+    const w = tw(label, MONO11) + (active ? 24 : 14);
+    const x = xr - w;
+    let s = `<rect x="${x}" y="${cy - 9}" width="${w}" height="18" rx="9" style="fill:var(--chip)"/>`;
+    if (active) s += `<circle cx="${x + 10}" cy="${cy}" r="3" style="fill:${color};opacity:${pulse}"/>`;
+    s += `<text x="${x + (active ? 18 : 7)}" y="${cy + 4}" class="chipt" style="fill:${active ? color : 'var(--muted)'}">${label}</text>`;
+    return s;
+  }
+
+  function render(ts) {
+    const W = S.W, now = S.now, pl = G + 20, pr = W - 16, pw = pr - pl;
+    const X = t => pr - (now - t) / WINDOW * pw;
+    const pulse = reduceMotion ? 1 : 0.55 + 0.45 * Math.sin(ts / 280);
+
+    // hover from last frame's hit areas
+    S.hoverKey = null;
+    if (S.mouse) for (let i = S.hits.length - 1; i >= 0; i--) {
+      const h = S.hits[i];
+      if (S.mouse.x >= h.x && S.mouse.x <= h.x + h.w && S.mouse.y >= h.y && S.mouse.y <= h.y + h.h) { S.hoverKey = h.key; break; }
+    }
+    const hits = [];
+    const op = f => S.hoverKey && S.hoverKey !== f.key ? 0.28 : 1;
+
+    const aMid = (Y.aTop + Y.aBot) / 2, bMid = (Y.bTop + Y.bBot) / 2, gMid = (Y.aBot + Y.bTop) / 2;
+    const barY = Y.aTop + BAR_PAD, barB = barY + BAR_H, extY = Y.bTop + BAR_PAD;
+
+    let s = `<defs><clipPath id="clip"><rect x="${pl}" y="0" width="${pw}" height="${Y.H}"/></clipPath>
+      <pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" style="fill:var(--amber-wait)"/><line x1="0" y1="0" x2="0" y2="5" style="stroke:var(--amber);stroke-width:1.6;opacity:.55"/></pattern></defs>`;
+
+    // ---- gutter (fixed text) ----
+    const active = S.findings.filter(f => now >= f.run.start && now < f.run.end);
+    const waiting = active.some(f => f.run.call && now >= f.run.call.start && now < f.run.call.end);
+    const aState = active.length ? (waiting ? ['Waiting', 'var(--amber)'] : ['Running', 'var(--amber)']) : ['Idle', null];
+    const bState = waiting ? ['Running', 'var(--violet)'] : ['Idle', null];
+    s += `<text x="16" y="${Y.event + 4}" class="gl">Findings</text>`;
+    s += `<rect x="16" y="${aMid - 5}" width="10" height="10" rx="2.5" style="fill:var(--amber)"/><text x="34" y="${aMid + 4.5}" class="gn">Security agent</text>`;
+    s += chip(G, aMid, aState[0], aState[1], !!aState[1], pulse);
+    s += `<text x="34" y="${gMid + 4}" class="gs">↓ call · ↑ reply</text>`;
+    s += `<rect x="16.5" y="${bMid - 12.5}" width="9" height="9" rx="2.5" style="fill:var(--violet-soft);stroke:var(--violet);stroke-dasharray:2 1.5"/><text x="34" y="${bMid - 3.5}" class="gn">External agent</text><text x="34" y="${bMid + 12}" class="gs">LangGraph · A2A</text>`;
+    s += chip(G, bMid - 8, bState[0], bState[1], !!bState[1], pulse);
+    s += `<text x="16" y="${Y.scanBot - 1}" class="gs">Scans</text>`;
+
+    // ---- plot scaffolding ----
+    s += `<rect x="${pl}" y="${Y.aTop}" width="${pw}" height="${Y.aBot - Y.aTop}" rx="6" style="fill:var(--lane)"/>`;
+    s += `<rect x="${pl}" y="${Y.bTop}" width="${pw}" height="${Y.bBot - Y.bTop}" rx="6" style="fill:var(--lane)"/>`;
+    s += `<line x1="${pl}" x2="${pr}" y1="${Y.event}" y2="${Y.event}" style="stroke:var(--track)"/>`;
+    for (const t of [-120, -90, -60, -30, 0]) {
+      const x = pr + t / WINDOW * pw;
+      if (t !== 0 && t !== -120) s += `<line x1="${x}" x2="${x}" y1="${Y.aTop}" y2="${Y.axis}" style="stroke:var(--grid);stroke-dasharray:2 4"/>`;
+      const anchor = t === -120 ? 'start' : t === 0 ? 'end' : 'middle';
+      s += `<text x="${x}" y="${Y.label}" text-anchor="${anchor}" class="ax">${t === 0 ? 'now' : t === -120 ? '−2m' : '−' + (-t) + 's'}</text>`;
+    }
+    s += `<line x1="${pl}" x2="${pr}" y1="${Y.axis}" y2="${Y.axis}" style="stroke:var(--track)"/>`;
+
+    s += `<g clip-path="url(#clip)">`;
+    for (const t of S.scans) { if (t > now) continue; const x = X(t); s += `<line x1="${x}" x2="${x}" y1="${Y.scanTop}" y2="${Y.scanBot}" style="stroke:var(--faint)"/>`; }
+
+    for (const f of S.findings) {
+      if (f.t > now) continue;
+      const r = f.run, mx = X(f.t);
+      let g = '';
+      // link: finding marker -> run start
+      if (r.start <= now) g += `<line x1="${mx}" y1="${Y.event + 5}" x2="${X(r.start)}" y2="${barY}" style="stroke:var(--amber);stroke-opacity:.55;stroke-dasharray:2 3"/>`;
+      // handoff band + external bar
+      if (r.call && r.call.start <= now) {
+        const cx1 = X(r.call.start), cx2 = X(Math.min(r.call.end, now));
+        g += `<rect x="${cx1}" y="${barB}" width="${Math.max(cx2 - cx1, 1)}" height="${extY - barB}" style="fill:var(--violet-soft)"/>`;
+        g += `<rect x="${cx1}" y="${extY}" width="${Math.max(cx2 - cx1, 2)}" height="${BAR_H}" rx="2" style="fill:var(--violet)"/>`;
+        hits.push({ x:cx1, y:barB, w:cx2 - cx1, h:extY + BAR_H - barB, key:f.key });
+        if (now < r.call.end) g += `<rect x="${cx2 - 2}" y="${extY}" width="2" height="${BAR_H}" style="fill:var(--text);opacity:${pulse * .7}"/>`;
+      }
+      // security agent segments
+      if (r.start <= now) {
+        const segs = r.call ? [[r.start, r.call.start, 0], [r.call.start, r.call.end, 1], [r.call.end, r.end, 0]] : [[r.start, r.end, 0]];
+        for (const [a, b0, wait] of segs) {
+          if (a >= now) continue;
+          const x1 = X(a), x2 = Math.max(X(Math.min(b0, now)), x1 + 2);
+          g += wait
+            ? `<rect x="${x1 + .5}" y="${barY + .5}" width="${x2 - x1 - 1}" height="${BAR_H - 1}" rx="2" style="fill:url(#hatch);stroke:var(--amber);stroke-opacity:.6"/>`
+            : `<rect x="${x1}" y="${barY}" width="${x2 - x1}" height="${BAR_H}" rx="2" style="fill:var(--amber)"/>`;
+          hits.push({ x:x1, y:barY, w:x2 - x1, h:BAR_H, key:f.key });
+        }
+        if (now < r.end) g += `<rect x="${pr - 2}" y="${barY}" width="2" height="${BAR_H}" style="fill:var(--text);opacity:${pulse * .7}"/>`;
+      }
+      // call / reply arrows
+      if (r.call && r.call.start <= now) {
+        const x = X(r.call.start);
+        g += `<line x1="${x}" y1="${barB}" x2="${x}" y2="${extY - 6}" style="stroke:var(--amber);stroke-width:1.5"/><path d="M${x - 4.5} ${extY - 7} L${x} ${extY} L${x + 4.5} ${extY - 7}Z" style="fill:var(--amber)"/>`;
+        hits.push({ x:x - 6, y:barB, w:12, h:extY - barB, key:f.key });
+      }
+      if (r.call && r.call.end <= now) {
+        const x = X(r.call.end);
+        g += `<line x1="${x}" y1="${extY}" x2="${x}" y2="${barB + 6}" style="stroke:var(--violet);stroke-width:1.5"/><path d="M${x - 4.5} ${barB + 7} L${x} ${barB} L${x + 4.5} ${barB + 7}Z" style="fill:var(--violet)"/>`;
+        hits.push({ x:x - 6, y:barB, w:12, h:extY - barB, key:f.key });
+      }
+      // marker
+      if (S.variant === 'callout') {
+        g += `<path d="M${mx} ${Y.event - 5} L${mx + 5} ${Y.event} L${mx} ${Y.event + 5} L${mx - 5} ${Y.event}Z" style="fill:var(--amber)"/>`;
+        hits.push({ x:mx - 8, y:Y.event - 8, w:16, h:16, key:f.key });
+      } else {
+        const cy = Y.event - 13;
+        g += `<path d="M${mx - 5.5} ${cy + 5} L${mx} ${Y.event + 1} L${mx + 5.5} ${cy + 5}Z" style="fill:var(--amber)"/><circle cx="${mx}" cy="${cy}" r="8.5" style="fill:var(--amber)"/><text x="${mx}" y="${cy + 3.8}" text-anchor="middle" class="pnum" style="fill:var(--card)">${f.n}</text>`;
+        hits.push({ x:mx - 9, y:cy - 9, w:18, h:Y.event - cy + 10, key:f.key });
+      }
+      s += `<g opacity="${op(f)}">${g}</g>`;
+    }
+    s += `</g>`;
+
+    // ---- finding labels (outside the clip) ----
+    const vis = S.findings.filter(f => f.t <= now && X(f.t) >= pl);
+    const items = vis.map(f => {
+      const st = status(f);
+      const badge = S.variant === 'pins' ? 22 : 0;
+      const w = 10 + badge + tw(f.id, MONO12) + 10 + tw(st.text, SANS12) + 10;
+      return { f, st, w, mx:X(f.t), left:0, badge };
+    });
+
+    if (S.variant === 'callout') {
+      items.sort((a, b) => a.mx - b.mx);
+      for (const it of items) it.left = clamp(it.mx - it.w / 2, pl, pr - it.w);
+      for (let i = 1; i < items.length; i++) items[i].left = Math.max(items[i].left, items[i - 1].left + items[i - 1].w + 6);
+      for (let i = items.length - 1; i >= 0; i--) {
+        const lim = i === items.length - 1 ? pr : items[i + 1].left - 6;
+        items[i].left = Math.min(items[i].left, lim - items[i].w);
+      }
+    } else {
+      items.sort((a, b) => b.f.t - a.f.t);
+      let right = pr;
+      for (const it of items) { it.left = right - it.w; right = it.left - 8; }
+    }
+
+    const py = Y.rail, pb = Y.rail + Y.pillH;
+    for (const it of items) {
+      const f = it.f;
+      if (it.left < pl - 1) { f.ax = null; continue; }
+      f.ax = f.ax == null ? it.left : (reduceMotion ? it.left : f.ax + (it.left - f.ax) * 0.22);
+      const L = f.ax, w = it.w;
+      let g = `<rect x="${L}" y="${py}" width="${w}" height="${Y.pillH}" rx="7" style="fill:var(--pill);stroke:var(--pill-stroke)"/>`;
+      let tx = L + 10;
+      if (it.badge) {
+        g += `<circle cx="${L + 18}" cy="${py + Y.pillH / 2}" r="8" style="fill:var(--amber)"/><text x="${L + 18}" y="${py + Y.pillH / 2 + 3.8}" text-anchor="middle" class="pnum" style="fill:var(--card)">${f.n}</text>`;
+        tx += it.badge;
+      }
+      g += `<text x="${tx}" y="${py + 17}" class="pid">${f.id}</text>`;
+      const stColor = it.st.live ? 'var(--text)' : outcomeColor(it.st.outcome);
+      g += `<text x="${tx + tw(f.id, MONO12) + 10}" y="${py + 17}" class="pst" style="fill:${stColor}">${it.st.text}</text>`;
+      if (S.variant === 'callout') {
+        const cx = clamp(it.mx, L + 12, L + w - 12);
+        g += `<path d="M${cx - 5} ${pb - 1} L${cx} ${pb + 6} L${cx + 5} ${pb - 1}Z" style="fill:var(--pill)"/>`;
+        g += `<path d="M${cx - 5} ${pb} L${cx} ${pb + 6} L${cx + 5} ${pb}" style="fill:none;stroke:var(--pill-stroke)"/>`;
+        g += `<line x1="${cx}" y1="${pb + 6}" x2="${it.mx}" y2="${Y.event - 6}" style="stroke:var(--amber);stroke-opacity:.6"/>`;
+      }
+      hits.push({ x:L, y:py, w, h:Y.pillH, key:f.key });
+      s += `<g opacity="${op(f)}">${g}</g>`;
+    }
+
+    svg.setAttribute('viewBox', `0 0 ${W} ${Y.H}`);
+    svg.setAttribute('height', Y.H);
+    svg.innerHTML = s;
+    S.hits = hits;
+    updateInspector();
+  }
+
+  let lastInspector = '';
+  function updateInspector() {
+    let html = 'Hover a finding, bar or arrow to see its details here.';
+    const f = S.findings.find(x => x.key === S.hoverKey);
+    if (f) {
+      const r = f.run, now = S.now, st = status(f);
+      const parts = [`<span class="mono id">${f.id}</span> in <b>${f.repo}</b>, CVSS <b>${f.cvss}</b>, found ${fmt(now - f.t)} ago.`];
+      if (now >= r.start) parts.push(`Security agent ran ${fmt(Math.min(now, r.end) - r.start)}${now < r.end ? ' so far' : ''}.`);
+      if (r.call && now >= r.call.start) parts.push(`Called the external agent ${fmt(now - r.call.start)} ago; ${now >= r.call.end ? `reply came after ${fmt(r.call.end - r.call.start)}` : 'no reply yet'}.`);
+      parts.push(`<b>${st.text}</b>`);
+      html = parts.join(' ');
+    }
+    if (html !== lastInspector) { inspector.innerHTML = html; lastInspector = html; }
+  }
+
+  // ---- wiring ----
+  new ResizeObserver(() => { S.W = Math.max(760, svg.getBoundingClientRect().width); }).observe(svg);
+  const setMouse = e => { const b = svg.getBoundingClientRect(); const k = S.W / b.width; S.mouse = { x:(e.clientX - b.left) * k, y:(e.clientY - b.top) * k }; };
+  svg.addEventListener('pointermove', setMouse);
+  svg.addEventListener('pointerdown', setMouse);
+  svg.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') S.mouse = null; });
+
+  const segToggle = (id, attr, fn) => document.getElementById(id).addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    for (const x of b.parentElement.children) x.setAttribute('aria-pressed', x === b);
+    fn(b.dataset[attr]);
+  });
+  segToggle('variant', 'v', v => { S.variant = v; S.findings.forEach(f => f.ax = null); });
+  segToggle('speed', 's', v => { S.speed = +v; });
+  const playBtn = document.getElementById('play');
+  playBtn.addEventListener('click', () => { S.playing = !S.playing; playBtn.textContent = S.playing ? 'Pause' : 'Play'; });
+  document.getElementById('inject').addEventListener('click', () => { makeFinding(S.now); });
+
+  let last = performance.now();
+  function frame(ts) {
+    const dt = Math.min(0.1, (ts - last) / 1000); last = ts;
+    if (S.playing) { S.now += dt * S.speed; step(); }
+    render(ts);
+    requestAnimationFrame(frame);
+  }
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => requestAnimationFrame(frame));
+  else requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

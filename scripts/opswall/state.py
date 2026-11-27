@@ -288,10 +288,12 @@ class Finding:
 @dataclass(frozen=True)
 class Lane:
     """One lane of a timeline (checkout's, D-068, and the security row's, D-070): its key in the
-    snapshot, its name above the chart, and whether the page says its agent is Working or Idle."""
+    snapshot, its name above the chart, whether the page says its agent is Working or Idle, and a
+    line the page writes under the name, if it has one (the security row's gutter, issue 13)."""
     key: str
     name: str
     has_state: bool = True
+    detail: str | None = None
 
 
 @dataclass
@@ -906,9 +908,10 @@ def _run_json(run: _Run, left: float, item_id: str, about: dict, tip: dict) -> d
 
 
 def _lanes_json(lanes: tuple[Lane, ...], busy: set[Lane]) -> list[dict]:
-    """The lanes, top to bottom, each saying whether its agent is working, and in words
-    ("Working" or "Idle") unless the lane has no state."""
-    return [{"key": lane.key, "name": lane.name, "working": lane in busy,
+    """The lanes, top to bottom, each with its name, the line under it if it has one, whether its
+    agent is working, and that in words ("Working" or "Idle") unless the lane has no state."""
+    return [{"key": lane.key, "name": lane.name, **({"detail": lane.detail} if lane.detail is not None else {}),
+             "working": lane in busy,
              "state": ("Working" if lane in busy else "Idle") if lane.has_state else None} for lane in lanes]
 
 
@@ -1063,13 +1066,15 @@ SCANNED_SECONDS = 600.0       # "N scanned" and the Issues panel count the findi
 FINDINGS_LISTED = 5           # the newest findings the list shows
 # The timeline's lanes, top to bottom: our agent's, and the patch agent's. The patch agent is always
 # "external" on the wall (spec Terms), and the wall hears of its call only when our agent answers (spec
-# decision 24), so its lane never says it is working.
+# decision 24), so its lane never says it is working. Its gutter names it, with what it is under the
+# name (issue 13).
 SECURITY_AGENT_LANE = Lane("security-agent", "Security agent")
-EXTERNAL_LANE = Lane("external", "External · LangGraph · A2A", has_state=False)
+EXTERNAL_LANE = Lane("external", "External agent", has_state=False, detail="LangGraph · A2A")
 SECURITY_LANES = (SECURITY_AGENT_LANE, EXTERNAL_LANE)
 FINDING_FIELDS = ("repository", "cve_id", "package", "installed_version", "fixed_version", "cvss_score")
 SECURITY_ACTION_WORDS = {PATCH: "Patch", DISMISS: "Dismiss", INVALID: "Invalid"}
 DECIDED_WORDS = {PATCH: "Patched", DISMISS: "Dismissed"}  # our closed bar: "Patched in 12s"
+DECIDED_TONES = {PATCH: "good", DISMISS: "muted"}         # and the colour the page draws those words in
 PATCHED, FAILED = "PATCHED", "FAILED"  # lab 6.4's patch_status, besides N/A
 # How Flink's answer starts when it can't fetch the patch agent's card: the whole agent call
 # fails before the model answers, so lab 6.4 writes INVALID (issue 02's step 5, a stopped patch agent).
@@ -1086,7 +1091,9 @@ def _security_row(findings: list[Finding], now: float) -> dict:
     left = now - CHART_SECONDS
     listed = sorted((f for f in findings if f.event_time is not None and f.cvss_score is not None),
                     key=lambda f: f.event_time, reverse=True)
-    runs = sorted((r for f in findings for r in _finding_runs(f, now) if r.end >= left), key=lambda r: r.start)
+    every_run = sorted((r for f in findings for r in _finding_runs(f, now)), key=lambda r: r.start)
+    tracks = _tracks(every_run)  # over every run, so a run's track never changes as an earlier one scrolls out
+    runs = [r for r in every_run if r.end >= left]
     working = [r for r in runs if r.open]
     busy = {r.lane for r in working}
     return {
@@ -1102,7 +1109,7 @@ def _security_row(findings: list[Finding], now: float) -> dict:
         },
         "marks": [{"id": f.finding_id, "cveId": f.cve_id, "critical": f.critical, "t": f.event_time - left}
                   for f in reversed(listed) if left <= f.event_time <= now],
-        "runs": [_finding_run_json(r, left) for r in runs],
+        "runs": [_finding_run_json(r, left, tracks) for r in runs],
         "lanes": _lanes_json(SECURITY_LANES, busy),
         "openCriticals": len({r.item.finding_id for r in working}),
     }
@@ -1127,12 +1134,45 @@ def _finding_runs(finding: Finding, now: float) -> list[_Run]:
     return runs
 
 
+def _overlap(a: _Run, b: _Run) -> bool:
+    """Whether two runs share a moment; one that starts as the other ends does not. An open run
+    ends now."""
+    return a.start < b.end and b.start < a.end
+
+
+def _tracks(runs: list[_Run]) -> dict[str, tuple[int, bool]]:
+    """Where each of our agent's runs is drawn in its lane, by finding id (issue 13): its track, 0
+    (the top half) or 1 (the bottom half), and whether it is split, drawn half height on that
+    track for its whole length because it overlaps another run. In start order, a run takes track
+    0 unless a run it overlaps has it, else track 1; with both taken, the track whose run ends
+    first, though those two bars may then overlap. The patch agent's runs take their caller's."""
+    ours = sorted((r for r in runs if r.lane is SECURITY_AGENT_LANE), key=lambda r: (r.start, r.item.finding_id))
+    placed: list[tuple[_Run, int]] = []
+    for run in ours:
+        taken = [(other, track) for other, track in placed if _overlap(run, other)]
+        held = {track for _, track in taken}
+        track = 0 if 0 not in held else 1 if 1 not in held else min(taken, key=lambda p: p[0].end)[1]
+        placed.append((run, track))
+    return {run.item.finding_id: (track, any(_overlap(run, other) for other in ours if other is not run))
+            for run, track in placed}
+
+
 def _security_label(finding: Finding, took: float) -> str:
     """What our closed bar reads: the outcome, and how long it took when it is an answer."""
     if _unreachable(finding):
         return "Patch agent unreachable"
     decided = DECIDED_WORDS.get(finding.action)
     return f"{decided} in {_dur_words(took)}" if decided else "Invalid answer"
+
+
+def _security_tone(run: _Run) -> str | None:
+    """The colour of what our bar reads, by name, for the page (issue 13): "good" for "Patched in",
+    "muted" for "Dismissed in", "bad" for "Patch agent unreachable", "Invalid answer" and "No
+    answer", and None while the run is open, which the page draws in the text colour."""
+    if run.open:
+        return None
+    f = run.item
+    return "bad" if _unreachable(f) else DECIDED_TONES.get(f.action, "bad")
 
 
 def _unreachable(finding: Finding) -> bool:
@@ -1153,11 +1193,12 @@ def _hatch(run: _Run) -> tuple[float, float] | None:
     return (began, ended) if began < ended else None
 
 
-def _finding_run_json(run: _Run, left: float) -> dict:
+def _finding_run_json(run: _Run, left: float, tracks: dict[str, tuple[int, bool]]) -> dict:
     f = run.item
     about = {"findingId": f.finding_id, "repository": f.repository, "cveId": f.cve_id, "cvssScore": f.cvss_score}
     tip = _decision_tip(run, left) if run.lane is SECURITY_AGENT_LANE else _patch_tip(run)
-    return _run_json(run, left, f.finding_id, about, tip)
+    track, split = tracks.get(f.finding_id, (0, False))
+    return _run_json(run, left, f.finding_id, about, {**tip, "track": track, "split": split})
 
 
 def _decision_tip(run: _Run, left: float) -> dict:
@@ -1172,7 +1213,8 @@ def _decision_tip(run: _Run, left: float) -> dict:
         "reason": f.reason,
         "commit": f.commit_sha,
         "patchStatus": f.patch_status,
-        "unreachable": _unreachable(f),  # the page draws these words in red
+        "unreachable": _unreachable(f),
+        "tone": _security_tone(run),  # the colour of the label, so the page tests no action
         "waitFrom": _axis(hatch[0], left) if hatch else None,
         "waitTo": _axis(hatch[1], left) if hatch else None,
     }

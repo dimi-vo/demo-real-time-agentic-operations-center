@@ -1362,6 +1362,8 @@ def test_a_patch_is_our_closed_bar_hatched_while_it_waits_with_the_external_bar_
         "reason": PATCH_REASON, "commit": COMMIT, "patchStatus": "PATCHED", "unreachable": False,
         # the hatch: the external run's span, on our bar
         "waitFrom": pytest.approx(_tpos(FT + 3.1)), "waitTo": pytest.approx(_tpos(FT + 9.1)),
+        "track": 0, "split": False,  # it overlaps no other run (issue 13)
+        "tone": "good",  # the label's colour, which the page no longer works out from the action (issue 13)
     }
     reply = format_reply(REQUEST, datetime.fromtimestamp(FT + 3.1, tz=timezone.utc),
                          datetime.fromtimestamp(FT + 9.1, tz=timezone.utc))
@@ -1372,9 +1374,11 @@ def test_a_patch_is_our_closed_bar_hatched_while_it_waits_with_the_external_bar_
         "commit": COMMIT, "reply": reply,  # the Patch line: what the patch agent answered
         "startedAt": pytest.approx(FT + 3.1), "finishedAt": pytest.approx(FT + 9.1),
         "duration": pytest.approx(6.0), "durationText": "6s",
+        "track": 0, "split": False,  # our run's
     }
     assert security["start"] < external["start"] < external["end"] < security["end"]
     assert "outcomeText" not in external  # its tooltip is the reply and the times, which the page writes
+    assert "tone" not in external  # only our agent's bars carry a label the page colours
 
 
 def test_a_dismiss_is_one_bar_and_no_external_one():
@@ -1386,6 +1390,7 @@ def test_a_dismiss_is_one_bar_and_no_external_one():
     assert (run["action"], run["outcome"], run["reason"]) == (
         "DISMISS", "Dismiss", "Only a dev dependency of the test suite.")
     assert run["outcomeText"] == "Action: Dismiss."
+    assert run["tone"] == "muted"
     assert (run["commit"], run["patchStatus"], run["unreachable"]) == (None, "N/A", False)
     assert (run["waitFrom"], run["waitTo"]) == (None, None)
 
@@ -1407,6 +1412,7 @@ def test_a_failed_patch_and_an_invalid_answer_read_their_words(action, status, r
     [run] = _sec(st)["runs"]
     assert (run["open"], run["label"], run["outcome"], run["unreachable"]) == (False, label, outcome, unreachable)
     assert run["outcomeText"] == text
+    assert run["tone"] == "bad"  # "Patch agent unreachable" and "Invalid answer" alike
     assert run["end"] == pytest.approx(_tpos(FT + 31))
 
 
@@ -1427,6 +1433,7 @@ def test_a_stopped_patch_agent_reads_patch_agent_unreachable_in_red_and_is_a_mis
     assert (run["label"], run["unreachable"], run["action"], run["outcome"]) == (
         "Patch agent unreachable", True, "INVALID", "Invalid")
     assert run["outcomeText"] == "The patch agent could not be reached, so no decision came back."
+    assert run["tone"] == "bad"
     assert (run["commit"], run["waitFrom"], run["waitTo"]) == (None, None, None)
     assert (row["issues"]["injected"], row["issues"]["detected"], row["issues"]["missed"]) == (1, 0, 1)
 
@@ -1446,6 +1453,7 @@ def test_a_patch_agent_behind_a_dead_tunnel_reads_patch_agent_unreachable_and_is
     [run] = row["runs"]
     assert (run["label"], run["unreachable"], run["action"]) == ("Patch agent unreachable", True, "PATCH")
     assert run["outcomeText"] == "Action: Patch. No commit came back."
+    assert run["tone"] == "bad"  # the action was PATCH, but nothing was patched
     assert (row["issues"]["injected"], row["issues"]["detected"], row["issues"]["missed"]) == (1, 0, 1)
 
 
@@ -1455,16 +1463,18 @@ def test_with_no_decision_our_bar_works_for_60_s_then_reads_no_answer():
     [run] = _sec(st, now=FT + 4.2)["runs"]
     assert (run["open"], run["label"], run["outcome"], run["end"]) == (True, "Working 3s", None, 120)
     assert run["outcomeText"] == "Waiting for the security agent."
+    assert run["tone"] is None  # open: the page draws it in the text colour
     [run] = _sec(st, now=FT + 61)["runs"]
     assert (run["open"], run["label"]) == (True, "Working 1m 00s")  # checkout gives up after 30 s; ours after 60
     [run] = _sec(st, now=FT + 61.5)["runs"]
     assert (run["open"], run["label"], run["outcome"]) == (False, "No answer", None)
     assert run["outcomeText"] == "The security agent gave no answer."
+    assert run["tone"] == "bad"
     assert run["end"] == pytest.approx(_tpos(FT + 61, now=FT + 61.5))  # it ends 60 s after it started
     # A late decision still closes it, as a ticket's does.
     _dismissed(st, "SCAN-000127", at=FT + 76)
     [run] = _sec(st, now=FT + 80)["runs"]
-    assert (run["open"], run["label"]) == (False, "Dismissed in 1m 15s")
+    assert (run["open"], run["label"], run["tone"]) == (False, "Dismissed in 1m 15s", "muted")
 
 
 def test_the_external_bar_appears_only_once_our_agent_has_answered():
@@ -1555,8 +1565,9 @@ def test_the_header_counts_the_critical_findings_our_agent_works_on_and_the_lane
     row = _sec(st)
     assert row["lanes"] == [
         {"key": "security-agent", "name": "Security agent", "working": False, "state": "Idle"},
-        # the wall learns of the external call only when our agent answers (spec 24): no state
-        {"key": "external", "name": "External · LangGraph · A2A", "working": False, "state": None},
+        # the wall learns of the external call only when our agent answers (spec 24): no state. Its
+        # name and the line under it in the timeline's gutter (issue 13).
+        {"key": "external", "name": "External agent", "detail": "LangGraph · A2A", "working": False, "state": None},
     ]
     _critical(st, "SCAN-000170", at=NOW - 20)
     _critical(st, "SCAN-000171", at=NOW - 10, t=NOW - 11)
@@ -1571,6 +1582,101 @@ def test_the_header_counts_the_critical_findings_our_agent_works_on_and_the_lane
     row = _sec(st)
     assert (row["status"], row["statusText"], row["openCriticals"]) == ("healthy", "Healthy", 0)
     assert row["lanes"][0]["state"] == "Idle"
+
+
+# --- the timeline's tracks (issue 13): a run that overlaps another in its lane is drawn half
+# height, on track 0 (the top half) or track 1 (the bottom half), for its whole length.
+
+
+def _tracks(row):
+    """Each bar's track and split, by lane and finding."""
+    return {(r["lane"], r["findingId"]): (r["track"], r["split"]) for r in row["runs"]}
+
+
+OURS = "security-agent"
+
+
+def _closed(st, fid, start, end):
+    """Our agent's run on finding `fid`, from lab 6.1's record at `start` to a DISMISS at `end`."""
+    _critical(st, fid, at=start, t=start - 1)
+    _dismissed(st, fid, at=end, t=start - 1)
+
+
+def test_runs_that_overlap_nothing_are_full_height_on_track_0():
+    st = OpsWallState()
+    _closed(st, "A", NOW - 100, NOW - 90)
+    _closed(st, "B", NOW - 90, NOW - 80)  # it starts as A ends: touching is no overlap
+    _critical(st, "C", at=NOW - 50, t=NOW - 51)  # open
+    assert _tracks(_sec(st)) == {(OURS, "A"): (0, False), (OURS, "B"): (0, False), (OURS, "C"): (0, False)}
+
+
+def test_two_runs_that_overlap_are_split_the_first_on_track_0_and_the_second_on_track_1():
+    st = OpsWallState()
+    _closed(st, "A", NOW - 60, NOW - 40)
+    _closed(st, "B", NOW - 50, NOW - 45)
+    _closed(st, "C", NOW - 30, NOW - 25)  # after both: full height again
+    assert _tracks(_sec(st)) == {(OURS, "A"): (0, True), (OURS, "B"): (1, True), (OURS, "C"): (0, False)}
+
+
+def test_three_runs_that_overlap_take_track_0_then_1_then_the_track_whose_run_ends_first():
+    st = OpsWallState()
+    _closed(st, "A", NOW - 90, NOW - 60)
+    _closed(st, "B", NOW - 85, NOW - 70)  # A has track 0
+    _closed(st, "C", NOW - 80, NOW - 50)  # A and B have both tracks; B ends first, so track 1
+    _closed(st, "D", NOW - 68, NOW - 62)  # B has ended; A (track 0) ends before C (track 1), so track 0
+    assert _tracks(_sec(st)) == {(OURS, "A"): (0, True), (OURS, "B"): (1, True), (OURS, "C"): (1, True),
+                                 (OURS, "D"): (0, True)}
+    # Track 1 is free again once the run on it has ended, while track 0 is still taken.
+    st = OpsWallState()
+    _closed(st, "A", NOW - 90, NOW - 50)
+    _closed(st, "B", NOW - 85, NOW - 80)
+    _closed(st, "C", NOW - 75, NOW - 70)
+    assert _tracks(_sec(st)) == {(OURS, "A"): (0, True), (OURS, "B"): (1, True), (OURS, "C"): (1, True)}
+
+
+def test_a_live_run_is_split_the_moment_a_second_run_starts_during_it():
+    st = OpsWallState()
+    _critical(st, "A", at=NOW - 20, t=NOW - 21)
+    assert _tracks(_sec(st, now=NOW - 10)) == {(OURS, "A"): (0, False)}
+    _critical(st, "B", at=NOW - 5, t=NOW - 6)
+    assert _tracks(_sec(st, now=NOW - 4.5)) == {(OURS, "A"): (0, True), (OURS, "B"): (1, True)}
+    # B ends: the two still overlapped, so both stay split for their whole length.
+    _dismissed(st, "B", at=NOW - 3, t=NOW - 6)
+    assert _tracks(_sec(st)) == {(OURS, "A"): (0, True), (OURS, "B"): (1, True)}
+
+
+def test_a_runs_track_stays_as_an_earlier_run_leaves_the_timeline():
+    st = OpsWallState()
+    _closed(st, "A", NOW - 170, NOW - 125)
+    _closed(st, "B", NOW - 130, NOW - 110)
+    assert _tracks(_sec(st, now=NOW - 20)) == {(OURS, "A"): (0, True), (OURS, "B"): (1, True)}
+    # A ended before the timeline's left edge, but the tracks are assigned over every run the
+    # state holds, so B keeps its track and its half height.
+    assert _tracks(_sec(st)) == {(OURS, "B"): (1, True)}
+
+
+def test_an_external_run_takes_the_track_and_the_split_of_the_run_that_called_it():
+    st = OpsWallState()
+    _closed(st, "A", NOW - 60, NOW - 40)
+    _critical(st, "B", at=NOW - 50, t=NOW - 51)
+    _patched(st, "B", at=NOW - 30, started=NOW - 45, finished=NOW - 38, t=NOW - 51)
+    _critical(st, "C", at=NOW - 20, t=NOW - 21)
+    _patched(st, "C", at=NOW - 5, started=NOW - 17, finished=NOW - 10, t=NOW - 21)
+    assert _tracks(_sec(st)) == {
+        (OURS, "A"): (0, True), (OURS, "B"): (1, True), ("external", "B"): (1, True),
+        (OURS, "C"): (0, False), ("external", "C"): (0, False),
+    }
+
+
+def test_the_tracks_and_the_lane_detail_are_the_security_rows_alone():
+    # The other rows' snapshots do not change: checkout's lanes and runs gain no field.
+    st = OpsWallState()
+    _story(st, "ZD-48215", NOW - 100, verdict="HIGH", verdict_after=4, answer_after=10)
+    row = _row(st)
+    assert [set(lane) for lane in row["lanes"]] == [{"key", "name", "working", "state"}] * 2
+    assert row["runs"] and all(not {"track", "split"} & set(r) for r in row["runs"])
+    # Our agent's lane keeps its fields too: only the external lane has a detail.
+    assert set(_sec(st)["lanes"][0]) == {"key", "name", "working", "state"}
 
 
 def _cve_story(st, fid, t, truth="PATCH", score=9.6, action=None, decided_after=None, status=None,

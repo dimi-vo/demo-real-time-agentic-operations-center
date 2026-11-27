@@ -3982,3 +3982,63 @@ once it is dropped and the lane key put back. Tests: `tests/test_opswall_state.p
 sentence in each case, 8 tests failing before; issue 10's harness, against the pass 3 commit's page
 and state, passes 308 of 308 checks, the four rows the same PNG and the rows' DOM the same string in
 all ten scenes.
+
+Issue 13 (the security row's timeline, redrawn from `inspiration/Findings timeline redesign.html`):
+the chart crowded. At 1440 px its plot was about 466 px wide, the lane chips sat inside it and
+covered about 40 s of it, the labels fought each other and the chips, and the full-height critical
+lines ran through both lanes (issue 10's "To judge"). The design gives the lane names a gutter, the
+findings a track of their own with a callout per critical finding, and the two lanes a gap for the
+call down and the reply up. The issue ports its look, not its made-up data, and the user settled
+every point in a grilling session on 2026-11-27. `scripts/opswall/state.py` (the external lane is
+named "External agent", with a new `detail`, "LangGraph · A2A", which `_lanes_json` writes only for
+a lane that has one, so checkout's lanes and our agent's are as they were; our agent's runs and the
+patch agent's get `track`, 0 or 1, and `split` from `_tracks`: in start order a run takes track 0
+unless a run it overlaps has it, else track 1, and with both taken the track whose run ends first;
+it is split if it overlaps any other run of our agent's, an open run ending now; the tracks are
+assigned over every run the state holds, not just the window's, so none changes as an earlier run
+scrolls out, and a patch agent's run takes its caller's; our agent's runs also get `tone`, from
+`_security_tone` beside `_security_label`: "good" for "Patched in", "muted" for "Dismissed in", "bad"
+for "Patch agent unreachable", "Invalid answer" and "No answer", and null while open, so the page
+colours the label without reading `action`), `scripts/opswall/static/opswall.js` (the
+security row draws its own timeline, one SVG, in `drawSecurityTimeline`, on every snapshot, its
+positions in pixels from the width the page's `ResizeObserver` measures, and its elements updated
+in place and kept by finding id, so the focus survives the snapshots and the pills can glide. A
+118 px gutter holds "Findings", "Security agent" with its Idle or Working chip under the name, "↓
+call · ↑ reply", "External agent" with "LangGraph · A2A" under it and no chip, and "Other
+findings". The title line has a two-item legend, "Working" and "Waiting on patch agent". Each
+critical finding gets a pill of two lines, its CVE id over our run's label word for word, in the
+colour the state's `tone` names (green, grey or red, the text colour while open). A pill is about
+120 px wide, so two fit side by side in the 340 px plot at 1440 px, and the chart is 260 px tall. The
+pills are placed by the design's callout rule, so the oldest drops first when they don't fit. Each
+finding also gets a diamond with a dotted link to its run. Our bar is solid accent, hatched between `waitFrom` and `waitTo`, with the wall's blinking
+cap while open, and half height on its track when split. The external bar is lavender on its
+caller's track, with the accent arrow down at the call, the lavender one up at the reply, and a
+soft band between them. Each other finding gets a tick, and the axis has dashed gridlines, with
+"−90s" and "−30s" hidden at 640 px and below. Every part of a finding shows its one tooltip,
+`findingTip`: the old words plus the patch agent's "answered in 6s" and its reply. While one
+finding is hovered, or its diamond focused, every other one dims to 28 %. Each critical finding in
+the window has one tab stop, its diamond, so it can be reached whether or not its pill fits, with a
+focus ring round the diamond and an aria-label that says what the tooltip says. The hover and focus
+listeners sit on the chart's host `<div>`, since Chrome makes an SVG element with focus listeners
+a tab stop. `axisLabel` comes out of `axisHTML`, which writes the same as before. `SECURITY_TIMELINE`,
+`drawHatch` and `findingRunTip` are gone, and the comments on the shared timeline's functions now
+name the ticket row alone, with their code unchanged), `scripts/opswall/static/opswall.css` (the new
+timeline in the wall's fonts and tokens: the accent where the design has amber, `--external` where it
+has violet; the pills' 250 ms glide and the blinking parts stopped under `prefers-reduced-motion`;
+the old security-only rules gone: the critical and finding marks, the hatch gradient, the external
+bar and its chip square, and the red label). Tests: `tests/test_opswall_state.py` (written first, 8
+failing before the change: the lanes JSON with `detail`; `track` and `split` on lone runs, on two
+that overlap, on three and four that overlap, on a live run split the moment a second starts during
+it, on a run whose track holds as an earlier run leaves the window, and on a patch agent's run that
+takes its caller's; checkout's lanes and runs without the new fields; then, for the user's
+follow-up, `tone` in each case of our bar's words, 9 tests failing before), `tests/test_opswall_server.py`
+(the lane's new name and its detail). The page has no tests. Issue 13's throwaway harness,
+`.scratch/code-security-incidents/research/issue13_wall_render.py`, a copy of issue 10's with the
+same held clock and seeded records, passes 867 of 867 checks in headless Chrome. They cover eight frames
+at 1440 and 820 px (a `PATCH` with its hatch, external bar, both arrows and band beside a live
+"Working" run; a `DISMISS`; "Patch agent unreachable" for `FAILED` and for a stopped patch agent;
+"Invalid answer"; "No answer"; two overlapping runs on split tracks, their pills side by side; three
+critical findings, the oldest pill dropped at 1440 px and all three shown at 820 px), every tone,
+hover and focus with the tooltip and the dimming, focus on a diamond whose pill has dropped, the axis
+at 600 px, and the three service rows. Those rows, checkout's ticket timeline included, are the same PNG byte for byte
+and the same DOM as HEAD's page draws them from HEAD's state, at 1440 and 820 px in twelve scenes.
