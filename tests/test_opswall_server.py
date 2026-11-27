@@ -79,4 +79,5 @@ def test_websocket_sends_a_snapshot_on_connect(client):
         assert (security["name"], security["row"]) == ("Code security incidents", "security")
         assert security["findings"] == {"scanned": 0, "newest": []}
         assert (security["marks"], security["runs"], security["openCriticals"]) == ([], [], 0)
-        assert [lane["name"] for lane in security["lanes"]] == ["Security agent", "External · LangGraph · A2A"]
+        assert [lane["name"] for lane in security["lanes"]] == ["Security agent", "External agent"]
+        assert security["lanes"][1]["detail"] == "LangGraph · A2A"  # under its name in the gutter (issue 13)

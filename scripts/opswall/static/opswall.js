@@ -18,8 +18,8 @@
  *  - "tickets" (checkout) draws the ticket sources, the list and the timeline of tickets
  *    and agent runs instead (see "Ticket row" below);
  *  - "security" ("Code security incidents", D-070, last: no service) draws the laptop with
- *    "git" under it, the line and the Scan findings list on the left, and the ticket row's
- *    timeline of findings and agent runs, with an external lane (see "Security row" below).
+ *    "git" under it, the line and the Scan findings list on the left, and a timeline of its own,
+ *    findings and agent runs with an external lane, in one SVG (see "Security row" below).
  *  Every row's time axis is the last 2 minutes (D.chartSeconds), the design's "−2m … now".
  *  A chart is the design's: a title with the current value (the latest complete second),
  *  then the plot, back to front (D-066):
@@ -484,13 +484,14 @@ function drawChart(host) {
 }
 
 // ---------- Rows ----------
-// Every row's time axis, the design's: the last 2 minutes (AXIS seconds) in five steps.
+// Every row's time axis, the design's: the last 2 minutes (AXIS seconds) in five steps, i from 0
+// (the left edge) to 4 ("now"). The security row's timeline draws the same labels in its SVG.
+function axisLabel(i) {
+  const sec = AXIS * (4 - i) / 4;
+  return i === 4 ? "now" : sec >= 120 && sec % 60 === 0 ? `−${sec / 60}m` : `−${sec}s`;
+}
 function axisHTML() {
-  const label = i => {
-    const sec = AXIS * (4 - i) / 4;
-    return i === 4 ? "now" : sec >= 120 && sec % 60 === 0 ? `−${sec / 60}m` : `−${sec}s`;
-  };
-  return `<div class="axis" aria-hidden="true">${[0, 1, 2, 3, 4].map(i => `<span>${label(i)}</span>`).join("")}</div>`;
+  return `<div class="axis" aria-hidden="true">${[0, 1, 2, 3, 4].map(i => `<span>${axisLabel(i)}</span>`).join("")}</div>`;
 }
 
 // A service's row: made once, then updated by every snapshot. Each chart host gets its
@@ -864,9 +865,10 @@ const TICKET_TIMELINE = {
   tip: runTip,
 };
 
-// A timeline of marks and agent runs over the last 2 minutes (the ticket row's, and the
-// security row's): its title, the plot with a band and a chip per lane (lanes: where each
-// is drawn), and the axis. The right of its title line (.tk-agents) is the row's to fill.
+// A timeline of marks and agent runs over the last 2 minutes (the ticket row's; the security
+// row draws its own, see "Security row"): its title, the plot with a band and a chip per lane
+// (lanes: where each is drawn), and the axis. The right of its title line (.tk-agents) is the
+// row's to fill.
 function timelineHTML(title, label, lanes) {
   return `
     <div class="tk-timeline">
@@ -885,8 +887,8 @@ function timelineHTML(title, label, lanes) {
     </div>`;
 }
 
-// A timeline's parts, for its row to update: what draws it (timeline: TICKET_TIMELINE or
-// SECURITY_TIMELINE) and its lanes, the plot, the marks, the bars, the chips by lane.
+// A timeline's parts, for its row to update: what draws it (timeline: TICKET_TIMELINE) and its
+// lanes, the plot, the marks, the bars, the chips by lane.
 function timelineParts(body, timeline) {
   const q = sel => body.querySelector(sel), lanes = timeline.lanes;
   return { timeline, lanes, plot: q(".tk-plot"), marks: q(".tk-marks"), runs: q(".tk-runs"), agents: q(".tk-agents"),
@@ -896,12 +898,11 @@ function timelineParts(body, timeline) {
 // A position on a timeline's axis (seconds from its left edge) as a share of its width.
 const pct = t => `${(Math.max(0, Math.min(t, AXIS)) / AXIS * 100).toFixed(3)}%`;
 
-// A timeline from the snapshot, the ticket row's and the security row's alike: a mark per item
-// (svc.marks, by id), a bar per run in its agent's lane (svc.runs, by key: D-062), the lanes'
-// chips, then the labels placed. What differs is the row's (tl.timeline): where each lane is
-// drawn, a mark's class and label, and a bar's tooltip, given its lane's name; and, if it has
-// them, what a bar holds before its cap and label (bar), adds to its class (barClass) and draws
-// in it (drawBar).
+// A timeline from the snapshot (the ticket row's): a mark per item (svc.marks, by id), a bar per
+// run in its agent's lane (svc.runs, by key: D-062), the lanes' chips, then the labels placed.
+// What differs is the row's (tl.timeline): where each lane is drawn, a mark's class and label,
+// and a bar's tooltip, given its lane's name; and, if it has them, what a bar holds before its
+// cap and label (bar), adds to its class (barClass) and draws in it (drawBar).
 function updateTimeline(tl, svc) {
   const { lanes, mark, bar = "", barClass, drawBar, tip } = tl.timeline;
   sync(tl.marks, svc.marks || [], m => m.id, () => {
@@ -1035,8 +1036,7 @@ function updateTicketRow(row, svc) {
 // Two tickets a second apart put their labels on top of each other, and a lane's chip covers
 // a label near the left edge. The newest label wins: an older one that would cover it, the
 // chip or the plot's edge moves to the right of its bar if there is room, or else hides (its
-// tooltip still says it). A P1 mark's label hides the same way, and so does a critical
-// finding's on the security row.
+// tooltip still says it). A P1 mark's label hides the same way.
 const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 function placeLabels(tk) {
   const plot = tk.plot.getBoundingClientRect();
@@ -1085,31 +1085,48 @@ function runTip(r, agent) {
 // services, since it is none. On the left, the deploy row's chrome: the laptop with "git" under
 // it (the scanner reads River Shop's repositories), a line with the ambient flow on to "Scan
 // findings", the newest findings with their repository and CVSS score, a critical one in the
-// accent. On the right, the ticket row's timeline, "Findings and agent runs": a mark per finding
-// (a critical one a full-height line with its CVE id, the rest short ticks), the security agent's
-// bars in the top lane, in the accent like the classifier's, and the patch agent's below it, in a
-// colour no ticket lane uses and dashed all round: that agent is external, on the participant's
-// laptop. The part of our bar the patch covers is hatched (our agent waited on the patch agent
-// then). The state matched and counted everything: the bars come with their positions, words and
-// the hatch's span, and both the hatch and the external bar come with the decision, so they are
-// drawn when our agent's answer lands, not while the patch runs (spec decision 24). A finding id
-// the page hasn't seen (not on the first snapshot, at most FRESH_SECONDS old) sends a packet
-// along the line, in the accent when critical, rings the laptop and fades its row in. Under
-// prefers-reduced-motion nothing moves (CSS). "Patch agent unreachable" is red (r.unreachable:
-// a FAILED patch, or a stopped patch agent's INVALID). The Issues panel takes spec decision 26's
-// words (ROW_KINDS): critical findings, right decisions with the missed line, the median times to
-// decide and to patch.
-// The row's timeline (see updateTimeline): our agent's lane above the patch agent's; a mark per
-// finding, a critical one a full-height line with its CVE id, the rest short ticks; a bar holds
-// the hatch, reads "Patch agent unreachable" in red, and has its tooltip.
-const SECURITY_TIMELINE = {
-  lanes: [{ key: "security-agent", top: 30 }, { key: "external", top: 86 }],
-  mark: m => [m.critical ? "critical" : "finding", m.critical ? m.cveId || m.id : ""],
-  bar: '<span class="sc-wait"></span>',
-  barClass: r => (r.unreachable ? " unreachable" : ""),
-  drawBar: drawHatch,
-  tip: findingRunTip,
-};
+// accent. A finding id the page hasn't seen (not on the first snapshot, at most FRESH_SECONDS old)
+// sends a packet along the line, in the accent when critical, rings the laptop and fades its row
+// in. The Issues panel takes spec decision 26's words (ROW_KINDS): critical findings, right
+// decisions with the missed line, the median times to decide and to patch.
+// On the right, "Findings and agent runs", the design in `inspiration/Findings timeline
+// redesign.html` (issue 13), drawn by drawSecurityTimeline as one SVG. A gutter on the left holds
+// the lane names and our agent's chip, so no text sits in the plot. Top to bottom: a pill per
+// critical finding, two lines (its CVE id, and our agent's label word for word under it, in the
+// colour the state names, r.tone), a diamond for it on the finding track, our agent's lane, a gap for the call down and the reply up, the patch agent's
+// lane, a tick per other finding, and the axis. Our bar is solid accent, with the wall's blinking
+// cap while open; the part where our agent waited on the patch agent is hatched, and under it the
+// external bar, with an accent arrow down at the call, a lavender one up at the reply and a soft
+// band between them. The patch's times come with the decision (spec decision 24), so all of that
+// appears when our agent answers, not while the patch runs. A run that overlaps another in its lane
+// is half height on its track for its whole length, and its external run takes the same track
+// (r.track, r.split: the state's). Hovering any part of a finding, or focusing its diamond, shows
+// its one tooltip and dims every other finding. The diamond is its one tab stop, so a finding whose
+// pill has dropped can still be reached. Under prefers-reduced-motion nothing moves (CSS).
+
+// The timeline's bands, top to bottom, in px: the pills (two lines each), the finding track, our
+// agent's lane, the gap, the external lane, the strip of other findings, the axis line and its
+// labels. The design's, tightened from its 294 px to 260.
+const SC_Y = { pill: 4, pillH: 38, event: 62, aTop: 80, aBot: 116, bTop: 168, bBot: 204,
+               otherTop: 216, otherBot: 226, axis: 234, label: 252, H: 260 };
+const SC_GUTTER = 118;  // the lane names' column, left of the plot
+const SC_RIGHT = 8;     // between the plot and the panel's edge
+const SC_BAR = { pad: 8, h: 20, half: 9 };  // a bar's inset in its lane, its height, and a split bar's
+const PILL_GAP = 6;     // between two pills
+const SC_FONT = { id: '500 12px "Geist Mono", ui-monospace, monospace', status: '400 12px "Geist", system-ui, sans-serif',
+                  chip: '500 11px "Geist Mono", ui-monospace, monospace' };
+const textWidth = (() => {
+  const ctx = document.createElement("canvas").getContext("2d");
+  return (text, font) => { ctx.font = font; return ctx.measureText(text).width; };
+})();
+const r1 = v => Math.round(v * 10) / 10;
+// setAttr for several attributes at once, numbers to 0.1 px.
+function put(el, a) {
+  for (const k in a) setAttr(el, k, typeof a[k] === "number" ? String(r1(a[k])) : a[k]);
+  return el;
+}
+const show = (el, on) => setAttr(el, "visibility", on ? "visible" : "hidden");
+const fidOf = el => (el && el.closest ? el.closest("[data-fid]")?.getAttribute("data-fid") ?? null : null);
 
 function createSecurityBody(row) {
   const body = document.createElement("div");
@@ -1133,12 +1150,28 @@ function createSecurityBody(row) {
         <div class="list-view sc-view" aria-live="polite"><div class="sc-rows"></div></div>
       </div>
     </div>
-    ${timelineHTML("Findings and agent runs", "Findings over the last 2 minutes, with the runs of the security agent "
-      + "on the critical ones and of the external patch agent it calls", SECURITY_TIMELINE.lanes)}`;
+    <div class="sc-timeline">
+      <div class="sc-head">
+        <span class="sc-title">Findings and agent runs</span>
+        <span class="sc-legend" aria-hidden="true">
+          <span class="sc-key"><svg width="18" height="10" viewBox="0 0 18 10"><rect width="18" height="10" rx="2"
+            class="sc-key-run"></rect></svg>Working</span>
+          <span class="sc-key"><svg width="18" height="10" viewBox="0 0 18 10"><defs><pattern id="sc-key-hatch" width="5"
+            height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5"
+            class="sc-hatch-ground"></rect><line x1="0" y1="0" x2="0" y2="5" class="sc-hatch-line"></line></pattern></defs><rect
+            x=".5" y=".5" width="17" height="9" rx="2" class="sc-key-wait" fill="url(#sc-key-hatch)"></rect></svg>Waiting on patch agent</span>
+        </span>
+      </div>
+      <div class="sc-chart" role="group" aria-label="${"Findings over the last 2 minutes, with the runs of the security "
+        + "agent on the critical ones and of the external patch agent it calls"}"></div>
+    </div>`;
   row.querySelector(".row-main").appendChild(body);
   const q = sel => body.querySelector(sel);
+  const chart = q(".sc-chart");
+  chart._draw = () => drawSecurityTimeline(chart);
+  ro.observe(chart);
   row._sc = {
-    ...timelineParts(body, SECURITY_TIMELINE), body, rows: q(".sc-rows"), scanned: q(".list-count"),
+    body, chart, rows: q(".sc-rows"), scanned: q(".list-count"),
     laptop: q(".sc-laptop"), packet: q(".sc-packet"), seen: null,  // the ids on the previous snapshot; null before the first
   };
   const detail = row.querySelector(".detail");
@@ -1181,39 +1214,293 @@ function updateSecurityRow(row, svc) {
     replay(sc.packet, "travel");
   }
 
-  updateTimeline(sc, svc);
+  sc.chart._svc = svc;
+  drawSecurityTimeline(sc.chart);
 }
 
-// The hatch on our bar: the span our agent waited on the patch agent (r.waitFrom to r.waitTo), as
-// a share of the bar; hidden on a bar without one.
-function drawHatch(bar, r) {
-  const wait = bar.firstChild, span = r.end - r.start;
-  const hatched = r.waitFrom != null && r.waitTo != null && r.waitTo > r.waitFrom && span > 0;
-  wait.hidden = !hatched;
-  if (hatched) {
-    const share = t => `${((t - r.start) / span * 100).toFixed(3)}%`;
-    setAttr(wait, "style", `left: ${share(r.waitFrom)}; right: calc(100% - ${share(r.waitTo)})`);
+// The timeline's <svg>, made on its first draw and kept: the defs (the clip to the plot, the hatch),
+// the plot's ground, the gutter, then the layers kept by key, the ticks and the findings clipped to
+// the plot and the pills over them. The pointer and the focus say which finding is hot.
+function securityChart(host) {
+  if (host._p) return host._p;
+  const svg = s("svg", { class: "sc-svg" }, host);
+  const defs = s("defs", {}, svg);
+  const clip = s("rect", {}, s("clipPath", { id: "sc-clip" }, defs));
+  const hatch = s("pattern", { id: "sc-hatch", width: 5, height: 5, patternUnits: "userSpaceOnUse",
+                               patternTransform: "rotate(45)" }, defs);
+  s("rect", { width: 5, height: 5, class: "sc-hatch-ground" }, hatch);
+  s("line", { x1: 0, y1: 0, x2: 0, y2: 5, class: "sc-hatch-line" }, hatch);
+  const ground = s("g", {}, svg);
+  const p = {
+    svg, clip,
+    lanes: [s("rect", { class: "sc-lane", rx: 6 }, ground), s("rect", { class: "sc-lane", rx: 6 }, ground)],
+    track: s("line", { class: "sc-track" }, ground),
+    grid: [1, 2, 3].map(() => s("line", { class: "sc-grid" }, ground)),
+    axis: s("line", { class: "sc-track" }, ground),
+    labels: [0, 1, 2, 3, 4].map(i => s("text", { class: i === 4 ? "sc-ax now" : i % 2 ? "sc-ax minor" : "sc-ax",
+                                                 "text-anchor": i === 0 ? "start" : i === 4 ? "end" : "middle" }, ground)),
+  };
+  // The gutter: fixed text, never inside the plot.
+  const Y = SC_Y, aMid = (Y.aTop + Y.aBot) / 2, bMid = (Y.bTop + Y.bBot) / 2, gap = (Y.aBot + Y.bTop) / 2;
+  const gutter = s("g", { class: "sc-gutter" }, svg);
+  s("text", { class: "sc-gl", x: 0, y: Y.event + 4 }, gutter).textContent = "Findings";
+  s("rect", { class: "sc-sq ours", x: 0, y: aMid - 13, width: 9, height: 9, rx: 2 }, gutter);
+  p.nameA = s("text", { class: "sc-gn", x: 15, y: aMid - 4 }, gutter);
+  p.chip = s("g", { class: "sc-chip" }, gutter);
+  p.chipBox = s("rect", { class: "sc-chip-box", x: 15, y: aMid + 1, height: 16, rx: 8 }, p.chip);
+  p.chipDot = s("circle", { class: "sc-chip-dot", cx: 24, cy: aMid + 9, r: 3 }, p.chip);
+  p.chipText = s("text", { class: "sc-chip-text", y: aMid + 13 }, p.chip);
+  s("text", { class: "sc-gs", x: 0, y: gap + 4 }, gutter).textContent = "↓ call · ↑ reply";
+  s("rect", { class: "sc-sq ext", x: 0.5, y: bMid - 12.5, width: 8, height: 8, rx: 2 }, gutter);
+  p.nameB = s("text", { class: "sc-gn", x: 15, y: bMid - 4 }, gutter);
+  p.detailB = s("text", { class: "sc-gs", x: 15, y: bMid + 12 }, gutter);
+  s("text", { class: "sc-gs", x: 0, y: Y.otherBot - 1 }, gutter).textContent = "Other findings";
+  p.ticks = s("g", { "clip-path": "url(#sc-clip)" }, svg);
+  p.findings = s("g", { "clip-path": "url(#sc-clip)" }, svg);
+  p.pills = s("g", {}, svg);
+  // Which finding is hot: the one under the pointer, else the one whose pill has the focus. The
+  // listeners are on the host: Chrome makes an SVG element with focus listeners a tab stop.
+  p.pointer = p.focus = null;
+  host.addEventListener("pointerover", e => { p.pointer = fidOf(e.target); applyHot(p); });
+  host.addEventListener("pointerleave", () => { p.pointer = null; applyHot(p); });
+  host.addEventListener("focusin", e => { p.focus = fidOf(e.target); applyHot(p); });
+  host.addEventListener("focusout", () => { p.focus = null; applyHot(p); });
+  host._p = p;
+  return p;
+}
+
+// While one finding is hot, every other finding's marks dim (CSS).
+function applyHot(p) {
+  const hot = p.pointer ?? p.focus;
+  const marks = [...p.findings.children, ...p.pills.children];
+  const live = hot != null && marks.some(n => n.getAttribute("data-fid") === hot);
+  setClass(p.svg, live ? "sc-svg has-hot" : "sc-svg");
+  for (const n of marks) n.classList.toggle("hot", live && n.getAttribute("data-fid") === hot);
+}
+
+// A finding as the timeline draws it, from the snapshot: its critical mark (svc.marks), our agent's
+// run and the patch agent's (svc.runs, by findingId, the lanes top to bottom in svc.lanes), and its
+// list row, if it is among the newest, for a tooltip without a run. In the order they happened.
+function securityItems(svc) {
+  const external = (svc.lanes || [])[1]?.key;
+  const listed = new Map(((svc.findings || {}).newest || []).map(f => [f.id, f]));
+  const items = new Map();
+  const item = id => {
+    if (!items.has(id)) items.set(id, { id, mark: null, ours: null, ext: null, listed: listed.get(id) });
+    return items.get(id);
+  };
+  for (const m of svc.marks || []) if (m.critical) item(m.id).mark = m;
+  for (const r of svc.runs || []) item(r.findingId)[r.lane === external ? "ext" : "ours"] = r;
+  const at = it => (it.mark ? it.mark.t : (it.ours || it.ext).start);
+  return [...items.values()].sort((a, b) => at(a) - at(b) || (a.id < b.id ? -1 : 1));
+}
+
+// A bar's top and height in a lane whose bars start at `top`: the full height, or, split, the top
+// or the bottom half on its track (r.split and r.track, issue 13).
+function barY(top, r) {
+  if (!r || !r.split) return [top, SC_BAR.h];
+  return [r.track ? top + SC_BAR.h - SC_BAR.half : top, SC_BAR.half];
+}
+
+// A finding's one tooltip, as HTML for #tip and as text for its diamond's aria-label: the CVE in its
+// repository, the finding id, the CVSS and our agent's label; what our agent's run came to
+// (r.outcomeText), how long it waited on the patch agent and its reason; after a patch call, how
+// long the patch agent took, when, and its reply, which carries the commit.
+function findingTip(it) {
+  const r = it.ours, e = it.ext, listed = it.listed || {};
+  const cve = r?.cveId || it.mark?.cveId || listed.cveId || it.id;
+  const repo = r?.repository || listed.repository, score = r?.cvssScore ?? listed.cvssScore;
+  const parts = [["strong", repo ? `${cve} in ${repo}` : cve],
+                 ["", `${it.id}${score != null ? `, CVSS ${Number(score).toFixed(1)}` : ""}${r ? ` · ${r.label}` : ""}`]];
+  if (r?.outcomeText) parts.push(["em", r.outcomeText]);
+  if (r && r.waitFrom != null && r.waitTo != null) {
+    parts.push(["em", `Waiting on patch agent for ${dur(r.waitTo - r.waitFrom)}, the hatched part.`]);
+  }
+  if (r?.reason) parts.push(["reason", clip(String(r.reason), 180)]);
+  if (e) {
+    const when = e.startedAt != null && e.finishedAt != null
+      ? `, started ${clockOf(e.startedAt)}, finished ${clockOf(e.finishedAt)}` : "";
+    parts.push(["em", `The patch agent answered in ${e.durationText || dur(e.duration || 0)}${when}.`]);
+    if (e.reply) parts.push(["reason", clip(String(e.reply), 240)]);
+  }
+  const html = parts.map(([tag, text]) => tag === "strong" ? `<strong>${esc(text)}</strong>`
+    : tag === "em" ? `<em>${esc(text)}</em>` : tag === "reason" ? `<span class="reason">${esc(text)}</span>` : esc(text));
+  const text = parts.map(([, t]) => t.replace(/ · /g, ", ")).map(t => (/[.!?…]$/.test(t) ? t : `${t}.`));
+  return { html: html.join(""), text: text.join(" ") };
+}
+
+function drawSecurityTimeline(host) {
+  const svc = host._svc;
+  if (!svc) return;
+  const p = securityChart(host), Y = SC_Y;
+  const W = hostWidth(host), pl = SC_GUTTER, pr = Math.max(pl + 40, W - SC_RIGHT), pw = pr - pl;
+  const X = t => pl + (Math.max(0, Math.min(t, AXIS)) / AXIS) * pw;
+  put(p.svg, { width: W, height: Y.H, viewBox: `0 0 ${W} ${Y.H}` });
+  put(p.clip, { x: pl, y: 0, width: pw, height: Y.H });
+
+  // The plot's ground: the two lanes, the finding track, the dashed grid, the axis and its labels.
+  put(p.lanes[0], { x: pl, y: Y.aTop, width: pw, height: Y.aBot - Y.aTop });
+  put(p.lanes[1], { x: pl, y: Y.bTop, width: pw, height: Y.bBot - Y.bTop });
+  put(p.track, { x1: pl, x2: pr, y1: Y.event, y2: Y.event });
+  p.grid.forEach((n, k) => { const x = X(AXIS * (k + 1) / 4); put(n, { x1: x, x2: x, y1: Y.aTop, y2: Y.axis }); });
+  put(p.axis, { x1: pl, x2: pr, y1: Y.axis, y2: Y.axis });
+  p.labels.forEach((n, i) => { put(n, { x: X(AXIS * i / 4), y: Y.label }); setText(n, axisLabel(i)); });
+
+  // The gutter's names, and our agent's chip under its name, as the snapshot says them (svc.lanes).
+  const [ours = {}, external = {}] = svc.lanes || [];
+  setText(p.nameA, ours.name || "");
+  setText(p.nameB, external.name || "");
+  setText(p.detailB, external.detail || "");
+  const state = ours.state || "", working = !!ours.working;
+  setClass(p.chip, working ? "sc-chip working" : "sc-chip");
+  put(p.chipBox, { width: Math.ceil(textWidth(state, SC_FONT.chip)) + (working ? 24 : 14) });
+  show(p.chipDot, working);
+  put(p.chipText, { x: working ? 32 : 22 });
+  setText(p.chipText, state);
+
+  // A tick per other finding, in the strip under the external lane.
+  sync(p.ticks, (svc.marks || []).filter(m => !m.critical), m => m.id, () => s("line", { class: "sc-tick" }), (n, m) => {
+    const x = X(m.t);
+    put(n, { x1: x, x2: x, y1: Y.otherTop, y2: Y.otherBot });
+  });
+
+  // A group per finding, by id, with every mark of it in the plot; then a pill per critical
+  // finding in the window that fits, the newest kept.
+  const items = securityItems(svc);
+  for (const it of items) it.tip = findingTip(it);
+  sync(p.findings, items, it => it.id, createFinding, (g, it) => updateFinding(g, it, X));
+  sync(p.pills, placePills(items.filter(it => it.mark), X, pl, pr), q => q.it.id, createPill, updatePill);
+  applyHot(p);
+}
+
+// A finding's group: its marks back to front, the arrows' hit strips, then its diamond, the
+// finding's one tab stop, with its focus ring and a hit area round it.
+function createFinding() {
+  const g = s("g", { class: "sc-f" });
+  const part = (tag, cls, parent = g) => s(tag, { class: cls }, parent);
+  const mark = s("g", { class: "sc-dmark", role: "img" }, g);
+  g._p = {
+    band: part("rect", "sc-band"), link: part("line", "sc-link"), ext: part("rect", "sc-ext"),
+    run: part("rect", "sc-run"), hatch: part("rect", "sc-hatch"), after: part("rect", "sc-run"),
+    cap: part("rect", "sc-cap"), call: part("path", "sc-call"), reply: part("path", "sc-reply"),
+    callHit: part("rect", "sc-hit call"), replyHit: part("rect", "sc-hit reply"),
+    mark, markHit: part("rect", "sc-hit dia", mark), ring: part("path", "sc-dring", mark),
+    diamond: part("path", "sc-diamond", mark),
+  };
+  g.appendChild(mark);  // last, over the arrows' strips
+  g._p.hatch.setAttribute("fill", "url(#sc-hatch)");
+  return g;
+}
+
+// A bar from x0 to x1, inset all round by `inset`, or hidden when that leaves it no width.
+function segment(el, x0, x1, y, h, inset = 0) {
+  const width = x1 - x0 - 2 * inset;
+  show(el, width > 0.5);
+  if (width > 0.5) put(el, { x: x0 + inset, y: y + inset, width, height: h - 2 * inset, rx: 2 });
+}
+
+function updateFinding(g, it, X) {
+  const P = g._p, Y = SC_Y, r = it.ours, e = it.ext;
+  setAttr(g, "data-fid", it.id);
+  setAttr(g, "data-tip", it.tip.html);
+
+  // The diamond on the finding track: the finding's tab stop, saying what its tooltip says.
+  const mx = it.mark ? X(it.mark.t) : null;
+  show(P.mark, mx != null);
+  if (mx != null) {
+    setAttr(P.mark, "tabindex", "0");
+    setAttr(P.mark, "data-tip", it.tip.html);
+    setAttr(P.mark, "aria-label", it.tip.text);
+    put(P.diamond, { d: diamond(mx, Y.event, 5) });
+    put(P.ring, { d: diamond(mx, Y.event, 10) });
+    put(P.markHit, { x: mx - 8, y: Y.event - 8, width: 16, height: 16 });
+  } else if (P.mark.hasAttribute("tabindex")) {
+    P.mark.removeAttribute("tabindex");
+  }
+
+  // Our bar: solid, hatched between waitFrom and waitTo, the blinking cap at its open end.
+  const [oy, oh] = barY(Y.aTop + SC_BAR.pad, r);
+  const x0 = r ? X(r.start) : 0, x1 = r ? Math.max(X(r.end), x0 + 2) : 0;
+  const waited = r && r.waitFrom != null && r.waitTo != null && r.waitTo > r.waitFrom;
+  const w0 = waited ? X(r.waitFrom) : x1, w1 = waited ? Math.max(X(r.waitTo), w0 + 1) : x1;
+  segment(P.run, x0, r ? w0 : 0, oy, oh);
+  segment(P.hatch, w0, waited ? w1 : w0, oy, oh, 0.5);
+  segment(P.after, w1, waited ? x1 : w1, oy, oh);
+  show(P.cap, !!(r && r.open));
+  if (r && r.open) put(P.cap, { x: x1 - 3, y: oy, width: 3, height: oh });
+  show(P.link, !!(r && mx != null));
+  if (r && mx != null) put(P.link, { x1: mx, y1: Y.event + 5, x2: x0, y2: oy });
+
+  // The external bar, the band over the gap, the call down at its start and the reply up at its
+  // end, from our bar's bottom to its top (an arrow on the plot's edge is a call or a reply before
+  // the window, and is left out).
+  const [ey, eh] = barY(Y.bTop + SC_BAR.pad, e);  // the state gave it our run's track
+  const ex0 = e ? X(e.start) : 0, ex1 = e ? Math.max(X(e.end), ex0 + 2) : 0, top = oy + oh;
+  segment(P.ext, ex0, ex1, ey, eh);
+  segment(P.band, ex0, ex1, top, ey - top);
+  const call = !!(e && e.start > 0), reply = !!(e && e.end < AXIS);
+  show(P.call, call);
+  show(P.callHit, call);
+  if (call) {
+    put(P.call, { d: `M ${r1(ex0)} ${top} V ${ey - 6} M ${r1(ex0 - 4.5)} ${ey - 7} L ${r1(ex0)} ${ey} L ${r1(ex0 + 4.5)} ${ey - 7} Z` });
+    put(P.callHit, { x: ex0 - 6, y: top, width: 12, height: ey - top });
+  }
+  show(P.reply, reply);
+  show(P.replyHit, reply);
+  if (reply) {
+    put(P.reply, { d: `M ${r1(ex1)} ${ey} V ${top + 6} M ${r1(ex1 - 4.5)} ${top + 7} L ${r1(ex1)} ${top} L ${r1(ex1 + 4.5)} ${top + 7} Z` });
+    put(P.replyHit, { x: ex1 - 6, y: top, width: 12, height: ey - top });
   }
 }
 
-// A finding's bar's tooltip: the finding, then the parts the bar carries, in this order. The state
-// chose them by lane and worded our agent's outcome (r.outcomeText: the action and the commit, or
-// what came back instead), so the page tests neither the lane nor the action. Ours carries that
-// outcome, how long it waited on the patch agent (the hatch) and the reason; the external one when
-// the patch started and finished, how long it took, and the patch agent's reply.
-function findingRunTip(r, lane) {
-  const score = r.cvssScore != null ? `, CVSS ${Number(r.cvssScore).toFixed(1)}` : "";
-  const head = `<strong>${esc(r.cveId || r.findingId)} in ${esc(r.repository || "?")}</strong>` +
-    `${esc(r.findingId)}${score} · ${esc(lane)} · ${esc(r.label)}`;
-  const outcome = r.outcomeText ? `<em>${esc(r.outcomeText)}</em>` : "";
-  const when = r.startedAt != null && r.finishedAt != null
-    ? `<em>Started ${clockOf(r.startedAt)}, finished ${clockOf(r.finishedAt)}: ${esc(r.durationText || dur(r.duration || 0))}.</em>`
-    : "";
-  const wait = r.waitFrom != null && r.waitTo != null
-    ? `<em>Waiting on patch agent for ${dur(r.waitTo - r.waitFrom)}, the hatched part.</em>` : "";
-  return head + outcome + when + wait +
-    (r.reason ? `<span class="reason">${esc(clip(String(r.reason), 180))}</span>` : "") +
-    (r.reply ? `<span class="reason">${esc(clip(String(r.reply), 240))}</span>` : "");
+// The design's sticky callouts: a pill centres on its diamond, stops at the plot's edges and is
+// pushed by its neighbours, 6 px apart. One that no longer fits at the left drops out, so the
+// oldest goes first. A pill is as wide as its wider line, the CVE id or the label under it.
+function placePills(items, X, pl, pr) {
+  const pills = items.map(it => {
+    const cve = it.mark.cveId || it.id, status = it.ours ? it.ours.label || "" : "";
+    const w = Math.ceil(10 + Math.max(textWidth(cve, SC_FONT.id), status ? textWidth(status, SC_FONT.status) : 0) + 10);
+    return { it, cve, status, w, mx: X(it.mark.t), left: 0 };
+  }).sort((a, b) => a.mx - b.mx);
+  for (const q of pills) q.left = Math.max(pl, Math.min(q.mx - q.w / 2, pr - q.w));
+  for (let i = 1; i < pills.length; i++) pills[i].left = Math.max(pills[i].left, pills[i - 1].left + pills[i - 1].w + PILL_GAP);
+  for (let i = pills.length - 1; i >= 0; i--) {
+    const limit = i === pills.length - 1 ? pr : pills[i + 1].left - PILL_GAP;
+    pills[i].left = Math.min(pills[i].left, limit - pills[i].w);
+  }
+  return pills.filter(q => q.left >= pl - 1);
+}
+
+function createPill() {
+  const g = s("g", { class: "sc-pill" });
+  g._p = {
+    box: s("rect", { class: "sc-pill-box", rx: 7 }, g),
+    id: s("text", { class: "sc-pid" }, g), status: s("text", { class: "sc-pst" }, g),
+    caret: s("path", { class: "sc-caret" }, g), edge: s("path", { class: "sc-caret-edge" }, g),
+    tether: s("line", { class: "sc-tether" }, g),
+  };
+  return g;
+}
+
+// A pill sits at its left edge by a transform, which glides (CSS): the CVE id on top, the label
+// under it in its tone's colour (the state's r.tone, none while open), or the id alone, centred.
+// Its caret slides along its bottom edge over the diamond, and a short line runs from the caret to
+// the diamond. The pill takes the pointer, not the focus: the diamond is the tab stop.
+function updatePill(g, q) {
+  const P = g._p, Y = SC_Y, top = Y.pill, bottom = top + Y.pillH, L = r1(q.left), tone = q.it.ours?.tone;
+  setAttr(g, "data-fid", q.it.id);
+  setAttr(g, "data-tip", q.it.tip.html);
+  if (g.style.transform !== `translate(${L}px, 0px)`) g.style.transform = `translate(${L}px, 0px)`;
+  put(P.box, { x: 0, y: top, width: q.w, height: Y.pillH });
+  put(P.id, { x: 10, y: top + (q.status ? 16 : 23) });
+  setText(P.id, q.cve);
+  put(P.status, { x: 10, y: top + 31 });
+  setText(P.status, q.status);
+  setClass(P.status, tone ? `sc-pst ${tone}` : "sc-pst");
+  const cx = r1(Math.max(L + 12, Math.min(q.mx, L + q.w - 12)) - L);
+  put(P.caret, { d: `M ${cx - 5} ${bottom - 1} L ${cx} ${bottom + 6} L ${cx + 5} ${bottom - 1} Z` });
+  put(P.edge, { d: `M ${cx - 5} ${bottom} L ${cx} ${bottom + 6} L ${cx + 5} ${bottom}` });
+  put(P.tether, { x1: cx, y1: bottom + 6, x2: q.mx - L, y2: Y.event - 6 });
 }
 
 // ---------- Issues ----------
