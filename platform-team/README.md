@@ -8,10 +8,15 @@ everything you need to prepare, run and clean up the environments.
 
 This Terraform module builds **each developer's workshop stack**:
 
-- **a new, empty environment**, named after their email (see [Environment names](#environment-names)), with the Stream Governance Advanced package, and a role binding that makes the developer **EnvironmentAdmin** on it through their own user account;
+- **a new, empty environment**, named after their email (see [Environment names](#environment-names)), with the Stream Governance Essentials package, and a role binding that makes the developer **EnvironmentAdmin** on it through their own user account;
 - **a Standard, single-zone Kafka cluster**, `RIVER-OOPS-DEMO-CLUSTER`, on AWS in `region` (default `us-east-1`, the same for everyone). The environment's Schema Registry comes up with it;
-- **a Flink compute pool**, `RIVER-OOPS-DEMO-pool`, that scales on demand up to `flink_max_cfu` CFUs (default 10), sized for the eight long-running statements of the workshop (the `INSERT`s of labs 2.2 and 2.5, the three agent legs of 4.3, and 5.1, 5.2 and 5.3) and ad-hoc queries;
-- **the workshop's tables and AI model:** five source tables, `service_metrics` (append-only, one metrics sample a second each for web-gateway and payments), `service_deployments` (upsert, keyed by `service_name`), `service_incidents` (the simulator's answer key), `support_tickets` (checkout's support tickets) and `ticket_answer_key` (their answer key), all empty until the developer runs `uv run ops-sim`; five output tables, `service_error_rate`, `service_health`, `remediation_decisions`, `p1_tickets` and `ticket_triage`, which the developer fills with `INSERT` statements in the labs (so the developer never writes a `CREATE TABLE`, and the ops wall can read all of its topics from the start); and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`).
+- **a Flink compute pool**, `RIVER-OOPS-DEMO-pool`, that scales on demand up to `flink_max_cfu` CFUs (default 10), sized for the ten long-running statements of the workshop (the `INSERT`s of labs 2.2 and 2.5, the three agent legs of 4.3, 5.1, 5.2 and 5.3, and 6.1 and 6.4) and ad-hoc queries (section 6's two are not yet checked against 10);
+- **the workshop's tables and AI model:** seven source tables, `service_metrics` (append-only, one metrics sample a second each for web-gateway and payments), `service_deployments` (upsert, keyed by `service_name`), `service_incidents` (the simulator's answer key), `support_tickets` (checkout's support tickets), `ticket_answer_key` (their answer key), `cve_scans` (CVE scan findings for River Shop's repositories) and `cve_answer_key` (their answer key), all empty until the developer runs `uv run ops-sim`; seven output tables, `service_error_rate`, `service_health`, `remediation_decisions`, `p1_tickets`, `ticket_triage`, `critical_cves` and `patch_decisions`, which the developer fills with `INSERT` statements in the labs (so the developer never writes a `CREATE TABLE`, and the ops wall can read all of its topics from the start); and `llm_textgen_model` on the Confluent-hosted `anthropic.claude-sonnet-4-6` (`csp_hosted_model`);
+- **the Real-Time Context Engine on `patch_decisions`**, the security agent's decisions (section 6), so a coding agent can ask about them over MCP. `remediation_decisions` stays a Console step for the developers.
+
+For a demo, `deploy_labs = true` also starts the labs' statements, so the finished
+pipeline runs without anyone typing them. That is for a separate demo environment only; see
+[A demo environment](#a-demo-environment).
 
 There is **no static/seed table**: unlike some workshops, this one builds all of its
 data live from the generator, so there is nothing to seed and nothing to count.
@@ -48,6 +53,7 @@ It creates nothing else in the environment. The full developer steps are in the
 | | [11. Developer access](#11-developer-access) |
 | During | [When a developer comes to you](#when-a-developer-comes-to-you) |
 | Afterwards | [12. Tear down](#12-tear-down) |
+| Any time, separately | [A demo environment](#a-demo-environment) |
 
 The clusters bill from the moment they're created, so apply everyone's stacks shortly
 before the workshop; the instructors' go first, for the rehearsal.
@@ -118,13 +124,14 @@ confluent rtce region list
 ```
 
 - **Flink:** the first command must list your region.
-- **Real-Time Context Engine and Lightning Tables** (sections 6–8 of the workshop) are **AWS-only and in a subset of regions.** If `confluent rtce region list` doesn't list your region, developers skip those sections. As of late 2026 the supported AWS regions are roughly: `us-east-1`, `us-east-2`, `us-west-2`, `ap-northeast-1`, `ap-northeast-2`, `ap-southeast-1`, `ap-southeast-2`, `ap-south-1`, `eu-central-1`, `eu-west-1`, `eu-west-2`.
+- **Real-Time Context Engine and Lightning Tables** (sections 7–9 of the workshop) are **AWS-only and in a subset of regions.** The second command must list your region too, since the apply turns RTCE on for every developer's `patch_decisions` topic (D-070). As of late 2026 the supported AWS regions are roughly: `us-east-1`, `us-east-2`, `us-west-2`, `ap-northeast-1`, `ap-northeast-2`, `ap-southeast-1`, `ap-southeast-2`, `ap-south-1`, `eu-central-1`, `eu-west-1`, `eu-west-2`.
 - **The Confluent-hosted model** `anthropic.claude-sonnet-4-6` (or the `csp_hosted_model` you set) must be offered there. No CLI command shows it; confirm with your Confluent account team, and the rehearsal ([step 8](#8-rehearse-the-developer-flow)) confirms it in practice.
 
 ## 6. Check networking and access
 
 - **No IP filter blocks the developers' networks** from Kafka, Flink, Schema Registry or the management API.
 - **Outbound 443 and 9092** from the developers' network: the generator runs on each laptop and produces to Kafka directly.
+- **Outbound access for a tunnel** from the developers' laptops. In section 6, each developer runs `uv run patch-agent`, the external agent that the security agent calls over A2A, on their laptop, and opens a tunnel in front of it: Flink calls it at the tunnel's public URL. Which tunnel the lab uses is still a TODO (D-070). In D-070's smoke test, a cloudflared quick tunnel registered only with `--protocol http2`: that network blocked outbound UDP on port 7844, and cloudflared's default transport, QUIC, never connected. If a developer's tunnel can't connect on the day, the presenter's patch agent and its URL are the fallback.
 - **Public networking only.** Each cluster is a Standard cluster on public endpoints.
 - **Keep the module's direct role bindings.** Each developer must be `EnvironmentAdmin` *directly* on their user, not through an SSO group mapping — API keys don't carry group-mapped permissions, so a group-only developer can't deploy.
 - **New, empty environments only.** The module always creates fresh environments; don't swap in existing ones.
@@ -153,7 +160,7 @@ rm terraform.tfplan
 ```
 
 **`terraform plan`** ends with `Plan: N to add, 0 to change, 0 to destroy.`, where **N
-is 17 per person**:
+is 22 per person**:
 
 1. A random name suffix
 2. One environment
@@ -166,12 +173,17 @@ is 17 per person**:
 9. Flink statement: create the `service_incidents` table
 10. Flink statement: create the `support_tickets` table
 11. Flink statement: create the `ticket_answer_key` table
-12. Flink statement: create the `service_error_rate` table
-13. Flink statement: create the `service_health` table
-14. Flink statement: create the `remediation_decisions` table
-15. Flink statement: create the `p1_tickets` table
-16. Flink statement: create the `ticket_triage` table
-17. Flink statement: create the `llm_textgen_model` model
+12. Flink statement: create the `cve_scans` table
+13. Flink statement: create the `cve_answer_key` table
+14. Flink statement: create the `service_error_rate` table
+15. Flink statement: create the `service_health` table
+16. Flink statement: create the `remediation_decisions` table
+17. Flink statement: create the `p1_tickets` table
+18. Flink statement: create the `ticket_triage` table
+19. Flink statement: create the `critical_cves` table
+20. Flink statement: create the `patch_decisions` table
+21. The Real-Time Context Engine on the `patch_decisions` topic
+22. Flink statement: create the `llm_textgen_model` model
 
 It fails before creating anything if your key/secret is wrong, an email isn't a user,
 the same person appears twice, or an email's local part has nothing to name an
@@ -187,7 +199,7 @@ terraform output -raw handout        # each person's environment name, ID and Co
 confluent flink statement list --environment <env-id> --cloud aws --region <region>
 ```
 
-All eleven statements (named `tf-…`) should be `COMPLETED`.
+All fifteen statements (named `tf-…`) should be `COMPLETED`.
 
 ### If the apply stops
 
@@ -201,6 +213,8 @@ adds what's missing.
 Re-running the apply on an existing stack adds the tables it doesn't have yet, but it
 never changes a table that is already there: every statement is `CREATE TABLE IF NOT
 EXISTS`. A table whose columns changed has to be dropped first, in every existing stack.
+Stacks applied before D-070 need nothing dropped: the apply adds section 6's four tables
+and `patch_decisions`' Real-Time Context Engine topic.
 
 `remediation_decisions` gained a `ticket_id` column for the ticket responder (D-068). In
 each stack applied before that:
@@ -210,8 +224,8 @@ each stack applied before that:
 2. In a Flink SQL workspace of that environment (database `RIVER-OOPS-DEMO-CLUSTER`), run
    ``DROP TABLE `remediation_decisions`;``.
 3. Re-run the `plan -out` / `apply` / `rm` commands above. Its statement's SQL changed, so
-   the apply runs it again and creates the table with the new column, next to the four new
-   tables (`support_tickets`, `ticket_answer_key`, `p1_tickets`, `ticket_triage`).
+   the apply runs it again and creates the table with the new column, next to the tables
+   the stack doesn't have yet (D-068's four and D-070's four).
 
 The developer then starts the lab 4.3 `INSERT`s again.
 
@@ -222,7 +236,7 @@ ahead: the [pre-provisioned walkthrough](../docs/tracks/PRE-PROVISIONED.md)'s de
 generator, pipeline and agents.
 
 The agents call a Confluent-hosted model. **Confirm with your Confluent account team
-how that inference is billed** in your organization. Sections 6–8 (Real-Time Context
+how that inference is billed** in your organization. Sections 7–9 (Real-Time Context
 Engine, Lightning Queries) depend on the region check in [step 5](#5-check-the-region).
 
 ## 9. Add everyone else
@@ -235,7 +249,7 @@ terraform apply terraform.tfplan
 rm terraform.tfplan
 ```
 
-Check the plan says `0 to change, 0 to destroy`, with **17 to add per new person**.
+Check the plan says `0 to change, 0 to destroy`, with **22 to add per new person**.
 Each stack belongs to its exact email string, so **removing an email destroys that
 person's whole stack**, and **changing an entry (even its case) replaces it** with a
 new, empty one.
@@ -274,7 +288,7 @@ environment name and the Console URL; the deploy finds the environment by itself
 |---|---|
 | `Your platform team hasn't provisioned <name> (<id>) yet` | Their stack is incomplete, most likely a stopped apply. Re-run `plan -out` / `apply` / `rm` (see [If the apply stops](#if-the-apply-stops)). |
 | `Your Global key sees no environment you're directly bound to.` | Their email is missing from `developer_emails`, or they signed in with another account. Check the [handout](#11-developer-access). |
-| `✗ table <name> is missing — ask your platform team to re-run their apply` (or `✗ model llm_textgen_model …`), from the readiness check at the end of `uv run deploy`; `<name>` can be any of the ten tables, including the output tables `service_error_rate`, `service_health`, `remediation_decisions`, `p1_tickets` and `ticket_triage` | A statement didn't complete; re-run the apply. |
+| `✗ table <name> is missing — ask your platform team to re-run their apply` (or `✗ model llm_textgen_model …`), from the readiness check at the end of `uv run deploy`; `<name>` can be any of the fourteen tables, including the output tables `service_error_rate`, `service_health`, `remediation_decisions`, `p1_tickets`, `ticket_triage`, `critical_cves` and `patch_decisions` | A statement didn't complete; re-run the apply. |
 
 A developer who sees `Confluent Cloud refused a new Global key` already holds the 2
 Global keys a user may own — they delete one under **API keys → My account**.
@@ -295,6 +309,116 @@ If a developer can't run step 1, their Kafka/SR keys are useless once the cluste
 gone, but their Global key keeps any other roles they hold — have them delete it under
 **API keys → My account**.
 
+## A demo environment
+
+To show the finished pipeline without typing the labs, build a demo environment where the
+labs' 17 statements are already running:
+- the `INSERT`s of labs 2.2 and 2.5;
+- the five agents of 4.2, 5.2, 5.3 and 6.3;
+- the three agent legs of 4.3;
+- the `INSERT`s of 5.1, 5.2, 5.3, 6.1 and 6.4;
+- lab 6.2's connection to the presenter's patch agent, and its tool.
+
+`deploy_labs = true` adds them, copied from the repository's `sql/` files (D-069). The one
+difference is lab 6.2's endpoint: `patch_agent_url`, the URL of the tunnel in front of the
+presenter's `uv run patch-agent` (D-070). A plan with `deploy_labs` and no `patch_agent_url`
+fails. The connection's username and password, `workshop`, are in its SQL text, as in the
+lab, so the state and the Console show them: `patch-agent` checks neither.
+
+**Never in the workshop's apply.** `deploy_labs` covers every environment in the apply, and
+attendees write these statements themselves. So the demo gets its own state, with one email:
+a `demo` workspace in this folder, with its own variables file.
+
+1. Start the patch agent and its tunnel on the presenter's laptop: `uv run patch-agent
+   --public-url <tunnel URL>`, as in lab 6.2. Keep both running while `ops-sim` runs: Flink
+   fetches the patch agent's card on every call to the security agent, so without them every
+   critical finding's decision fails, `DISMISS` ones included.
+2. Create `demo.tfvars` next to `terraform.tfvars` (gitignored, like it). The key and secret
+   still come from `terraform.tfvars`. `patch_agent_url` is the tunnel's URL, with its
+   scheme and no trailing slash.
+
+    ```hcl
+    developer_emails = ["presenter@example.com"]
+    deploy_labs      = true
+    patch_agent_url  = "https://example.trycloudflare.com"
+    ```
+
+3. Apply it in the `demo` workspace:
+
+    ```bash
+    terraform workspace new demo      # the first time; afterwards: terraform workspace select demo
+    terraform plan -var-file=demo.tfvars -out=terraform.tfplan
+    terraform apply terraform.tfplan
+    rm terraform.tfplan
+    terraform workspace select default
+    ```
+
+    The plan adds **39**: a developer's 22 resources (the list in
+    [step 7](#7-create-the-instructors-environments)), then one Flink statement for each of
+    the labs' 17 statements. In the `demo` workspace, always pass `-var-file=demo.tfvars`.
+    Without it, the plan reads the workshop's emails with `deploy_labs` off, so it would tear
+    the demo down and build everyone's stacks in the demo's state. Run `terraform workspace
+    show` before every plan.
+
+4. The presenter runs `uv run deploy`, `uv run ops-sim` and `uv run ops-wall`, as in the
+   walkthrough. If they also have a workshop environment, `uv run deploy` asks which one is
+   theirs: pick the demo's, which `terraform output -raw handout` lists in the `demo`
+   workspace.
+
+`confluent flink statement list` then shows the ten `INSERT`s `RUNNING` and the other 22
+statements `COMPLETED`.
+
+**Only on empty topics.** Turn `deploy_labs` on only in the apply that creates the demo
+environment, or right after `uv run reset`, and never where `ops-sim` has already written
+data. The order the statements start in matters:
+- 2.2, 2.5, 5.1 and 6.1 replay their sources from the earliest offset;
+- the agents' `INSERT`s read from the latest offset;
+- Terraform starts each statement once the one before is running, not once it has caught up.
+
+Over existing data, the agents would call the model for every replayed anomaly, P1 and
+critical finding, and the security agent would call the patch agent for the ones it patches.
+
+### Starting the demo over
+
+1. Stop `ops-sim`, then run `uv run reset`. It stops every statement, drops the five agents,
+   then lab 6.2's tool and connection, and empties all fourteen topics.
+2. Check that the patch agent and its tunnel are still running. If the tunnel's URL has
+   changed, put the new one in `demo.tfvars` as `patch_agent_url`.
+3. Re-apply in the `demo` workspace, with the five agents, the connection and the tool
+   replaced. Terraform still holds their completed `CREATE` statements, so it wouldn't run
+   them again otherwise. The ten `INSERT`s are gone, so the apply starts them again by
+   itself.
+
+    ```bash
+    terraform workspace select demo
+    M='module.developer["presenter@example.com"].confluent_flink_statement'
+    terraform plan -var-file=demo.tfvars -out=terraform.tfplan \
+      -replace="$M.create_release_agent[0]" -replace="$M.create_capacity_agent[0]" \
+      -replace="$M.create_ticket_classifier[0]" -replace="$M.create_ticket_responder[0]" \
+      -replace="$M.create_patch_agent_connection[0]" -replace="$M.create_patch_agent_tool[0]" \
+      -replace="$M.create_security_agent[0]"
+    terraform apply terraform.tfplan
+    rm terraform.tfplan
+    terraform workspace select default
+    ```
+
+    The plan says `17 to add, 0 to change, 7 to destroy`.
+4. Start `ops-sim` again.
+
+Don't use `uv run reset-health` and an apply instead: it empties only the output topics, so
+the sources' history would replay through the agents.
+
+The same steps bring in a lab's changed SQL, or a new tunnel URL. A plain apply would replace
+the changed statements in place: a replaced `INSERT` writes its output topic's rows a second
+time, and a replaced `CREATE AGENT`, `CREATE TOOL` or `CREATE CONNECTION` fails while its
+agent, tool or connection exists. A new `patch_agent_url` changes the connection's statement,
+and `ALTER CONNECTION` can't change an endpoint.
+
+**Tearing it down:** `terraform destroy -var-file=demo.tfvars` in the `demo` workspace, then
+`terraform workspace select default` and `terraform workspace delete demo`. Until then, the
+demo's statements keep running, and its agents call the model, and the security agent the
+patch agent, while `ops-sim` runs.
+
 <details>
 <summary>Reference</summary>
 
@@ -308,8 +432,7 @@ environments, cluster or pool** — the deploy matches them by name.
 
 ### Cost
 
-- **Per developer, apply → destroy:** a Standard Kafka cluster and Flink compute (CFUs on demand, up to `flink_max_cfu`). Developers' own statements keep running — and can keep using compute — until you destroy their stack, even after they run `uv run destroy`. Plus the agents' AI model calls, while the developer's generator runs. The release and capacity agents fire only on anomalies, so their calls track incidents (about 45 an hour per developer). The ticket classifier fires on every P1 ticket and the responder on the ones the classifier calls high severity, so their calls track tickets (about 72 and 36, or 108 an hour per developer).
-- **Per environment, until destroyed:** Stream Governance Advanced (billed per environment, can't be downgraded).
+- **Per developer, apply → destroy:** a Standard Kafka cluster and Flink compute (CFUs on demand, up to `flink_max_cfu`). Developers' own statements keep running — and can keep using compute — until you destroy their stack, even after they run `uv run destroy`. Plus the agents' AI model calls, while the developer's generator runs. The release and capacity agents fire only on anomalies, so their calls track incidents (about 45 an hour per developer). The ticket classifier fires on every P1 ticket and the responder on the ones the classifier calls high severity, so their calls track tickets (about 72 and 36, or 108 an hour per developer). The security agent decides on every critical CVE finding, about 72 an hour per developer, and about 36 of them, the ones it patches, make a second model call after the patch agent answers. The patch agent runs on the developer's laptop and calls no model.
 
 ### Terraform state
 
@@ -323,10 +446,10 @@ or use an encrypted backend (add a `backend` block before the first `init`).
 | File | Purpose |
 |---|---|
 | `versions.tf` / `providers.tf` | Version pins; the Confluent provider configured with your Global key |
-| `variables.tf` | Key/secret, `developer_emails` + validations, `region`, `flink_max_cfu`, `csp_hosted_model` |
+| `variables.tf` | Key/secret, `developer_emails` + validations, `region`, `flink_max_cfu`, `csp_hosted_model`, `deploy_labs`, `patch_agent_url` |
 | `main.tf` | User + key-owner lookups, name suffixes, one `modules/developer` per email |
 | `outputs.tf` | The `handout` table and the `validation` links |
-| `modules/developer/` | One developer's stack: environment, binding, cluster, pool, the five source tables, the five output tables and the model (`statements.tf`) |
+| `modules/developer/` | One developer's stack: environment, binding, cluster, pool, the seven source tables, the seven output tables, `patch_decisions`' Real-Time Context Engine topic and the model (`statements.tf`), and with `deploy_labs` the labs' 17 statements |
 | `tests/` | Offline `terraform test` checks (every provider mocked) |
 
 </details>

@@ -1249,6 +1249,8 @@ admin (the `install_fakes` fixture in `tests/conftest.py`). Wording that said th
 be gone before it empties anything, like `reset-health`: it used to rely on the table drops
 and the agent drops taking long enough, and a still-running INSERT would leave stray rows in
 the topics it has just emptied. A statement that stays up is reported as a problem.
+**Resolved by D-069.** The replacement is the platform team's `deploy_labs`, for a demo
+environment only; attendees still start the labs themselves.
 
 ### D-052 · DECISION · `uv run reset-health`: a clean slate for the detection and the agents
 **What.** An attendee who improves their `service_health` query and re-runs the INSERT
@@ -3305,3 +3307,678 @@ traffic chart draws their lines, and the other rows are as in issue 02's render.
 
 Amends D-032, D-034, D-040, D-043, D-046, D-050, D-056, D-058, D-059, D-060, D-061, D-065, D-066
 and D-067.
+
+### D-069 · DECISION · A demo environment: the platform team's Terraform starts the labs' statements behind `deploy_labs`
+**What.** Showing the finished pipeline meant starting the labs' twelve statements by hand,
+as in the live checks (`.scratch/checkout-tickets/issues/12-live-check.md`, "Start the
+statements"). D-051 removed `reset --with-labs` and left open whether anything replaces it.
+**Options.** (a) A `uv` command that submits the `sql/` files with the presenter's card.
+(b) The platform team's Terraform, behind a switch that is off by default.
+**Choice.** (b), decided with the user in a grilling session on 2026-11-25.
+- `deploy_labs`, a root variable that defaults to `false`, adds the labs' 12 statements to
+  every developer stack in the apply: the INSERTs of 2.2 and 2.5, the two agents of 4.2, the
+  three 4.3 legs, 5.1, then 5.2 and 5.3 (each its agent, then its INSERT). They continue
+  D-037's chain after the model, in lab order. A demo stack has 29 resources.
+- It is for a demo environment only, in its own state: a `demo` workspace with its own
+  `demo.tfvars` and one email. The workshop's apply never sets it, because attendees write
+  these statements (D-050), and the switch covers every environment in the apply.
+- The statements are copied into heredocs from `sql/`, from each statement's first line, and
+  `tests/test_platform_team_sync.py` checks them character for character, because the agents'
+  prompts are multi-line strings. The tables are still compared with whitespace normalized.
+- The agents keep a plain `CREATE AGENT`, as in `sql/`. Confluent's docs now list `CREATE AGENT
+  IF NOT EXISTS`, against D-051's "no `IF NOT EXISTS`". That is untested live, and it would
+  make the copies differ from what attendees type.
+- Everything runs as `principal_id`, like the tables. The developer's own key only exists
+  after `uv run deploy`.
+- Only on empty topics: in the apply that creates the environment, or right after `uv run
+  reset`. The agent INSERTs read from the latest offset, 2.2, 2.5 and 5.1 replay their
+  sources, and `depends_on` waits only until the statement before is RUNNING, not until it
+  has caught up. Over existing data, the agents would call the model for every replayed
+  anomaly and P1.
+- Starting over: stop ops-sim, `uv run reset`, then an apply with `-replace` on the four
+  `create_*_agent` statements, then start ops-sim. Their completed statements stay in state,
+  so only `-replace` runs them again. The INSERTs that `reset` deleted drop out of state and
+  come back on their own. `reset-health` and an apply would not do: the sources would replay
+  through the agents.
+**Why.** The other eleven Flink statements are already the platform team's Terraform, and
+the presenter runs `uv run deploy` and starts ops-sim either way, so a `uv` command saves no
+step. Terraform's costs were accepted for a short-lived demo environment: 12 more copies of
+the SQL, a separate state for the demo, eight long-running INSERTs owned by a person, a
+replaced statement for every SQL change, and the `-replace` on a restart.
+**Not checked live.** A demo apply, the restart's `-replace`, and whether deleting a completed
+`CREATE AGENT` statement leaves the agent (assumed, as for the tables).
+**Impact.** `platform-team/variables.tf` and `main.tf` (the switch, passed to the module);
+`platform-team/modules/developer/statements.tf` (12 resources with `count = var.deploy_labs ?
+1 : 0`), `variables.tf`, `outputs.tf` (`flink_statements` lists the labs' statements when they
+exist) and `main.tf`; `terraform.tfvars.example`; `platform-team/README.md` ("A demo
+environment"); `tests/test_platform_team_sync.py` (the exact copies, the switch, the chain);
+`platform-team/tests/developer_module.tftest.hcl` and `environments.tftest.hcl` (none without
+the switch, all twelve with it, in every environment).
+
+Amends D-051 (its open question) and D-068 ("Terraform runs no INSERT", now true only
+without `deploy_labs`).
+
+**Amended by D-070.** `deploy_labs` starts 17 statements: section 6's five follow 5.3's
+`INSERT`, in lab order (6.1, lab 6.2's connection and then its tool, 6.3's agent, 6.4). The
+connection's endpoint is a new root variable, `patch_agent_url`, in place of 6.2's placeholder,
+the one place a copy differs from its file; a plan with `deploy_labs` and no URL fails. A demo
+stack has 39 resources, and starting over replaces seven statements: the five agents, the
+connection and the tool.
+
+### D-070 · DECISION · Code security incidents: a Streaming Agent that calls an external agent over A2A
+**What.** The workshop shows Streaming Agents that only reason over their input. It should
+also show one that calls an agent running somewhere else and waits for its answer: the
+hierarchical pattern of the user's `dimi-vo/multi-agent-architectures` repo
+(`hierarchical-workflow`), where a Flink agent calls LangGraph agents over A2A. Spec:
+`.scratch/code-security-incidents/spec.md`.
+**Options.** Decided with the user in a grilling session on 2026-11-26 (four rounds). The
+branches that mattered:
+- The external agent on each participant's laptop behind a tunnel they open, or one shared
+  agent. → On each laptop; the presenter's machine and URL are the fallback on the day.
+- What the Streaming Agent checks: whether the vulnerable package ships and is used (free
+  text), a fixed version existing, known exploitation (KEV/EPSS), or production exposure. →
+  The free text. The other three are field checks a `WHERE` can do, so they need no model.
+- One agent that calls the tool and waits, or a decision stage and a separate call stage. →
+  One agent.
+- The external agent with a small local model, or none. → None for now: a LangGraph graph
+  whose one node is a function. A model can come later without changing the Flink side.
+- How the wall learns the external call's start and finish: in the reply, copied by our
+  agent into its answer (a); a Kafka record the external agent writes (b); a local file the
+  wall reads (c). → (a). It works the same in the fallback, where (b) and (c) would lose the
+  external bar on the participants' walls.
+- The decisions in `remediation_decisions`, or a table of their own. → Their own: every
+  reader of `remediation_decisions` would misread them (the wall routes any `ticket_id` to
+  checkout and drops unknown services; `FIX_ACTIONS` keys a label dict; `evaluate` counts
+  unknown agents as misrouted).
+**Choice.**
+- **Story.** `ops-sim` streams CVE scan findings for River Shop's repositories into
+  `cve_scans`, about 4 a minute on their own clock, with a `cve_answer_key`. Lab 6.1 keeps
+  CVSS ≥ 9.0 in `critical_cves`. Lab 6.3's `security_agent` reads the scanner's sentence and
+  answers `PATCH` or `DISMISS`. On `PATCH` it calls `patch_agent_tool` (lab 6.2) with one
+  fixed line, `PATCH <repository> <cve_id> <package> <installed_version> -> <fixed_version>`,
+  waits, and copies the reply into a `Patch:` line. Lab 6.4 writes `patch_decisions`, with
+  the commit and the patch's start and finish parsed out of that line.
+- **`patch_agent`** is started with `uv run patch-agent --public-url <tunnel URL>`: a
+  LangGraph graph with no model, served over A2A by `a2a-sdk` (the latest release), in the
+  main dependencies. It waits 4–10 s, then answers "Patched … in commit <7 hex digits of the
+  request's SHA-1>, started …Z, finished …Z", or echoes a request it can't parse. It accepts
+  any credentials, prints each call, and prints lab 6.2's SQL with its URL filled in, since
+  `ALTER CONNECTION` can't change an endpoint.
+- **Section 6**, "A third architecture: code security incidents". RTCE and Lightning move to
+  sections 7–9, as they moved to 6–8 when the tickets became section 5.
+- **`patch_status`** is derived by the INSERT: `PATCHED` with a commit, `FAILED` for a
+  `PATCH` without one, `N/A` otherwise. The agent is never asked to invent a commit.
+- **Agent settings.** Its own `WITH` block: `max_iterations` 3, `request_timeout` 60. The
+  tool: `request_timeout` 30 and `max_retries` 0, since a retry would patch twice. That keeps
+  one decision under the wall's 60 s give-up.
+- **The model** is `llm_textgen_model`. Confluent's docs don't say that a Confluent-hosted
+  model can call tools, so a live smoke test comes first; if it fails, a Bedrock connection
+  model, as in the multi-agent repo, is brought back to the user before anything builds on it.
+- **The wall** gets a fourth row, "Code security incidents", at the bottom: a laptop with
+  "git" under it, a stream with a dot per finding, a "Scan findings" list (repository and
+  score), and a timeline with a "Security agent" lane and an external lane, dashed, in its
+  own colour, chipped "External · LangGraph · A2A". Our bar is hatched while it waits on the
+  patch agent. It reads "Patch agent unreachable", in red, for a `FAILED` patch and for an
+  `INVALID` whose answer starts "Exception while initializing A2A client", which is what a
+  stopped patch agent gives: Flink fails at its agent card before the model answers, so lab 6.4
+  can't write `FAILED` for it. Any other `INVALID` reads "Invalid answer". Its Issues panel
+  scores against `cve_answer_key`, in spec decision 26's words: critical findings, right
+  decisions, missed ones (wrong, `INVALID`, the unreachable ones among them, or none within 60 s
+  of lab 6.1's record, so a right one that comes later too), and the median times to decide and
+  to patch.
+- **Terraform** creates the four tables and turns RTCE on for `patch_decisions`
+  (`confluent_rtce_topic`). `remediation_decisions` stays a Console step for attendees, as in
+  the reference workshop. Section 6 joins `deploy_labs`, with a `patch_agent_url` variable.
+- **`reset`** drops `security_agent`, then the tool, then the connection (all three take
+  `IF EXISTS`), and empties the four topics.
+- **Deferred.** `evaluate` scoring for the findings, and which tunnel the lab recommends.
+**Why.** It shows the A2A pattern on a story that needs a model (free text decides, not a
+score), keeps the four tuned agents and their readers untouched, and keeps the external side
+trivial, since the showcase is the call, not what the external agent can do.
+**Not checked live.** Issue 02's smoke test (2026-11-26: a throwaway agent on
+`llm_textgen_model` with `patch_agent_tool` and a one-line prompt, `patch-agent` behind a
+cloudflared quick tunnel) answered the first questions. A Confluent-hosted model calls an A2A
+tool, and that agent copied the reply exactly, `→` included. Flink fetches the card at the
+connection's endpoint plus `agent_card_path` on every call, then posts `message/send` (A2A 0.3)
+to `/`, with Basic auth from the connection's username and password on both, and never used the
+card's `http://localhost:8001/` interface. A stopped patch agent fails at the card fetch, before
+the model answers, so the whole agent call's answer is Flink's error alone ("Exception while
+initializing A2A client for agent: … ERROR: Failed to obtain agent card: 502"), which lab 6.4
+writes as `INVALID` and `N/A`, not `FAILED`. Still unchecked: whether `security_agent`, with its
+own prompt and three lines, copies the reply exactly; whether `message/send` goes to the card's
+URL or the connection's endpoint (the same host there); whether a stopped patch agent fails
+`DISMISS` findings too, as the error's place suggests, with which `agent_status` and after how
+long; whether `patch_decisions` records get their Kafka timestamp when written (D-068's
+Pending, again).
+**Impact.** Filled in by the issues under `.scratch/code-security-incidents/issues/`.
+
+Issue 01 (`uv run patch-agent` and lab 6.2's SQL): `pyproject.toml` (`a2a-sdk[http-server]>=1.3.1`
+and `langgraph>=1.2.24` in the main dependencies, the latest releases on 2026-11-26, and the
+`patch-agent` script; `uv.lock` is refreshed but stays untracked). `scripts/patchagent/` (new):
+`reply.py` (the contract, with no I/O: `REQUEST`, the request line's five fields, matched whole,
+with surrounding whitespace and a trailing full stop tolerated and the CVE id in its `CVE-` form;
+`commit_for`, the first 7 hex digits of the request's SHA-1; `format_reply`, "Patched
+CVE-2026-41234 in checkout: bumped urllib3 1.26.4 → 1.26.18 in commit …, started …Z, finished
+…Z" in UTC with milliseconds, or "Patched (<request>) in commit …" with the text echoed on one
+line; `REPLY_COMMIT`, `REPLY_STARTED` and `REPLY_FINISHED`, one numbered group each and nothing
+Java's regex lacks, for issue 07 to test lab 6.4 against), `graph.py` (a `StateGraph` with one
+async node, `patch`, which draws a delay between `--min-delay` and `--max-delay`, 4 and 10 s by
+default, streams it on LangGraph's custom stream, sleeps, and writes the reply; a comment says a
+model node can replace it without changing the A2A side), `executor.py` (an a2a-sdk 1.3.1
+`AgentExecutor`: the task goes submitted, working with "patching… N s", then completed with the
+reply as its `result` artifact, as the multi-agent repo's executor does; an empty request is
+refused as invalid params), `app.py` (the agent card, "Patch Agent" with one skill, "Patch a
+vulnerable dependency", text in and out, its description giving the request line, and the
+`--public-url` interface before `http://<host>:<port>/`, both JSON-RPC and A2A 0.3 as in the
+multi-agent repo, so the 0.3 card's `url` is the tunnel; the JSON-RPC route at `/`, with 0.3's
+method names kept on beside 1.0's; no authentication; at start-up, lab 6.2 with the endpoint
+filled in, or a warning, the file as written and a line saying a tunnel is needed; a block per
+call: the time, the request, "patching… N s", the reply; `--verbose` adds a line per HTTP request
+with its method, path, JSON-RPC method and the Authorization header's scheme, never its value;
+`--port` 8001 and `--host` localhost; a public URL without a scheme, a negative delay and delays
+out of order are refused). `sql/6.2_patch_agent_tool.sql` (new; `CREATE CONNECTION
+patch_agent_connection` of type `a2a` with the endpoint `<your patch-agent URL>` and `workshop`
+as username and password, then `CREATE TOOL patch_agent_tool` with the card's path, a 30 s
+timeout and no retries; the header opens no section and says what the two make, to run them one
+at a time, to start `patch-agent` first, a marked `TODO (tunnel)`, that nothing checks the
+credentials, why there are no retries, and that a new tunnel URL means dropping the tool and the
+connection and creating both again, since `ALTER CONNECTION` changes only credentials). Tests:
+`tests/test_patch_agent.py` (new, offline: the request line and its fields, free text rejected;
+the commit; the reply both ways, its times in UTC, and the three regexes reading it back with the
+finish not before the start; the graph with the delays at 0, and its delay within its bounds;
+the server in-process, delays at 0: the card lists the public URL first, a send-message call
+completes with the reply as its `result` artifact on A2A 1.0's `SendMessage` and on 0.3's
+`message/send`, any basic-auth header or none is accepted, an empty request is refused, each call
+prints its block, `--verbose` prints the scheme alone; the printed SQL is the file with only the
+placeholder replaced; lab 6.2's two statements and their options, no stray apostrophe, the
+placeholder once, no section opened and the tunnel TODO; the CLI's defaults and refusals). A
+local `uv run patch-agent --min-delay 0 --max-delay 0` answered `curl` on both routes, and with
+the default delays one call took 9.5 s. `platform-team/` is unchanged: section 6 joins
+`deploy_labs` in issue 08.
+
+Issue 03 (the finding generator: templates, the scan clock, the answer key, the two source
+tables): `opsgen/finding_templates.py` (new; 20 templates as data, each a `FindingTemplate` with
+an expected action, a `DISMISS` reason, the repositories it may name and the scanner's sentence:
+6 `PATCH`, naming only web-gateway, checkout or payments, where the package is a runtime
+dependency of the deployed service and the vulnerable code is called; 6 `DISMISS`, 2 each for
+`dev_only` (test or build tooling only), `archived` (storefront-legacy only) and `not_called`
+(shipped, no call to the vulnerable function); 8 ordinary findings in any of the five
+repositories; no sentence says "patch" or "dismiss" or holds an apostrophe; the `Advisory` pools,
+6 critical and 6 ordinary, each a fictional `CVE-2026-4xxxx` on a real package with its installed
+and fixed versions, its vulnerable function and what the flaw does, the two pools sharing no CVE
+so a CVE is critical everywhere or nowhere, and `CVE-2026-41234` being the patch agent's urllib3
+example; the `{calls}` pool; `fill`, which draws the advisory, the other placeholders and the
+repository in sorted name order and returns the finding's columns), `opsgen/findings.py` (new;
+`ScanClock`: Poisson(1/15) a tick, 30 % critical, half of those `PATCH` and the rest `DISMISS`
+with the three reasons equally, CVSS 9.0–10.0 for a critical finding and 4.0–8.9 otherwise, one
+decimal, drawn in a fixed order; one id counter, `SCAN-000001` on, a `cve_scans` record and a
+`cve_answer_key` record per finding, both stamped with the tick; off with `--no-incidents`),
+`opsgen/simulation.py` (the clock on `Random(seed + 4)`, which nothing else used; `Tick` gains a
+fifth list, `findings`; `state_snapshot` saves `next_finding_number`, and a state file without it
+starts at 1; the class docstring lists the five generators), `opsgen/driver.py` (findings go to
+the sink; a tick with a finding saves the state; `--simulate` prints a line per finding and ends
+with `# findings: N in M min, X a minute` and the critical ones by expected action, or `#
+findings: off (--no-incidents)`; the banner adds `findings: 1/15s critical=30% PATCH=50%`, and
+reads `no incidents, no tickets, no findings`), `opsgen/sinks.py` (`DryRunSink.emit_findings`:
+the `cve_scans` and `cve_answer_key` stream tags and the console line `FINDING  SCAN-000001
+9.4  checkout  CVE-2026-41234  urllib3 1.26.4 -> 1.26.18  [truth: PATCH]`, or `[truth: not
+critical]`), `opsgen/kafka_io.py` (`FINDINGS_TOPIC` and `CVE_ANSWER_KEY_TOPIC`, their serializer
+contexts, `emit_finding`, `emit_cve_answer_key` and `emit_findings`; raw-string keys, `repository`
+and `finding_id`; schemas looked up, never registered), `opsgen/cli.py` (the live start line
+names the two topics; the docstring; no new flags, so `--show-records` shows no findings),
+docstrings in `opsgen/{__init__,state}.py`. Every caller that unpacked `Tick`'s four lists takes
+the fifth: `scripts/tuning/sweep.py` and the opsgen tests, with `emit_findings` on their recording
+sinks. The tables: `sql/source_cve_scans.sql` and `sql/source_cve_answer_key.sql` (new; the
+columns of spec decisions 8 and 9, `cvss_score` a `DOUBLE`, every column commented, and
+`support_tickets`' options, bucket and 5 s watermark; the answer key's header says it is for the
+wall and `evaluate` only), `schemas/cve_scans.avsc` and `schemas/cve_answer_key.avsc` (new),
+`platform-team/modules/developer/statements.tf` (two statements byte-identical to the SQL,
+chained after `ticket_answer_key` and before `service_error_rate`; the header's counts, 13
+statements and 19 resources, 25 and 31 with `deploy_labs`), `outputs.tf` (both in
+`flink_statements`), `modules/developer/main.tf`, the root `main.tf` and the root `outputs.tf`'s
+validation text (twelve tables). The topic lists, `reset` and the readiness check are issue 04's;
+the platform-team README's counts are issue 11's. Tests: `opsgen/tests/test_findings.py` (new:
+6/2/2/2/8 by category; the five repositories; `PATCH` and `not_called` naming only the three
+services, `archived` only storefront-legacy, ordinary ones any; every placeholder has a pool and
+every template fills with none left over, its columns the advisory it names; the same seed fills
+the same; fictional unique CVE ids, each fixed version above its installed one, the spec's
+urllib3 example; no "patch", "dismiss" or apostrophe; one or two sentences; each critical
+template's cues by keyword, shipped and called for `PATCH`, shipped and not called for
+`not_called`, dev or build tooling for `dev_only`, archived for `archived`, and no advisory or pool
+value adding one; the rate, the critical share and the `PATCH` share over 20 hours, and the three
+reasons about a third each; the scores' ranges and both ends; one answer key per finding on the
+same tick, null exactly when not critical; ids from `SCAN-000001`, increasing through a restart
+from the state file, saved on every tick with a finding, and from 1 with a pre-D-070 state file;
+findings on, off or 30 times as many leave metrics, deploys, incidents and tickets as they were;
+the clock on `seed + 4`; the same seed gives the same findings; `--no-incidents` gives none),
+`opsgen/tests/test_output.py` (the dry-run records and console lines, a live tick sending both
+streams with the DDL's columns, `--show-records` changing nothing for findings, the `--simulate`
+lines from the first minute, their summary, the banner, and both clocks off with
+`--no-incidents`), `opsgen/tests/test_tickets.py` (tickets on, off or many leave the findings
+too), `tests/test_kafka_io_and_rtce.py` (a finding to `cve_scans` keyed by its repository and its
+answer key to `cve_answer_key` keyed by its id, never registering), `tests/test_schema_vs_ddl.py`
+(both pairs, the columns in order, `support_tickets`' tail, every column commented and the answer
+key's header), `tests/test_platform_team_sync.py` (`COPIED_TABLES`, twelve tables, the chain), and
+in `platform-team/tests/` the counts (13, 25) and a plan run on the two tables' options.
+`uv run ops-sim --dry-run --simulate 15 --seed 1` gives 63 findings, 20 critical (13 `PATCH`, 7
+`DISMISS`), and leaving out the finding lines, the banner and the closing summary, the same output
+line for line as the branch's base. The templates wait on the user's approval (issue 03's
+Comments) before issue 06 takes its examples from them.
+
+Issue 04 (`critical_cves`, `patch_decisions`, RTCE, the topic lists, reset, reset-health and
+readiness): `sql/sink_critical_cves.sql` (new; `cve_scans`' nine columns and the WITH block,
+bucket and 5 s watermark of `p1_tickets`, which are `support_tickets`'; the header says lab 6.1
+writes it, lab 6.4 reads it, that a score under 9.0 in it is a filter leak, and that
+read-uncommitted spares the security agent a wait of about a minute per finding, D-063),
+`sql/sink_patch_decisions.sql` (new; the finding's `event_time`, `finding_id`, `repository`,
+`cve_id` and `cvss_score` `DOUBLE`; `action` STRING NOT NULL, `PATCH`, `DISMISS` or `INVALID`,
+and `reason`; `patch_status` STRING NOT NULL, `PATCHED`, `FAILED` or `N/A`, worked out by lab
+6.4 and not the agent, `commit_sha`, and `patch_started_at` and `patch_finished_at`
+`TIMESTAMP(3)`, null unless parsed; `raw_response`; the same options; the header says lab 6.4
+writes it, that Terraform turns RTCE on for it, and that nothing in it says what the finding
+really called for). Terraform: `platform-team/modules/developer/statements.tf` (both statements,
+byte-identical to the SQL, chained after `ticket_triage`, the model's `depends_on` moved to
+`patch_decisions`; a `confluent_rtce_topic.patch_decisions` with the cluster's cloud and region,
+the environment, the cluster, `topic_name` and the description the provider requires, waiting
+for the table's statement and off the chain, since nothing waits for it; the header's counts,
+15 statements and 22 resources per developer, 27 and 34 with `deploy_labs`), its `outputs.tf`
+(both keys in `flink_statements`, and a new `rtce_topics` output, by topic with its environment
+and cluster, since the root's tests can't reach a module's resources), its `main.tf`, the root
+`main.tf` and the root `outputs.tf`'s validation text (fourteen tables), `platform-team/README.md`
+(step 5: `confluent rtce region list` must list the region now, since the apply turns RTCE on;
+the rest of the README's counts are issue 11's). The lists: `SOURCE_TOPICS` in
+`scripts/common/topics.py` gains `cve_scans` and `cve_answer_key`, `OUTPUT_TOPICS`
+`critical_cves` and `patch_decisions`, so `uv run reset` empties all fourteen, `uv run
+reset-health` deletes whatever writes the two new tables (lab 6.1's and 6.4's INSERTs) and
+empties them, and the readiness check of `uv run deploy` checks all fourteen tables;
+`scripts/reset.py` (`LAB_AGENTS` gains `security_agent`; after the five agents, `DROP TOOL IF
+EXISTS patch_agent_tool` and then `DROP CONNECTION IF EXISTS patch_agent_connection`, each
+reported like an agent, a failed one a problem without stopping the rest; the docstring, the
+`--keep-source` help, and the closing lines name the INSERTs of 6.1 and 6.4 and lab 6.2's
+connection and tool beside the agents of 6.3), `scripts/reset_health.py` (the docstring, the
+help and its seven tables, and a fourth next step: 6.1, then 6.4's INSERT once 6.1 has caught
+up, with `uv run patch-agent` and its tunnel started first),
+`scripts/preprovisioned/provision.py` (docstring and comment counts), `scripts/setup_rtce.py`
+(a `patch_decisions` Lightning example, the latest five `PATCHED` decisions with their commits,
+so `--lightning patch_decisions` works). The checks: `sql/checks/remediation_call_rate.sql`
+(section 6's rows: `critical_cves` rows, `patch_decisions` rows, the `PATCH` decisions, one
+patch agent call each, and the `PATCHED` ones) and its README. Tests:
+`tests/test_schema_vs_ddl.py` (both tables' columns in order, `action` and `patch_status` the
+only NOT NULL columns, each naming its three values, the two patch times `TIMESTAMP(3)`,
+`p1_tickets`' tail, and a comment without an apostrophe on every column),
+`tests/test_platform_team_sync.py` (fourteen tables; the chain with the two after
+`ticket_triage`; the RTCE topic on `patch_decisions`, waiting for its table; a resource body
+now ends at the next resource of any type), `tests/test_reset.py` (fourteen topics, the source
+topics being every `*_TOPIC` in `opsgen/kafka_io.py`; the five agents, then the tool, then the
+connection, each with `IF EXISTS`, and how each is reported; a failed agent or tool drop exits
+nonzero after the rest are dropped; the next steps), `tests/test_reset_health.py` (seven
+topics; the matcher on both INSERTs and not on the two CVE sources; both deleted and emptied;
+the seven tables named; the next steps in lab order, with "once 6.1 has caught up"),
+`tests/test_preprovisioned_readiness.py` (fourteen tables; each missing CVE table names the
+platform team), `tests/test_kafka_io_and_rtce.py` (the `patch_decisions` example and its curl),
+and in `platform-team/tests/` the counts (15, 27), a plan run on the two tables' options and NOT
+NULL columns, an apply run on the RTCE topic's environment, cluster, cloud, region and
+description and on `rtce_topics`, and a root run checking every environment has one, on
+`patch_decisions`, in its own environment and cluster.
+
+Issue 05 (lab 6.1, route the critical findings): `sql/6.1_critical_cves.sql` (new; one INSERT
+from `cve_scans` into `critical_cves`, the nine columns named in `critical_cves`' order, rather
+than `SELECT *`, and `WHERE cvss_score >= 9.0` its only filter; no hint, so it reads from the
+table's default, the earliest offset, and replays up to 24 hours of findings; the header opens
+section 6, "A third architecture: code security incidents": a scanner reports CVEs in River
+Shop's repositories, each with a CVSS score, Flink keeps the critical ones, 9.0 and above,
+CVSS's own "Critical" band, so only they reach the security agent and its model calls, and the
+rest stay in `cve_scans`; a critical score is not always a real risk (a dev dependency only, an
+archived repository, vulnerable code never called), so the agent of 6.3 reads where the package
+sits and only then calls the external patch agent of 6.2; `critical_cves` already exists
+(Terraform), so this one statement is all you write; start 6.4's INSERT once 6.1 has caught up,
+as `reset-health` says; running it twice copies every finding twice, and `uv run reset-health`
+starts clean). Tests: `tests/test_sql_pipeline.py` (one statement, from `cve_scans` into
+`critical_cves`; the score its only filter, with no join; `critical_cves`' DDL columns, read from
+`sql/sink_critical_cves.sql`, named bare and in order; no hint and no `scan.startup.mode`,
+against `cve_scans`' earliest-offset default; the header's first line opens section 6, the
+counterpart of 6.2's test that it doesn't; the module docstring names section 6). Nothing else
+needed the lab: `reset`, `reset-health`, the call-rate check and its README name 6.1 since issue
+04, and `deploy_labs` starts none of section 6's statements until issue 08.
+
+Issue 06 (lab 6.3, the security agent): `sql/6.3_security_agent.sql` (new; `CREATE AGENT
+security_agent USING MODEL llm_textgen_model`, the prompt, then `USING TOOLS patch_agent_tool`,
+the only `USING TOOLS` in the workshop, and a `WITH` block of its own: `handle_exception`
+continue, `max_consecutive_failures` 3, `max_iterations` 3, which no other agent sets, and
+`request_timeout` 60. The prompt in 5.2's and 5.3's order: the three lines, `Action: [PATCH |
+DISMISS]`, `Reason: [one or two sentences]` and `Patch: [the answer from patch_agent_tool, copied
+exactly | N/A]`, reworded from "the patch agent's answer" for the apostrophe rule; four examples,
+each a finding shown as lab 6.4 will show it (`FINDING <id> in <repository>`, `CVE: <cve_id>
+(CVSS <score>)`, `Package: <package> <installed_version>, fixed in <fixed_version>`, `Scanner
+said:`) and filled in from an approved template and a critical advisory: `PATCH` from template 3,
+jsonwebtoken in payments, with the request it sends (`PATCH payments CVE-2026-46471 jsonwebtoken
+8.5.1 -> 9.0.0`) and the reply patch-agent gives that request (commit `e73f47b`, a 6.4 s patch),
+copied into its Patch line; `dev_only` from template 7, jackson-databind in checkout; `archived`
+from template 10, lodash in storefront-legacy; and `not_called` from template 12, the same
+jsonwebtoken CVE in web-gateway, so one critical flaw shows up on both sides and only where the
+package sits tells them apart; the role, River Shop's application security engineer; rule 1,
+`PATCH` when both hold (a runtime dependency of a deployed service, and the vulnerable code used),
+rule 2, `DISMISS` when any of the three reasons holds, then "The CVSS score is always critical
+here. It never decides on its own."; the tool, only for `PATCH`: one call with exactly the
+request line and nothing else, its answer copied exactly into the Patch line, `Patch: FAILED` and
+a few words if the call fails, never a commit the tool did not return, and on `DISMISS` no call
+and `Patch: N/A`; strict values. The header: the input and the output, why a critical score is
+not enough, the tool and why only this agent has `max_iterations`, the 60 s against the wall's
+give-up and the tool's 30 s, that the tool and `patch-agent` must exist, and that `uv run reset`
+drops the agent). Tests: `tests/test_agent_sql.py` (the security agent joins `AGENT_FILES`,
+`OUTPUT_LINES` with `Action:`, `Reason:` and `Patch:`, and `ALLOWED_ANSWERS` with `PATCH` and
+`DISMISS` from `opsgen/finding_templates.py`, where lab 6.4's tests will find them, so the
+per-agent tests hold it to its lines in order and no other agent's, an example per action and no
+other, the actions stated in STRICT VALUES, no apostrophe and the failure handling; the prompt is
+read up to `USING TOOLS` or `WITH`; its own tests: the three lines; the rules in order with their
+cues; `USING TOOLS` naming the tool lab 6.2 creates, the prompt naming it too, no other file in
+`sql/` with `USING TOOLS` and no other agent with `max_iterations`; the tool rules; the stated
+request line holds `REQUEST`'s fields in its order and, filled in with any critical advisory,
+parses back into them; one `PATCH` example and one `DISMISS` per reason, each an approved
+critical template expecting its action, filled with the advisory its CVE line names, a
+repository the template may name and a value of each pool, with no placeholder left, a critical
+score and an id of its own; the `PATCH` example's request is the stated line filled in from its
+finding, its reply is `format_reply`'s for that request with a delay within patch-agent's
+bounds, and its Patch line is that reply; the `DISMISS` examples call nothing and write `N/A`;
+each Reason names its cue; the four `WITH` options, and a `request_timeout` longer than the
+tool's). `platform-team/` is unchanged: section 6 joins `deploy_labs` in issue 08.
+
+Issue 07 (lab 6.4, the security agent's INSERT): `sql/6.4_insert_security_agent.sql` (new; one
+INSERT from `critical_cves`, read from the latest offset in a derived table with no WHERE, into
+`patch_decisions`, its values in the DDL's order: the finding's `event_time`, `finding_id`,
+`repository`, `cve_id` and `cvss_score` as they came; `action`, the capacity leg's `CASE` with `IN
+('PATCH', 'DISMISS')`; `reason`, the Reason line read to the end of its line (`[^\n]+`), since the
+Patch line follows it; `patch_status`, `PATCHED` when the call succeeded, the Action line says
+`PATCH` and the Patch line holds a commit, `FAILED` for such a `PATCH` without one, and `N/A`
+otherwise, all three in one flat `CASE` that repeats the Action test, keeping 5.2's shape;
+`commit_sha`, `patch_started_at` and `patch_finished_at`, each the first match on the Patch line of
+`\*{0,2}Patch:\*{0,2}[^\n]*?` followed by `REPLY_COMMIT`'s, `REPLY_STARTED`'s or `REPLY_FINISHED`'s
+pattern, whatever the action, the times through `TO_TIMESTAMP` with `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'`
+(its quotes doubled in the SQL string), null when they do not parse; `raw_response`. The input is
+one `CONCAT` in the format of 6.3's examples, `FINDING <id> in <repository>`, `CVE: <cve_id> (CVSS
+<score>)`, `Package: <package> <installed_version>, fixed in <fixed_version>` and `Scanner said:
+<finding>`, with each text column in `COALESCE(…, 'N/A')` and the score cast bare, since 6.1 copies
+no null score. The header: what it reads and writes; the latest offset, since every row is a model
+call and, on `PATCH`, a call to the laptop; start it after 6.1's replay, with `patch-agent` and its
+tunnel running; the parsing; `patch_status` worked out here, not by the agent; a stopped
+patch-agent's answer, Flink's agent card error (issue 02), is `INVALID` and `N/A`; the time zones,
+checked: `event_time` holds UTC (ops-sim's epoch milliseconds in a `TIMESTAMP(3)`, which the wall
+reads as UTC), and `TO_TIMESTAMP` reads a string "under the 'UTC+0' time zone" (Confluent's
+reference, read on 2026-11-26) into a `TIMESTAMP(3)`, whatever the workspace's session zone, so the
+patch's times are UTC as well, where `TO_TIMESTAMP_LTZ` and a cast would have brought the session
+zone in (D-054); the `COALESCE`s; running it twice writes every decision twice). Tests:
+`tests/test_agent_sql.py` (6.4 joins `INSERTS`, so the latest-offset, `INVALID`, call-by-name,
+arity, select-star, `ESCALATE` and input-label rules hold for it; the Reason test takes two endings,
+to the end of the answer when Reason is the agent's last line, to the end of its line when another
+follows; a small evaluator of the SQL the INSERT uses, with Flink's null rules, Java's find for
+`REGEXP_EXTRACT` and `TO_TIMESTAMP`'s pattern turned into `strptime`'s, runs the select list and
+the input on findings and answers: one statement with no filter; the columns in the DDL's order,
+the finding's five copied; the action `CASE` the capacity leg's with the two actions; the labels
+6.3 declares, the three patch patterns being the reply patterns after the Patch label; the reply
+contract, `format_reply` for a parsed and an unparsed request with times given in CET, giving back
+the commit and both times in UTC, 1.62 s after the finding's `event_time`; `patch_status` for
+eleven answers: a patch, the same in markdown bold or after the example's tool lines, `Patch:
+FAILED`, a reply copied without its commit, no Patch line, a `DISMISS`, an action out of the set
+(its commit still read), issue 02's A2A error with `SUCCESS` or another status, and a failed
+call whose answer says `PATCH`; the input built from each of 6.3's examples is that example's four lines, word for word; a
+null in any text column still gives an input; each of 6.3's example answers parses back to its
+action and reason, the `PATCH` one to `PATCHED` with its request's commit and its reply's times;
+the header). `platform-team/` is unchanged: section 6 joins `deploy_labs` in issue 08.
+
+Issue 08 (section 6 behind `deploy_labs`): `platform-team/modules/developer/statements.tf` (five
+statements with `count = var.deploy_labs ? 1 : 0`, on the chain after 5.3's `INSERT` in lab
+order: `insert_critical_cves`, `create_patch_agent_connection`, `create_patch_agent_tool`,
+`create_security_agent` and `insert_security_agent`, each heredoc generated from its file,
+lab 6.2's being two, the connection and then the tool; the connection's endpoint is
+`${var.patch_agent_url}` in place of `<your patch-agent URL>`, the one difference, and a comment
+says the password is in the SQL text as in the file, so in the state and the Console, since
+Flink requires one and patch-agent checks neither, and that a new URL replaces the statement,
+which fails while the connection exists; a `precondition` on the connection fails the plan when
+the URL is empty, rather than a validation on the variable, which could read `deploy_labs` only
+from Terraform 1.9, against the root's `>= 1.3.0`; the header's counts, 32 statements and 39
+resources with `deploy_labs`; the labs' comment: seventeen, 6.1 among the replays, 6.4 among
+the latest-offset reads, and `-replace` on the five agents, the connection and the tool), its
+`variables.tf` (`patch_agent_url`, no default, like the module's other inputs), `outputs.tf`
+(the five in `lab_statements`), the root `variables.tf` (`patch_agent_url`, a string defaulting
+to `""`, with a validation: empty, or a URL with an `http` or `https` scheme, no space or
+apostrophe, since it goes into a SQL string, and no trailing slash, since Flink adds the card's
+path to it, where patch-agent strips one; `deploy_labs`' description, 17 statements and the
+URL; `flink_max_cfu`'s description names 6.1 and 6.4 as two more long-running statements, not
+yet checked against 10), the root `main.tf` (passes it), `terraform.tfvars.example` (beside
+`deploy_labs`), `platform-team/README.md` ("A demo environment": the 17 statements; the URL, the
+plan failing without it and the password in the SQL text; a first step, starting `uv run
+patch-agent` and its tunnel and keeping both running while `ops-sim` runs, since Flink fetches
+the card on every call, issue 02; `patch_agent_url` in `demo.tfvars`; 39 to add; ten `INSERT`s
+running and 22 statements completed; 6.1 among the replays; starting over: `reset` drops five
+agents, the tool and the connection and empties fourteen topics, the URL checked, `-replace` on
+seven statements, `17 to add, 0 to change, 7 to destroy`; a new tunnel URL takes the same
+steps; and the Files table). Tests: `tests/test_platform_team_sync.py` (the five in
+`COPIED_LAB_STATEMENTS`, 6.2 twice; the extractor splits a file at `INSERT INTO`, `CREATE
+AGENT`, `CREATE CONNECTION` and `CREATE TOOL` and copies a file's statements in its order; each
+copy character for character, with `PLACEHOLDER`, imported from `scripts/patchagent/app.py`,
+replaced by `${var.patch_agent_url}` for the connection alone; every statement of a copied file
+copied; the placeholder once in 6.2, as its endpoint, and in no heredoc;
+no copied file holding `${` or `%{`, which a heredoc would read as a template; the five behind
+the switch; the chain), `platform-team/tests/developer_module.tftest.hcl` (none of the
+seventeen without the switch; with it and a URL, 32 statements, the ten `INSERT`s' targets, the
+five agents on `llm_textgen_model`, the security agent's `USING TOOLS`, the connection's
+endpoint the URL with no placeholder left, the tool on the connection; with it and no URL, the
+plan fails on the connection), `environments.tftest.hcl` (32 statements in every environment
+with the switch and a URL; a URL without its scheme or with a trailing slash fails the plan on
+the variable). Amends D-069 (its "Amended by D-070" paragraph).
+
+Issue 09 (the wall's consumer, state and snapshot for the "Code security incidents" row):
+`scripts/opswall/consumer.py` (four more threads, fourteen, each from about 600 s back:
+`cve_scans`, `critical_cves` with its Kafka timestamp, `cve_answer_key`, `patch_decisions` with
+its Kafka timestamp; no key decoded), `scripts/opswall/state.py` (a `Finding` per `finding_id`,
+filled in from the four topics in any order as a ticket is: the scan's fields from the first
+record that carries them, `critical_at` the `critical_cves` record's Kafka timestamp, the
+decision's action, reason, patch status, commit, patch start and finish and its answer's Patch
+line, `decided_at` its Kafka timestamp, a record written twice keeping its first timestamp and the
+newer content, and `expected_action` from the answer key; `apply_finding`,
+`apply_critical_cve`, `apply_cve_answer_key` and `apply_patch_decision`, which never goes near
+`apply_decision`; trimmed like tickets; `CRITICAL_CVSS` 9.0, lab 6.1's rule; the row, `row:
+"security"`, "Code security incidents", appended after the three services by its own function:
+the security agent's run from the `critical_cves` record, or from the finding's `event_time`
+when only the decision has come, to the decision, reading "Patched in 12s", "Dismissed in 8s",
+"Patch agent unreachable" (`FAILED`, flagged `unreachable` for the page's red) or "Invalid
+answer" (`INVALID`), open ("Working 3s") for 60 s and then "No answer"; the external run from the
+patch's start to its finish once the decision has brought both, labelled with the commit and the
+duration and carrying the reply, its times and its duration; the hatch, `waitFrom`/`waitTo` on
+our run, the part of our bar the patch covers, since the laptop's clock and Kafka's can disagree;
+marks for every finding of the last 2 minutes with its CVE id and whether it is critical; the
+newest 5 findings with their repository, CVE, score, critical flag and `eventTime`, and "N
+scanned" over 600 s; the two lanes, "Security agent" with its state and "External · LangGraph ·
+A2A" with none, since the wall hears of the external call only when our agent answers;
+`openCriticals` and "Agent on critical CVE"; the Issues panel in the services' keys, over the
+critical findings of the last 10 minutes with an answer key: detected the right ones, missed the
+wrong, `INVALID` or undecided 60 s after lab 6.1's record, finding -> decision and finding -> the
+patch's finish for `PATCHED` ones), `scripts/opswall/server.py` (`/healthz`'s `serviceCount`
+stays 3: it counts services, and the new row is none), docstrings in
+`scripts/opswall/{app,consumer,state}.py`. A stopped patch agent's decision, `INVALID` and `N/A`
+(issues 02 and 07), reads "Invalid answer", draws no external bar and counts as missed; spec
+decision 24's red words show only for `FAILED`. Tests: `tests/test_opswall_state.py` (the row
+last, with its keys and its empty shape; a `PATCH` gives our closed bar hatched over the
+external one inside it; a `DISMISS` one bar; `FAILED` and `INVALID` their words; a stopped patch
+agent; no decision, open for 60 s and then "No answer", closed late by a decision; the external
+bar only once the decision has come, and only with both times; the hatch clipped to our bar; a
+decision without its `critical_cves` record; a critical finding nobody routed gets no bar; the
+marks; the list's order and the 10 s rule's fields; the header count and the lanes; the Issues
+numbers, a `DISMISS` that called the tool anyway left out of the time to patch; the four records
+in any order; written twice; trim; a run off the timeline and one clipped at its edge; the
+critical line against lab 6.1; the three service rows unchanged, and the snapshot-shape tests
+taking the fourth row), `tests/test_opswall_ingest.py` (a record from each finding topic through
+the real Avro path, with the Flink schemas of `critical_cves` and `patch_decisions`, reaching
+the row; fourteen threads, the four new ones from 600 s back, the two lab tables with their Kafka
+timestamps), `tests/test_opswall_server.py` (`serviceCount` 3; the websocket's four rows and the
+security row's empty shape). Until issue 10, the page draws the row as an empty chart row.
+
+Issue 10 (the "Code security incidents" row on the page): `scripts/opswall/static/opswall.js`
+(`updateRow` gains the `"security"` branch: the `security-row` class, no charts, and the remediate
+block's title, "Measured from the finding's scan to the patch agent's finish, patched findings
+only". The ticket row's timeline becomes `timelineHTML`, `timelineParts` and `updateChips`, each
+given its title and its lanes, and `placeLabels` reads the timeline's own lanes, so checkout keeps
+its look. `createSecurityBody` and `updateSecurityRow` draw: web-gateway's laptop with "git" under
+it; a line with the ambient dots; "Scan findings", "N scanned" and the newest 5, each its
+repository, its CVE and finding ids and "CVSS 9.8", a critical row in the accent; a new id among
+them, not on the first snapshot and at most 10 s old, sends a packet along the line (in the
+accent when one of them is critical, bright otherwise), rings the laptop and fades its row in, as
+checkout's tickets do; "Open criticals N" in the header, N in the accent above 0; the timeline,
+"Findings and agent runs", with its "Security agent" and "External · LangGraph · A2A" lanes at
+checkout's lane tops and nothing on the right of its title, since the row has one agent of ours
+and its chip says whether it works; a critical finding's mark, a full-height accent line with
+its CVE id, the others short dashed ticks; our bars in the accent, hatched between `waitFrom`
+and `waitTo` as a share of the bar, with "Patch agent unreachable" in red when `unreachable`; the
+external bars dashed all round in a colour of their own; the tooltips: ours the CVE and its
+repository, the finding id, score, lane and label, the action ("No PATCH or DISMISS came back."
+for `INVALID`, "Waiting for the security agent." while open, "The security agent gave no
+answer." after 60 s), the commit or, for `FAILED`, "No commit came back.", "Waiting on patch
+agent for 6s, the hatched part." and the reason; the external one the patch's start and finish
+in local time, its duration and the patch agent's reply), `scripts/opswall/static/opswall.css`
+(`--external`, `#C4A7FF`, which no ticket lane uses; the laptop, "git", packet and list; the two
+marks; the hatch, a repeating gradient in the lane's colour; the external bar and chip square
+dashed; the row's healthy status green and "Open criticals" styled as checkout's "Open P1"; the
+new row's fade stopped under `prefers-reduced-motion`). `state.py` is unchanged: the page draws
+issue 09's snapshot as it is, so a stopped patch agent's `INVALID` reads "Invalid answer" in
+grey. The page has no tests. A throwaway harness, issue 10's
+`.scratch/code-security-incidents/research/issue10_wall_render.py`, serves the real app from the
+real Simulation and stand-ins behind a clock it holds and checks 154 things in headless Chrome: five frames (a `PATCH` with its hatch
+and external bar beside an open run, a `DISMISS`, a `FAILED`, an `INVALID`, a "No answer"), the
+two tooltips on hover, the dots live (none on the first snapshot, accent, bright, none for a
+25 s-old backread), and the three service rows byte for byte as HEAD's page draws them, at
+1440 and 820 px, at three moments, two of them with checkout bars.
+
+Issue 11 (the docs): `README.md` (the opening paragraph tells four stories with five Streaming
+Agents, three lines longer: a scanner reports CVEs in River Shop's repositories, Flink keeps the
+critical ones, and a security agent decides whether each matters; when one does, it calls an
+external LangGraph agent on your laptop over A2A and records the commit it returns in
+`patch_decisions`; coding agents reach that table and `remediation_decisions` through the
+Real-Time Context Engine, and Lightning Queries read them over REST; `ticket_triage` is no longer
+named, to keep the length), `platform-team/README.md` (the Real-Time Context Engine and Lightning
+are sections 7–9, in steps 5 and 8; "What this does": the pool sized for ten long-running
+statements, 6.1 and 6.4 among them and not yet checked against 10, seven source and seven output
+tables, and RTCE on `patch_decisions`, with `remediation_decisions` still a Console step; step 6:
+developers run `uv run patch-agent` and a tunnel in front of it in section 6, so their laptops
+need outbound access for the tunnel, which tunnel is still a TODO, what the smoke test saw (a
+cloudflared quick tunnel registered only with `--protocol http2`, on a network that blocks
+outbound UDP on port 7844, which QUIC, its default transport, uses), and the presenter's patch
+agent as the fallback; step 7: 22 resources per person and their list, the four tables and the
+RTCE topic among them, and all fifteen statements `COMPLETED`; step 9: 22 per new person;
+"Updating stacks you built earlier": a stack applied before D-070 needs nothing dropped; the
+readiness row: fourteen tables; the cost paragraph: about 72 security-agent decisions an hour per
+developer, about 36 of them, the ones it patches, making a second model call after the patch
+agent answers, and the patch agent calls no model; the demo's 39 point at step 7's list alone; the
+files table; issue 08 had already written `patch_agent_url` and the demo restart's seven
+`-replace`s), `platform-team/modules/developer/statements.tf` (a comment: the agent SQL that names
+`llm_textgen_model` is sections 4 to 6). No test: the issue is docs. A grep of the tracked tree,
+apart from `DECISIONS.md`, `PLAN.md`, `checkpoints/` and `inspiration/`, finds no "three
+stories", "four Streaming Agents", "four agents", "sections 6–8", "ten tables" or "ten topics",
+nor "17 per person", "eleven statements", "five source tables", "five output tables" or "sections
+4 and 5"; "eight long-running statements" stays in `flink_max_cfu`'s description, which adds
+section 6's two. The repo still has no markdown link check. A one-off check of the 32 relative
+links and anchors in its tracked markdown finds the same five as D-068's: `PLAN.md` (gitignored)
+and the four `docs/tracks/PRE-PROVISIONED.md` links, which stay until the walkthrough is written.
+
+Code review fixes (the review of issues 01–11 on 2026-11-26,
+`.scratch/code-security-incidents/review-2026-11-26.md`, fixed in three passes). Pass 1, the
+spec's findings: `scripts/opswall/state.py` (S-c1, the user's decision: our bar reads "Patch
+agent unreachable", flagged `unreachable` for the page's red, for `FAILED` and now also for an
+`INVALID` whose answer starts "Exception while initializing A2A client", `CARD_FAILED_ANSWER`,
+read from `raw_response` into the finding's `card_failed`, since that is what a stopped patch
+agent gives; it is still a miss, as every `INVALID` is; S-c3: a right decision is the expected
+action within 60 s of lab 6.1's record, of the finding without one, when our bar gives up, and
+one that comes later is missed however right it is, where checkout's rule counted it as
+detected; the time to decide still counts it; the module docstring), `static/opswall.js` (S-a1:
+the security row's Issues panel takes spec decision 26's words, "Critical findings", "Right
+decisions", "Median time to decide" and "Median time to patch", set once when its body is made,
+so the services' labels and `updateRow` are as they were; the comments),
+`sql/checks/remediation_call_rate.sql` (S-c2: the header puts `PATCHED decisions` short of
+`PATCH decisions` down to `FAILED` patches alone, a call that failed or timed out or a reply not
+copied exactly, and says a stopped patch agent shows up as `INVALID` instead, with `PATCH
+decisions` falling behind half of `patch_decisions rows`). This entry: "Not checked live" says
+what issue 02 found and keeps what it left open (S-a2), and the Choice's wall bullet says what
+is built (S-c1), as spec decisions 24 and 26 now do. Tests: `tests/test_opswall_state.py` (a
+stopped patch agent's `INVALID`, on a `PATCH` and on a `DISMISS` finding, reads "Patch agent
+unreachable" with `unreachable`, no commit and no hatch, and is a miss; an `INVALID` that quotes
+the error after an answer of its own stays "Invalid answer"; a right decision 60 s after lab
+6.1's record is right, and 60.5 s after it, 89 s after it, wrong and late, or late with no lab
+6.1 record, missed, each once, with the time to decide and to patch counting the late ones),
+`tests/test_agent_sql.py` (lab 6.4 writes issue 02's error as `INVALID` and `N/A`, with `SUCCESS`
+or another status, and the call-rate check's header says a stopped patch agent gives `INVALID`
+and blames `PATCHED` short of `PATCH` on `FAILED` alone). Offline render with issue 10's
+harness, given an "unreachable" frame (issue 02's error as the whole answer) and the Issues
+panel's words (`research/review-fix-1/`): 8 of 182 checks failed before the change (the labels
+in all six frames, and that frame's label and tooltip) and 182 of 182 pass after it; the
+stopped patch agent's bar reads "Patch agent unreachable" in red, with no external bar and "1
+missed"; the labels fit at 1440 and 820 px; and the three service rows are the same PNG, byte
+for byte, as HEAD's page draws them, at 1440 and 820 px, at T and at the two moments with
+checkout bars. Pass 1's two loose ends, in a commit of their own: the stopped patch agent's
+tooltip says "The patch agent could not be reached, so no decision came back." in place of "No
+PATCH or DISMISS came back. No commit came back." (`static/opswall.js`; the harness checks the
+sentence, 1 of 182 checks failing before and 182 of 182 after, `research/review-fix-1b/`, the
+service rows byte for byte as before), and the spec's Pending list gives what issue 02 answered
+as answered and keeps the rest. Pass 2, the Python smells, a refactor: `scripts/opswall/state.py` (M1:
+a ticket's runs and a finding's share one `_Run` and one `_run`, the answered, open and "No
+answer" logic, given the row's wait, `TICKET_WAIT_SECONDS` (30 s, was `RUN_WAIT_SECONDS`) or
+`SECURITY_WAIT_SECONDS` (60 s), and what an answer reads; one `_run_json` for a bar's key, lane,
+place and label, each row adding its ticket's or finding's fields and the lane's tooltip; one
+`_lanes_json`; one `_latest` for what `trim()` drops them by; one `_fill`, with one rule: a field
+a record leaves empty, None or "", waits for a record that carries it, as a ticket's did, where a
+finding's kept an empty string, and a CVSS of 0.0 is still a score; M6: a `Lane`, its key, name
+and whether the page says Working or Idle, for each of the four lanes, so the security row no
+longer reads `SECURITY_LANES[0][1]` or writes its lanes by hand, and `PATCH` and `DISMISS` come
+from `opsgen.finding_templates`; M4 and M5: our agent's lane is `SECURITY_AGENT_LANE`, apart from
+the row kind `SECURITY_ROW` though the snapshot still says "security" for both, `_wait` is
+`_hatch`, our bar's words come from `DECIDED_WORDS`, and `Finding` no longer keeps the scanner's
+sentence, which the wall never read), `opsgen/findings.py`, `sinks.py` and `kafka_io.py` (M4:
+`NewFinding.finding` is `NewFinding.scan`, the `cve_scans` record; M3: one `KafkaSink._produce`
+for every record keyed by a raw string, so `emit_ticket`, `emit_answer_key`, `emit_finding` and
+`emit_cve_answer_key` are gone, and `FINDINGS_TOPIC` is `CVE_SCANS_TOPIC`),
+`opsgen/finding_templates.py` (M4: `FindingTemplate.finding` is `.sentence`), `scripts/reset.py`
+(M4: `_drop_agents` is `_drop_lab_objects`; M7: "Dropping the 5 agents..." and `--keep-source`'s
+"7 source topics" count with `len`). Declined, with the reasons in the review file: sharing
+`_by_category` and `placeholders` or `public_url.rstrip("/")` (M3), one lane test left in
+`_finding_run_json` and the snapshot's "security" lane key (M5, pass 3's with the JS), and the
+topic plumbing and the prose counts (M7). Tests: `tests/test_opswall_state.py` (a field a ticket's
+or a finding's record leaves empty is filled by a later one, which failed for the finding before;
+`trim()` keeps a ticket or a finding by each of its moments), `tests/test_kafka_io_and_rtce.py`
+(metrics, deployments and incidents with their keys, subjects and timestamps, and each batch's
+poll). Issue 10's harness gives the same snapshot JSON, byte for byte, before and after, 153
+snapshots of every row, checkout's runs and the six security frames at 16 moments and after
+`trim()` (`research/review-fix-2/`), `ops-sim --dry-run --simulate 30 --seed 7` prints the same,
+and 18 mutations of `state.py` are each caught. Pass 3, the page's smells, a refactor:
+`static/opswall.js` (M5: one `ROW_KINDS` table says what differs between the kinds of row, its
+class, its charts, its body's update and its Issues panel's words with the remediate tooltip, in
+place of `updateRow`'s tests on `svc.row` and the labels set apart in `createSecurityBody`; M2: one
+`updateTimeline` draws the ticket row's and the security row's timelines, marks and bars kept by key
+as before (D-062), each row giving its lanes, a mark's class and label and a bar's tooltip, and the
+security row the hatch and the red `unreachable` (`TICKET_TIMELINE`, `SECURITY_TIMELINE`); one
+`pct`; every list row takes its arrivals through one `freshItems`, `fadeIn` and `ring`, the releases
+and windows rows included, which held the same copies) and `state.py` (M4 and M6: our agent's lane
+key is "security-agent", so the snapshot says "security" only for the row kind). Declined, with the
+reasons in the review file: JS constants for the lane and action strings, and a tooltip function per
+lane in the page. Left open there, as a question to the user, since this pass kept the snapshot to
+the lane key: ending the second test of the lane and the action in `findingRunTip` needs the
+snapshot to carry our bar's tooltip sentence. Tests: `tests/test_opswall_state.py` takes the new
+key. Issue 10's 153 snapshots change in that key alone, each the same bytes once it is put back
+(`research/review-fix-3/`), and issue 10's harness, which now compares each row with HEAD's page
+drawn from HEAD's state, passes 308 of 308 checks: all four rows are the same PNG, byte for byte,
+and the same DOM but for the lane's class, at 1440 and 820 px, in ten scenes (the base state at T
+and at the two moments with checkout bars, the six frames, a PATCH with its hatch and external bar,
+a DISMISS, FAILED, INVALID, the unreachable INVALID and "No answer", and the PATCH frame 55 s on); a
+hovered bar shows its own tooltip; Shift+Tab reaches the security row's last bar and Tab a checkout
+bar, each showing its tooltip and keeping the focus as the snapshots come; and new tickets and
+windows arrive on our page as on HEAD's. Pass 3's question, answered by the coordinator (the "one
+place" rule wins, D-068's review fixes, where a bar's tooltip words come from the snapshot, the
+precedent), in a commit of its own: `state.py`'s `_outcome_text` words what our agent's run came to,
+"Action: Patch. Commit 16e8af2.", "Action: Patch. No commit came back." for `FAILED`, "The patch
+agent could not be reached, so no decision came back." for a stopped patch agent, "No PATCH or
+DISMISS came back.", "Waiting for the security agent." or "The security agent gave no answer.", and
+our bar carries it as `outcomeText`, so `findingRunTip` writes the parts a bar carries in one order
+and no longer tests the lane or the action, which `state.py` alone now tests; the snapshot gains
+that field on our bars and nothing else (`action`, `outcome`, `commit` and `patchStatus` stay,
+though the page no longer reads them on our bar), 153 of 153 of issue 10's snapshots the same bytes
+once it is dropped and the lane key put back. Tests: `tests/test_opswall_state.py` checks the
+sentence in each case, 8 tests failing before; issue 10's harness, against the pass 3 commit's page
+and state, passes 308 of 308 checks, the four rows the same PNG and the rows' DOM the same string in
+all ten scenes.

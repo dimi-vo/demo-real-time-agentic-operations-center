@@ -326,6 +326,84 @@ def test_a_record_from_each_ticket_topic_reaches_checkouts_row(registry):
                              "medianTimeToDetectText": "4s", "medianTimeToRemediateText": "9s"}
 
 
+# --- the code security incidents through the real Avro path (D-070) ------------------
+
+# As Confluent Cloud registers them from sql/sink_critical_cves.sql and sink_patch_decisions.sql.
+_FINDING_FIELDS = [
+    {"name": "event_time", "type": ["null", _TS], "default": None},
+    *({"name": n, "type": ["null", "string"], "default": None}
+      for n in ("finding_id", "repository", "cve_id", "package", "installed_version", "fixed_version")),
+    {"name": "cvss_score", "type": ["null", "double"], "default": None},
+    {"name": "finding", "type": ["null", "string"], "default": None},
+]
+CRITICAL_CVES_SCHEMA = _flink_schema(_FINDING_FIELDS)
+PATCH_DECISIONS_SCHEMA = _flink_schema([
+    {"name": "event_time", "type": ["null", _TS], "default": None},
+    *({"name": n, "type": ["null", "string"], "default": None} for n in ("finding_id", "repository", "cve_id")),
+    {"name": "cvss_score", "type": ["null", "double"], "default": None},
+    {"name": "action", "type": "string"},
+    {"name": "reason", "type": ["null", "string"], "default": None},
+    {"name": "patch_status", "type": "string"},
+    {"name": "commit_sha", "type": ["null", "string"], "default": None},
+    {"name": "patch_started_at", "type": ["null", _TS], "default": None},
+    {"name": "patch_finished_at", "type": ["null", _TS], "default": None},
+    {"name": "raw_response", "type": ["null", "string"], "default": None},
+])
+
+
+def test_a_record_from_each_finding_topic_reaches_the_security_row(registry):
+    from opsgen.simulation import Simulation
+    from scripts.patchagent.reply import commit_for, format_reply
+
+    for subject, avsc in (("cve_scans-value", "cve_scans.avsc"), ("cve_answer_key-value", "cve_answer_key.avsc")):
+        registry.register_schema(subject, Schema((ROOT / "schemas" / avsc).read_text(), "AVRO"))
+    registry.register_schema("critical_cves-value", CRITICAL_CVES_SCHEMA)
+    registry.register_schema("patch_decisions-value", PATCH_DECISIONS_SCHEMA)
+
+    # The first critical PATCH finding the real scan clock produces (seed 1).
+    start = 1_800_000_000.0
+    sim = Simulation(1, start=start)
+    new = next(n for k in range(3600) for n in sim.tick(start + k).findings
+               if n.answer_key["expected_action"] == "PATCH")
+    reported = new.scan["event_time"] / 1000
+
+    deser = make_deserializer(registry)
+    st = OpsWallState()
+
+    def through(topic: str, record: dict) -> dict:
+        return decode_record(_produce(registry, topic, MessageField.VALUE, record), None, topic, deser)
+
+    scan = through("cve_scans", new.scan)  # what ops-sim produces
+    assert isinstance(scan["event_time"], datetime) and scan["cvss_score"] >= 9.0
+    st.apply_finding(scan)
+    st.apply_cve_answer_key(through("cve_answer_key", new.answer_key))
+    # what labs 6.1 and 6.4 write, with each record's Kafka timestamp
+    st.apply_critical_cve(through("critical_cves", scan), kafka_ts=reported + 1)
+    f = new.scan
+    request = f"PATCH {f['repository']} {f['cve_id']} {f['package']} {f['installed_version']} -> {f['fixed_version']}"
+    began, ended = reported + 4, reported + 10
+    reply = format_reply(request, datetime.fromtimestamp(began, tz=timezone.utc),
+                         datetime.fromtimestamp(ended, tz=timezone.utc))
+    st.apply_patch_decision(through("patch_decisions", {
+        **{k: scan[k] for k in ("event_time", "finding_id", "repository", "cve_id", "cvss_score")},
+        "action": "PATCH", "reason": "It ships and the code is called.", "patch_status": "PATCHED",
+        "commit_sha": commit_for(request), "patch_started_at": _naive(began), "patch_finished_at": _naive(ended),
+        "raw_response": f"Action: PATCH\nReason: It ships and the code is called.\nPatch: {reply}"}),
+        kafka_ts=reported + 13)
+
+    row = next(s for s in st.snapshot(now=reported + 30)["services"] if s["row"] == "security")
+    assert row["findings"]["newest"] == [{
+        "id": f["finding_id"], "repository": f["repository"], "cveId": f["cve_id"], "cvssScore": f["cvss_score"],
+        "critical": True, "eventTime": pytest.approx(reported)}]
+    security, external = row["runs"]
+    assert (security["label"], security["commit"]) == ("Patched in 12s", commit_for(request))
+    assert (external["label"], external["reply"]) == (f"{commit_for(request)} in 6s", reply)
+    assert (external["startedAt"], external["finishedAt"]) == (pytest.approx(began), pytest.approx(ended))
+    assert row["issues"] == {"injected": 1, "detected": 1, "missed": 0,
+                             "medianTimeToDetect": pytest.approx(13.0), "medianTimeToRemediate": pytest.approx(10.0),
+                             "medianTimeToDetectText": "13s", "medianTimeToRemediateText": "10s"}
+
+
 # --- the topics the consumer tails ---------------------------------------------------
 
 
@@ -345,8 +423,10 @@ def test_the_consumer_tails_its_topics_from_where_the_chart_starts(monkeypatch):
     assert set(by_topic) == {"service_deployments", "service_health", "service_error_rate",
                              "remediation_decisions", "service_incidents", "service_metrics",
                              # checkout's tickets (D-068)
-                             "support_tickets", "p1_tickets", "ticket_triage", "ticket_answer_key"}
-    assert len(tails) == 10
+                             "support_tickets", "p1_tickets", "ticket_triage", "ticket_answer_key",
+                             # the code security incidents (D-070)
+                             "cve_scans", "critical_cves", "cve_answer_key", "patch_decisions"}
+    assert len(tails) == 14
     metrics = by_topic[METRICS_TOPIC]
     assert metrics["apply"] == st.apply_metric
     assert metrics["key_deserializer"] is None and metrics["use_kafka_ts"] is False
@@ -364,6 +444,16 @@ def test_the_consumer_tails_its_topics_from_where_the_chart_starts(monkeypatch):
                                   ("p1_tickets", st.apply_p1_ticket, True),
                                   ("ticket_triage", st.apply_triage, True),
                                   ("ticket_answer_key", st.apply_answer_key, False)):
+        tail = by_topic[topic]
+        assert (tail["apply"], tail["key_deserializer"], tail["use_kafka_ts"]) == (apply, None, uses_ts), topic
+        assert tail["assign"](object()) is True
+        assert seeks[-1] == (topic, 600)
+    # The finding topics, from the same 10 minutes back. The two the labs write are read with
+    # their Kafka timestamps: when the security agent's run starts, and when it answered (D-070).
+    for topic, apply, uses_ts in (("cve_scans", st.apply_finding, False),
+                                  ("critical_cves", st.apply_critical_cve, True),
+                                  ("cve_answer_key", st.apply_cve_answer_key, False),
+                                  ("patch_decisions", st.apply_patch_decision, True)):
         tail = by_topic[topic]
         assert (tail["apply"], tail["key_deserializer"], tail["use_kafka_ts"]) == (apply, None, uses_ts), topic
         assert tail["assign"](object()) is True

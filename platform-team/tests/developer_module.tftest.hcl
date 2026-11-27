@@ -25,6 +25,8 @@ variables {
   region                     = "eu-central-1"
   flink_max_cfu              = 20
   csp_hosted_model           = "anthropic.claude-sonnet-4-6"
+  deploy_labs                = false
+  patch_agent_url            = ""
   principal_id               = "u-abc123"
   confluent_cloud_api_key    = "MOCKGLOBALKEY"
   confluent_cloud_api_secret = "mock-global-secret"
@@ -38,9 +40,9 @@ run "environment_and_direct_binding" {
   assert {
     condition = (
       confluent_environment.main.display_name == "John-Doe-c21e_env" &&
-      confluent_environment.main.stream_governance[0].package == "ADVANCED"
+      confluent_environment.main.stream_governance[0].package == "ESSENTIALS"
     )
-    error_message = "the environment should be named var.environment_name, with Stream Governance ADVANCED"
+    error_message = "the environment should be named var.environment_name, with Stream Governance ESSENTIALS"
   }
 
   assert {
@@ -110,19 +112,23 @@ run "statements_signed_as_principal_in_the_developer_catalog" {
       contains(keys(output.flink_statements), "service_incidents") &&
       contains(keys(output.flink_statements), "support_tickets") &&
       contains(keys(output.flink_statements), "ticket_answer_key") &&
+      contains(keys(output.flink_statements), "cve_scans") &&
+      contains(keys(output.flink_statements), "cve_answer_key") &&
       contains(keys(output.flink_statements), "service_error_rate") &&
       contains(keys(output.flink_statements), "service_health") &&
       contains(keys(output.flink_statements), "remediation_decisions") &&
       contains(keys(output.flink_statements), "p1_tickets") &&
       contains(keys(output.flink_statements), "ticket_triage") &&
+      contains(keys(output.flink_statements), "critical_cves") &&
+      contains(keys(output.flink_statements), "patch_decisions") &&
       contains(keys(output.flink_statements), "llm_textgen_model")
     )
-    error_message = "the module must create the five source tables, the five output tables and the model"
+    error_message = "the module must create the seven source tables, the seven output tables and the model"
   }
 
   assert {
-    condition     = length(output.flink_statements) == 11
-    error_message = "the module must create ten tables and the model, and nothing else"
+    condition     = length(output.flink_statements) == 15
+    error_message = "the module must create fourteen tables and the model, and nothing else"
   }
 }
 
@@ -157,6 +163,44 @@ run "the_ticket_source_tables_are_created" {
       can(regex("^CREATE TABLE IF NOT EXISTS `ticket_answer_key`", confluent_flink_statement.create_ticket_answer_key_table.statement))
     )
     error_message = "the two ticket source tables must be created"
+  }
+}
+
+# The scanner's findings and their answer key (D-070): append-only sources with
+# support_tickets' options and its 5 s watermark, no key columns, one bucket, after the
+# tickets' two in the chain.
+run "the_cve_source_tables_are_created" {
+  command = plan
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in [
+        confluent_flink_statement.create_cve_scans_table,
+        confluent_flink_statement.create_cve_answer_key_table,
+        ] : (
+        can(regex("'changelog.mode' = 'append'", s.statement)) &&
+        can(regex("'kafka.consumer.isolation-level' = 'read-uncommitted'", s.statement)) &&
+        can(regex("'kafka.cleanup-policy' = 'delete'", s.statement)) &&
+        can(regex("'kafka.retention.time' = '24 h'", s.statement)) &&
+        can(regex("DISTRIBUTED INTO 1 BUCKETS", s.statement)) &&
+        can(regex("WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND", s.statement)) &&
+        !can(regex("PRIMARY KEY", s.statement))
+      )
+    ])
+    error_message = "cve_scans and cve_answer_key must be append-only, read-uncommitted, delete-cleanup tables in one bucket with a 5 s watermark and no key"
+  }
+
+  assert {
+    condition = (
+      can(regex("^CREATE TABLE IF NOT EXISTS `cve_scans`", confluent_flink_statement.create_cve_scans_table.statement)) &&
+      can(regex("`cvss_score` DOUBLE", confluent_flink_statement.create_cve_scans_table.statement)) &&
+      can(regex("^CREATE TABLE IF NOT EXISTS `cve_answer_key`", confluent_flink_statement.create_cve_answer_key_table.statement))
+    )
+    error_message = "the two CVE source tables must be created, and cve_scans must have a DOUBLE cvss_score"
   }
 }
 
@@ -199,6 +243,75 @@ run "the_ticket_output_tables_are_created" {
   assert {
     condition     = can(regex("`ticket_id` STRING COMMENT", confluent_flink_statement.create_remediation_decisions_table.statement))
     error_message = "remediation_decisions must have a nullable ticket_id for the ticket responder's decisions"
+  }
+}
+
+# The outputs of labs 6.1 and 6.4 (D-070) take p1_tickets' options, so the security agent
+# never waits for a Flink commit either (D-063).
+run "the_cve_output_tables_are_created" {
+  command = plan
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in [
+        confluent_flink_statement.create_critical_cves_table,
+        confluent_flink_statement.create_patch_decisions_table,
+        ] : (
+        can(regex("'changelog.mode' = 'append'", s.statement)) &&
+        can(regex("'kafka.consumer.isolation-level' = 'read-uncommitted'", s.statement)) &&
+        can(regex("'kafka.cleanup-policy' = 'delete'", s.statement)) &&
+        can(regex("'kafka.retention.time' = '24 h'", s.statement)) &&
+        can(regex("DISTRIBUTED INTO 1 BUCKETS", s.statement)) &&
+        can(regex("WATERMARK FOR `event_time` AS `event_time` - INTERVAL '5' SECOND", s.statement)) &&
+        !can(regex("PRIMARY KEY", s.statement))
+      )
+    ])
+    error_message = "critical_cves and patch_decisions must be append-only, read-uncommitted, delete-cleanup tables in one bucket with a 5 s watermark and no key"
+  }
+
+  assert {
+    condition = (
+      can(regex("^CREATE TABLE IF NOT EXISTS `critical_cves`", confluent_flink_statement.create_critical_cves_table.statement)) &&
+      can(regex("`cvss_score` DOUBLE", confluent_flink_statement.create_critical_cves_table.statement)) &&
+      can(regex("^CREATE TABLE IF NOT EXISTS `patch_decisions`", confluent_flink_statement.create_patch_decisions_table.statement)) &&
+      can(regex("`action` STRING NOT NULL", confluent_flink_statement.create_patch_decisions_table.statement)) &&
+      can(regex("`patch_status` STRING NOT NULL", confluent_flink_statement.create_patch_decisions_table.statement))
+    )
+    error_message = "the two CVE output tables must be created, critical_cves with a DOUBLE cvss_score and patch_decisions with STRING NOT NULL action and patch_status"
+  }
+}
+
+# The Real-Time Context Engine serves patch_decisions (D-070, spec decision 12), in the
+# developer's own environment and cluster. remediation_decisions stays a Console step for
+# attendees. Applied, not planned, so the mocked environment and cluster ids are known.
+run "rtce_serves_patch_decisions" {
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = (
+      confluent_rtce_topic.patch_decisions.topic_name == "patch_decisions" &&
+      confluent_rtce_topic.patch_decisions.environment[0].id == confluent_environment.main.id &&
+      confluent_rtce_topic.patch_decisions.kafka_cluster[0].id == confluent_kafka_cluster.main.id &&
+      confluent_rtce_topic.patch_decisions.cloud == "AWS" &&
+      confluent_rtce_topic.patch_decisions.region == "eu-central-1" &&
+      length(confluent_rtce_topic.patch_decisions.description) > 0
+    )
+    error_message = "the patch_decisions topic must be RTCE-enabled in the developer's own environment, cluster, cloud and region, with a description"
+  }
+
+  assert {
+    condition = (
+      length(output.rtce_topics) == 1 &&
+      output.rtce_topics.patch_decisions.environment == confluent_environment.main.id &&
+      output.rtce_topics.patch_decisions.cluster == confluent_kafka_cluster.main.id
+    )
+    error_message = "the module must list its one RTCE topic, patch_decisions, for the root's tests"
   }
 }
 
@@ -280,4 +393,129 @@ run "the_three_output_tables_are_created" {
     ])
     error_message = "every output table must use one bucket and 24 h retention, like the source tables"
   }
+}
+
+# The labs' statements are for a demo environment only (D-069): attendees write them in the
+# workshop, so without deploy_labs the module plans none of them.
+run "no_lab_statements_without_deploy_labs" {
+  command = plan
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in [
+        confluent_flink_statement.insert_service_error_rate,
+        confluent_flink_statement.insert_service_health,
+        confluent_flink_statement.create_release_agent,
+        confluent_flink_statement.create_capacity_agent,
+        confluent_flink_statement.insert_release_agent_errors,
+        confluent_flink_statement.insert_release_agent,
+        confluent_flink_statement.insert_capacity_agent,
+        confluent_flink_statement.insert_p1_tickets,
+        confluent_flink_statement.create_ticket_classifier,
+        confluent_flink_statement.insert_ticket_classifier,
+        confluent_flink_statement.create_ticket_responder,
+        confluent_flink_statement.insert_ticket_responder,
+        confluent_flink_statement.insert_critical_cves,
+        confluent_flink_statement.create_patch_agent_connection,
+        confluent_flink_statement.create_patch_agent_tool,
+        confluent_flink_statement.create_security_agent,
+        confluent_flink_statement.insert_security_agent,
+      ] : length(s) == 0
+    ])
+    error_message = "without deploy_labs, the module must plan none of the labs' statements"
+  }
+}
+
+run "deploy_labs_runs_the_seventeen_lab_statements_as_principal_in_the_developer_catalog" {
+  variables {
+    deploy_labs     = true
+    patch_agent_url = "https://patch-agent.example.com"
+  }
+
+  module {
+    source = "./modules/developer"
+  }
+
+  assert {
+    condition     = length(output.flink_statements) == 32
+    error_message = "with deploy_labs, the module must create the fourteen tables, the model and the labs' 17 statements"
+  }
+
+  assert {
+    condition = alltrue([
+      for s in values(output.flink_statements) :
+      s.principal == "u-abc123" && s.catalog == "John-Doe-c21e_env" && s.database == "RIVER-OOPS-DEMO-CLUSTER"
+    ])
+    error_message = "every lab statement must run as principal_id in the developer's own environment and cluster"
+  }
+
+  assert {
+    condition = (
+      can(regex("^INSERT INTO `service_error_rate`\n", confluent_flink_statement.insert_service_error_rate[0].statement)) &&
+      can(regex("^INSERT INTO `service_health`\n", confluent_flink_statement.insert_service_health[0].statement)) &&
+      can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_release_agent_errors[0].statement)) &&
+      can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_release_agent[0].statement)) &&
+      can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_capacity_agent[0].statement)) &&
+      can(regex("^INSERT INTO `p1_tickets`\n", confluent_flink_statement.insert_p1_tickets[0].statement)) &&
+      can(regex("^INSERT INTO `ticket_triage`\n", confluent_flink_statement.insert_ticket_classifier[0].statement)) &&
+      can(regex("^INSERT INTO `remediation_decisions`\n", confluent_flink_statement.insert_ticket_responder[0].statement)) &&
+      can(regex("^INSERT INTO `critical_cves`\n", confluent_flink_statement.insert_critical_cves[0].statement)) &&
+      can(regex("^INSERT INTO `patch_decisions`\n", confluent_flink_statement.insert_security_agent[0].statement))
+    )
+    error_message = "the ten lab INSERTs must write the output tables (heredoc indent stripped)"
+  }
+
+  assert {
+    condition = alltrue([
+      for pair in [
+        ["release_agent", confluent_flink_statement.create_release_agent[0].statement],
+        ["capacity_agent", confluent_flink_statement.create_capacity_agent[0].statement],
+        ["ticket_classifier", confluent_flink_statement.create_ticket_classifier[0].statement],
+        ["ticket_responder", confluent_flink_statement.create_ticket_responder[0].statement],
+        ["security_agent", confluent_flink_statement.create_security_agent[0].statement],
+      ] : can(regex("^CREATE AGENT `${pair[0]}`\nUSING MODEL `llm_textgen_model`\nUSING PROMPT 'OUTPUT FORMAT", pair[1]))
+    ])
+    error_message = "the five agents must be created on llm_textgen_model, with their prompts unindented"
+  }
+
+  assert {
+    condition     = can(regex("\nUSING TOOLS `patch_agent_tool`\n", confluent_flink_statement.create_security_agent[0].statement))
+    error_message = "the security agent must use lab 6.2's tool"
+  }
+
+  # Lab 6.2's connection points at the presenter's patch-agent: patch_agent_url in place of
+  # the file's placeholder (D-070).
+  assert {
+    condition = (
+      can(regex("^CREATE CONNECTION `patch_agent_connection`\n", confluent_flink_statement.create_patch_agent_connection[0].statement)) &&
+      strcontains(confluent_flink_statement.create_patch_agent_connection[0].statement, "'endpoint' = 'https://patch-agent.example.com',\n") &&
+      !strcontains(confluent_flink_statement.create_patch_agent_connection[0].statement, "<your patch-agent URL>")
+    )
+    error_message = "the connection's endpoint must be patch_agent_url"
+  }
+
+  assert {
+    condition     = can(regex("^CREATE TOOL `patch_agent_tool`\nUSING CONNECTION `patch_agent_connection`\n", confluent_flink_statement.create_patch_agent_tool[0].statement))
+    error_message = "the tool must be created on lab 6.2's connection"
+  }
+}
+
+# The connection would point nowhere, so a demo apply without the patch agent's URL fails at
+# the plan (D-070).
+run "deploy_labs_without_a_patch_agent_url_fails_the_plan" {
+  command = plan
+
+  variables {
+    deploy_labs = true
+  }
+
+  module {
+    source = "./modules/developer"
+  }
+
+  expect_failures = [confluent_flink_statement.create_patch_agent_connection]
 }

@@ -200,24 +200,27 @@ def test_a_state_file_without_ticket_counters_starts_at_the_defaults():
 
 
 def _schedule(sim, seconds):
-    """Everything but the tickets: metrics, deploy records and events, tick by tick."""
+    """Everything but the tickets: metrics, deploy records, events and findings, tick by tick."""
     out = []
     for k in range(seconds):
-        metrics, deps, events, _ = sim.tick(float(k))
-        out.append((metrics, deps, [(e.kind, e.service_name, e.old_version, e.new_version) for e in events]))
+        metrics, deps, events, _, new_findings = sim.tick(float(k))
+        events = [(e.kind, e.service_name, e.old_version, e.new_version) for e in events]
+        out.append((metrics, deps, events, new_findings))
     return out
 
 
 def test_tickets_never_move_the_other_services(monkeypatch):
     # D-068: the ticket clock has its own rng, so tickets on, off, or many more of them leave
-    # payments' incidents, web-gateway's deploys and every metric value where they were.
+    # payments' incidents, web-gateway's deploys and every metric value where they were, and
+    # the scan clock's findings too (D-070).
     normal = _schedule(Simulation(7, start=0.0), 2 * 3600)
     off = Simulation(7, start=0.0)
     off.ticket_clock.on = False
     assert _schedule(off, 2 * 3600) == normal
     monkeypatch.setattr(tickets, "RATE", 2.0)  # 30 times as many tickets
     assert _schedule(Simulation(7, start=0.0), 2 * 3600) == normal
-    assert sum(len(events) for _, _, events in normal) > 100
+    assert sum(len(events) for _, _, events, _ in normal) > 100
+    assert sum(len(f) for *_, f in normal) > 300
 
 
 def test_the_same_seed_gives_the_same_tickets():

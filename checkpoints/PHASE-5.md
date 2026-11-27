@@ -36,13 +36,13 @@ heredoc, generator wiring, `reset` cleanup).
 
 | # | Commit    | Scope |
 |---|-----------|-------|
-| 1 | `1ad7920` | SQL source of truth + Avro + Terraform heredoc for `service_incidents` |
-| 2 | `d50fc4d` | Generator emits start/end records to Kafka |
-| 3 | `8e657b3` | `reset` purges the new topic too |
-| 4 | `bada477` | `OpsWallState` — thread-safe collector, span consolidation, snapshot |
-| 5 | `b3cb8a7` | Mock driver — 12-min scripted scene loop |
-| 6 | `361a764` | Kafka consumer + FastAPI server + `uv run ops-wall` |
-| 7 | `baeb879` | Variant-E frontend wired to `/ws`, IBM Plex vendored |
+| 1 | `f459f62` | SQL source of truth + Avro + Terraform heredoc for `service_incidents` |
+| 2 | `2f3c503` | Generator emits start/end records to Kafka |
+| 3 | `e449a14` | `reset` purges the new topic too |
+| 4 | `a747632` | `OpsWallState` — thread-safe collector, span consolidation, snapshot |
+| 5 | `7b236a1` | Mock driver — 12-min scripted scene loop |
+| 6 | `f0a8df0` | Kafka consumer + FastAPI server + `uv run ops-wall` |
+| 7 | `3001180` | Variant-E frontend wired to `/ws`, IBM Plex vendored |
 | 8 | this break | DECISIONS.md D-035..D-041, this file |
 
 **Tests and lint.** `uv run pytest` → **238 passed**. `uv run ruff check .` → clean.

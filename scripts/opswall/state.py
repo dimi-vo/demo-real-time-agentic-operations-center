@@ -83,6 +83,31 @@ transaction wrote comes again when the statement replays, D-063).
   no verdict 30 s after the ticket), ticket -> verdict, ticket -> action. Its list is the
   newest 5 tickets, each with its source's name, and the count of the last 10 minutes; its
   marks are the tickets of the last 2 minutes.
+- The **"Code security incidents" row** (``row: "security"``, D-070) comes after the services'
+  rows. It is no service, so it is built by its own function, not from ``opsgen.services``. A
+  **finding** is one record per ``finding_id``, filled in from four topics in any order, as a
+  ticket is: its fields (``cve_scans``), when lab 6.1 routed it (the ``critical_cves`` record's
+  Kafka timestamp), what it should get (``cve_answer_key``), and the security agent's decision
+  with the patch agent's commit, start and finish and the reply they came in (a
+  ``patch_decisions`` record, lab 6.4, and its Kafka timestamp). ``patch_decisions`` never goes
+  through ``apply_decision``: nothing in ``remediation_decisions``' routing changes.
+- Its **runs**: the security agent's, from the ``critical_cves`` record (the finding's
+  ``event_time`` if only the decision has come) to the decision: "Patched in 12s", "Dismissed
+  in 8s", "Patch agent unreachable" (``FAILED``, and an ``INVALID`` whose answer is Flink's
+  error for a patch agent it could not reach: a stopped one fails the whole call at its agent
+  card, before the model answers, issue 02) or "Invalid answer" (any other ``INVALID``). Open
+  ("Working 3s") until 60 s after it started, then "No answer". The external lane's, from the
+  patch's start to its finish, once the decision has brought both (spec decision 24: the
+  external bar appears when our agent answers, not while the patch runs); our run carries the
+  part of its bar that span covers, the hatch. The row is "Agent on critical CVE" while a run
+  of ours is open, and ``openCriticals`` counts their findings. Its
+  **Issues panel** scores the critical findings reported in the last 10 minutes that have an
+  answer key: right (the action expected, within 60 s of lab 6.1's record, and no ``FAILED``
+  patch), missed (another action, ``INVALID``, a ``FAILED`` patch, or no decision within those
+  60 s, a late right one included), the median
+  finding -> decision, and finding -> the patch's finish for the ``PATCHED`` ones. Its list is
+  the newest 5 findings and the count of the last 10 minutes; its marks are the findings of the
+  last 2 minutes, critical or not.
 
 State stores absolute epoch seconds everywhere. The snapshot turns positions into the
 axis-relative seconds the page draws with: ``t - (now - CHART_SECONDS)``, clipped to
@@ -92,13 +117,16 @@ axis-relative seconds the page draws with: ``t - (now - CHART_SECONDS)``, clippe
 from __future__ import annotations
 
 import bisect
+import re
 import statistics
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from opsgen.finding_templates import DISMISS, PATCH
 from opsgen.services import SERVICES, TICKET_SERVICES
 from opsgen.tickets import HIGH, LOW, SOURCES, SOURCES_BY_CODE
 
@@ -149,6 +177,7 @@ JUDGED = {"latency_status": "avg_latency_ms", "traffic_status": "traffic_count"}
 ERROR_RATE_THRESHOLD_PCT = 25.0
 DEPLOY_CHANGES = ("DEPLOY", "ROLLBACK")
 INVALID = "INVALID"  # what the labs' INSERTs write for an answer they can't parse
+CRITICAL_CVSS = 9.0  # lab 6.1's rule (sql/6.1_critical_cves.sql), CVSS's Critical band; a test keeps them in step
 
 
 @dataclass
@@ -229,6 +258,43 @@ class Ticket:
 
 
 @dataclass
+class Finding:
+    """One CVE scan finding, filled in from whichever of its records have arrived (D-070)."""
+    finding_id: str
+    event_time: float | None = None  # when the scanner reported it
+    repository: str | None = None
+    cve_id: str | None = None
+    package: str | None = None
+    installed_version: str | None = None
+    fixed_version: str | None = None
+    cvss_score: float | None = None
+    critical_at: float | None = None       # the critical_cves record's Kafka timestamp (lab 6.1)
+    expected_action: str | None = None     # cve_answer_key: PATCH or DISMISS; None when not critical
+    action: str | None = None              # the security agent's (lab 6.4): PATCH, DISMISS or INVALID
+    reason: str | None = None
+    patch_status: str | None = None        # PATCHED, FAILED or N/A, worked out by lab 6.4
+    commit_sha: str | None = None
+    patch_started_at: float | None = None  # the patch's start and finish, from the patch agent's reply
+    patch_finished_at: float | None = None
+    reply: str | None = None               # the answer's Patch line: the patch agent's reply, as copied
+    card_failed: bool = False              # the answer is Flink's error for the patch agent's card (issue 02)
+    decided_at: float | None = None        # the patch_decisions record's Kafka timestamp
+
+    @property
+    def critical(self) -> bool:
+        return self.cvss_score is not None and self.cvss_score >= CRITICAL_CVSS
+
+
+@dataclass(frozen=True)
+class Lane:
+    """One lane of a timeline (checkout's, D-068, and the security row's, D-070): its key in the
+    snapshot, its name above the chart, and whether the page says its agent is Working or Idle."""
+    key: str
+    name: str
+    has_state: bool = True
+
+
+@dataclass
 class ServiceState:
     name: str
     version: str | None = None  # the running version, from the latest service_deployments record
@@ -267,6 +333,7 @@ class OpsWallState:
         self._lock = threading.RLock()
         self._services = _seeded_services()
         self._tickets: dict[str, Ticket] = {}  # by ticket_id
+        self._findings: dict[str, Finding] = {}  # by finding_id (D-070)
         self._connection_errors: dict[str, dict] = {}  # topic -> {code, detail, ts}
 
     # ---- writes ---------------------------------------------------------------
@@ -417,14 +484,14 @@ class OpsWallState:
         with self._lock:
             ticket = self._ticket(record)
             if ticket is not None:
-                _fill_ticket(ticket, record)
+                _fill(ticket, record, TICKET_FIELDS)
 
     def apply_p1_ticket(self, record: dict, kafka_ts: float | None = None) -> None:
         """One ``p1_tickets`` record (lab 5.1): the moment the classifier's run starts."""
         with self._lock:
             ticket = self._ticket(record)
             if ticket is not None:
-                _fill_ticket(ticket, record)
+                _fill(ticket, record, TICKET_FIELDS)
                 ticket.p1_at = _earliest(ticket.p1_at, _written(kafka_ts, ticket))
 
     def apply_triage(self, record: dict, kafka_ts: float | None = None) -> None:
@@ -432,7 +499,7 @@ class OpsWallState:
         with self._lock:
             ticket = self._ticket(record)
             if ticket is not None:
-                _fill_ticket(ticket, record)
+                _fill(ticket, record, TICKET_FIELDS)
                 ticket.verdict = record.get("severity") or INVALID
                 ticket.verdict_reason = record.get("reason")
                 ticket.classified_at = _earliest(ticket.classified_at, _written(kafka_ts, ticket))
@@ -464,6 +531,59 @@ class OpsWallState:
             return None
         return self._tickets.setdefault(tid, Ticket(tid))
 
+    # A finding (D-070) fills in from four topics the same way: its fields from the first record
+    # that carries them, a record written twice keeping its first Kafka timestamp and the newer
+    # content, and a record without a timestamp falling back to the finding's event_time.
+
+    def apply_finding(self, record: dict) -> None:
+        """One ``cve_scans`` record: the finding's fields."""
+        with self._lock:
+            finding = self._finding(record)
+            if finding is not None:
+                _fill(finding, record, FINDING_FIELDS)
+
+    def apply_critical_cve(self, record: dict, kafka_ts: float | None = None) -> None:
+        """One ``critical_cves`` record (lab 6.1): the moment the security agent's run starts."""
+        with self._lock:
+            finding = self._finding(record)
+            if finding is not None:
+                _fill(finding, record, FINDING_FIELDS)
+                finding.critical_at = _earliest(finding.critical_at, _written(kafka_ts, finding))
+
+    def apply_cve_answer_key(self, record: dict) -> None:
+        """One ``cve_answer_key`` record: what the finding should get, for the Issues panel."""
+        with self._lock:
+            finding = self._finding(record)
+            if finding is not None:
+                if finding.event_time is None:
+                    finding.event_time = _to_seconds(record.get("event_time"))
+                finding.expected_action = record.get("expected_action")
+
+    def apply_patch_decision(self, record: dict, kafka_ts: float | None = None) -> None:
+        """One ``patch_decisions`` record (lab 6.4): the security agent's decision and the
+        patch agent's answer, kept on its finding. It is no ``remediation_decisions`` record and
+        never goes near ``apply_decision``."""
+        with self._lock:
+            finding = self._finding(record)
+            if finding is not None:
+                _fill(finding, record, FINDING_FIELDS)
+                finding.action = record.get("action") or INVALID
+                finding.reason = record.get("reason")
+                finding.patch_status = record.get("patch_status")
+                finding.commit_sha = record.get("commit_sha")
+                finding.patch_started_at = _to_seconds(record.get("patch_started_at"))
+                finding.patch_finished_at = _to_seconds(record.get("patch_finished_at"))
+                finding.reply = _patch_line(record.get("raw_response"))
+                finding.card_failed = str(record.get("raw_response") or "").startswith(CARD_FAILED_ANSWER)
+                finding.decided_at = _earliest(finding.decided_at, _written(kafka_ts, finding))
+
+    def _finding(self, record: dict) -> Finding | None:
+        """The finding a record is about, made on its first record. Call under the lock."""
+        fid = record.get("finding_id")
+        if not fid:
+            return None
+        return self._findings.setdefault(fid, Finding(fid))
+
     def record_error(self, topic: str, code: str, detail: str) -> None:
         with self._lock:
             self._connection_errors[topic] = {"code": code, "detail": detail, "ts": time.time()}
@@ -488,8 +608,11 @@ class OpsWallState:
                 s.decisions = [d for d in s.decisions if d.at >= cutoff]
                 s.incidents = [i for i in s.incidents
                                if (i.ended_at or i.started_at) >= cutoff]
-            # A ticket goes once the last thing that happened to it is that old.
-            self._tickets = {tid: t for tid, t in self._tickets.items() if _ticket_last(t) >= cutoff}
+            # A ticket or a finding goes once the last thing that happened to it is that old.
+            self._tickets = {tid: t for tid, t in self._tickets.items()
+                             if _latest(t.event_time, t.p1_at, t.classified_at, t.answered_at) >= cutoff}
+            self._findings = {fid: f for fid, f in self._findings.items()
+                              if _latest(f.event_time, f.critical_at, f.decided_at, f.patch_finished_at) >= cutoff}
 
     # ---- snapshot -------------------------------------------------------------
 
@@ -499,7 +622,7 @@ class OpsWallState:
         chart_left = now - CHART_SECONDS
 
         def rel(t: float) -> float:
-            return max(0.0, min(CHART_SECONDS, t - chart_left))
+            return _axis(t, chart_left)
 
         with self._lock:
             services = []
@@ -509,6 +632,7 @@ class OpsWallState:
                     services.append(_ticket_row(s.name, tickets, now))
                 else:
                     services.append(_metric_row(s, now, left, chart_left, rel))
+            services.append(_security_row(list(self._findings.values()), now))  # no service: beside them (D-070)
             return {
                 "chartSeconds": CHART_SECONDS,  # every row's time axis
                 "errorThresholdPct": ERROR_RATE_THRESHOLD_PCT,
@@ -737,11 +861,66 @@ def _incident_issues(incidents: list[IncidentEvent], blocks: list[_Block], left:
     return _issues_json(len(recent), detected, missed, to_detect, to_remediate)
 
 
+# ---- a timeline's runs: checkout's (D-068) and the security row's (D-070) --------------------
+
+@dataclass
+class _Run:
+    """One agent's work on one ticket or one finding, as a timeline draws it (spec decision 34;
+    spec decision 24 for a finding)."""
+    lane: Lane
+    item: Ticket | Finding
+    start: float
+    end: float                  # the answer; now while open; the row's wait after the start with no answer
+    open: bool
+    label: str
+    outcome: str | None = None  # a ticket run's verdict or action, in words; None with no answer
+    reason: str | None = None   # the reason given with it
+
+
+def _run(lane: Lane, item: Ticket | Finding, start: float, answered: float | None, wait: float, now: float,
+         label: Callable[[float], str], outcome: str | None = None, reason: str | None = None) -> _Run:
+    """An answered run reads ``label`` of how long it took ("High in 4s"); an unanswered one is open
+    and reads "Working 3s" until ``wait`` after its start, then ends there and reads "No answer"."""
+    if answered is not None:
+        end = max(start, answered)
+        return _Run(lane, item, start, end, False, label(end - start), outcome, reason)
+    if now - start <= wait:
+        return _Run(lane, item, start, now, True, f"Working {_dur_words(now - start)}")
+    return _Run(lane, item, start, start + wait, False, "No answer")
+
+
+def _run_json(run: _Run, left: float, item_id: str, about: dict, tip: dict) -> dict:
+    """A bar as the page draws it: its key and lane, ``about`` (the ticket's or the finding's
+    fields), where it starts and ends on the timeline whose left edge is ``left``, whether it is
+    open, its label, and ``tip``, the rest of its tooltip, in that order."""
+    return {
+        "key": f"{run.lane.key}@{item_id}",  # who the bar is from one snapshot to the next (D-062)
+        "lane": run.lane.key,
+        **about,
+        "start": _axis(run.start, left),
+        "end": _axis(run.end, left),
+        "open": run.open,
+        "label": run.label,
+        **tip,
+    }
+
+
+def _lanes_json(lanes: tuple[Lane, ...], busy: set[Lane]) -> list[dict]:
+    """The lanes, top to bottom, each saying whether its agent is working, and in words
+    ("Working" or "Idle") unless the lane has no state."""
+    return [{"key": lane.key, "name": lane.name, "working": lane in busy,
+             "state": ("Working" if lane in busy else "Idle") if lane.has_state else None} for lane in lanes]
+
+
 # ---- a ticket row (D-068) ---------------------------------------------------------
 
 LIST_LENGTH = 5           # the newest tickets the list shows
 RECEIVED_SECONDS = 600.0  # "N received" counts the tickets created this long ago or since
-LANES = (("classifier", "Classifier"), ("responder", "Responder"))  # the timeline's, top to bottom
+TICKET_WAIT_SECONDS = 30.0  # a run nobody answered ends this long after it started
+CLASSIFIER_LANE = Lane("classifier", "Classifier")
+RESPONDER_LANE = Lane("responder", "Responder")
+TICKET_LANES = (CLASSIFIER_LANE, RESPONDER_LANE)  # the timeline's, top to bottom
+TICKET_FIELDS = ("source", "service_name", "priority", "subject")  # what p1_tickets and ticket_triage copy
 
 
 def _ticket_row(name: str, tickets: list[Ticket], now: float) -> dict:
@@ -769,12 +948,11 @@ def _ticket_row(name: str, tickets: list[Ticket], now: float) -> dict:
         },
         "marks": [{"id": t.ticket_id, "priority": t.priority, "t": t.event_time - left}
                   for t in reversed(listed) if left <= t.event_time <= now],
-        "runs": [_run_json(r, left) for r in runs],
-        "lanes": [{"key": key, "name": lane, "working": key in busy, "state": "Working" if key in busy else "Idle"}
-                  for key, lane in LANES],
-        "agentsText": f"{len(busy)} of {len(LANES)} agents working" if busy else "Both agents idle",
+        "runs": [_ticket_run_json(r, left) for r in runs],
+        "lanes": _lanes_json(TICKET_LANES, busy),
+        "agentsText": f"{len(busy)} of {len(TICKET_LANES)} agents working" if busy else "Both agents idle",
         "agentsWorking": len(busy),
-        "openP1": len({r.ticket.ticket_id for r in working}),
+        "openP1": len({r.item.ticket_id for r in working}),
     }
 
 
@@ -793,7 +971,7 @@ def _ticket_issues(tickets: list[Ticket], now: float) -> dict:
                 and t.event_time is not None and now - RECEIVED_SECONDS <= t.event_time <= now]
     detected = [t for t in injected if t.verdict == HIGH]
     missed = [t for t in injected if t.verdict in (LOW, INVALID)
-              or (t.verdict is None and now - t.event_time > RUN_WAIT_SECONDS)]
+              or (t.verdict is None and now - t.event_time > TICKET_WAIT_SECONDS)]
     return _issues_json(
         len(injected), len(detected), len(missed),
         [t.classified_at - t.event_time for t in detected if t.classified_at is not None],
@@ -801,45 +979,25 @@ def _ticket_issues(tickets: list[Ticket], now: float) -> dict:
     )
 
 
-@dataclass
-class _Run:
-    """One agent's work on one ticket, as the timeline draws it (spec decision 34)."""
-    lane: str             # "classifier" or "responder"
-    ticket: Ticket
-    start: float
-    end: float            # the answer; now while open; RUN_WAIT_SECONDS after the start with no answer
-    open: bool
-    label: str
-    outcome: str | None   # the verdict or the action, in words; None with no answer
-    reason: str | None
-
-
-RUN_WAIT_SECONDS = 30.0  # a run nobody answered ends this long after it started
-
-
 def _agent_runs(ticket: Ticket, now: float) -> list[_Run]:
     """The classifier's run, from the p1_tickets record to the verdict, and for a HIGH
     verdict the responder's, from the verdict to the decision."""
     runs = []
     if ticket.p1_at is not None:
-        runs.append(_run("classifier", ticket, ticket.p1_at, ticket.classified_at,
-                         _words(ticket.verdict, VERDICT_WORDS), ticket.verdict_reason, now))
+        runs.append(_ticket_run(CLASSIFIER_LANE, ticket, ticket.p1_at, ticket.classified_at,
+                                _words(ticket.verdict, VERDICT_WORDS), ticket.verdict_reason, now))
     if ticket.verdict == HIGH and ticket.classified_at is not None:
-        runs.append(_run("responder", ticket, ticket.classified_at, ticket.answered_at,
-                         _words(ticket.action, ACTION_WORDS), ticket.action_reason, now))
+        runs.append(_ticket_run(RESPONDER_LANE, ticket, ticket.classified_at, ticket.answered_at,
+                                _words(ticket.action, ACTION_WORDS), ticket.action_reason, now))
     return runs
 
 
-def _run(lane: str, ticket: Ticket, start: float, answered: float | None, outcome: str | None,
-         reason: str | None, now: float) -> _Run:
-    """An answered run reads its outcome and how long it took ("High in 4s"); an unanswered
-    one is open and reads "Working 3s", until it gives up and reads "No answer"."""
-    if answered is not None:
-        end = max(start, answered)
-        return _Run(lane, ticket, start, end, False, f"{outcome} in {_dur_words(end - start)}", outcome, reason)
-    if now - start <= RUN_WAIT_SECONDS:
-        return _Run(lane, ticket, start, now, True, f"Working {_dur_words(now - start)}", None, None)
-    return _Run(lane, ticket, start, start + RUN_WAIT_SECONDS, False, "No answer", None, None)
+def _ticket_run(lane: Lane, ticket: Ticket, start: float, answered: float | None, outcome: str | None,
+                reason: str | None, now: float) -> _Run:
+    """An answered run reads its outcome and how long it took ("High in 4s"), and carries both
+    for its tooltip."""
+    return _run(lane, ticket, start, answered, TICKET_WAIT_SECONDS, now,
+                lambda took: f"{outcome} in {_dur_words(took)}", outcome, reason)
 
 
 VERDICT_WORDS = {HIGH: "High", LOW: "Low", INVALID: "Invalid"}
@@ -855,23 +1013,10 @@ def _words(code: str | None, words: dict[str, str]) -> str | None:
     return words.get(code) or code.replace("_", " ").capitalize()
 
 
-def _run_json(run: _Run, left: float) -> dict:
-    def pos(t: float) -> float:
-        return max(0.0, min(CHART_SECONDS, t - left))
-
-    return {
-        "key": f"{run.lane}@{run.ticket.ticket_id}",  # who the bar is from one snapshot to the next (D-062)
-        "lane": run.lane,
-        "ticketId": run.ticket.ticket_id,
-        "priority": run.ticket.priority,
-        "subject": run.ticket.subject,
-        "start": pos(run.start),
-        "end": pos(run.end),
-        "open": run.open,
-        "label": run.label,
-        "outcome": run.outcome,
-        "reason": run.reason,
-    }
+def _ticket_run_json(run: _Run, left: float) -> dict:
+    t = run.item
+    return _run_json(run, left, t.ticket_id, {"ticketId": t.ticket_id, "priority": t.priority, "subject": t.subject},
+                     {"outcome": run.outcome, "reason": run.reason})
 
 
 def _dur_words(sec: float) -> str:
@@ -885,25 +1030,217 @@ def _dur_text(sec: float | None) -> str:
     return "—" if sec is None else _dur_words(sec)
 
 
-def _ticket_last(ticket: Ticket) -> float:
-    """The latest moment known about a ticket, the anchor ``trim()`` drops it by."""
-    times = (ticket.event_time, ticket.p1_at, ticket.classified_at, ticket.answered_at)
+def _latest(*times: float | None) -> float:
+    """The latest of the moments known about a ticket or a finding (0 with none), the anchor
+    ``trim()`` drops it by."""
     return max((t for t in times if t is not None), default=0.0)
 
 
-def _written(kafka_ts: float | None, ticket: Ticket) -> float | None:
-    """When a ticket's record was written: its Kafka timestamp, else the ticket's creation."""
-    return kafka_ts if kafka_ts is not None else ticket.event_time
+def _written(kafka_ts: float | None, item: Ticket | Finding) -> float | None:
+    """When a ticket's or a finding's record was written: its Kafka timestamp, else the ticket's
+    creation or the finding's report."""
+    return kafka_ts if kafka_ts is not None else item.event_time
 
 
-def _fill_ticket(ticket: Ticket, record: dict) -> None:
-    """The ticket's own fields from any record that carries them (support_tickets, and
-    p1_tickets and ticket_triage, which copy them); a field already known stays."""
-    if ticket.event_time is None:
-        ticket.event_time = _to_seconds(record.get("event_time"))
-    for name in ("source", "service_name", "priority", "subject"):
-        if getattr(ticket, name) is None and record.get(name):
-            setattr(ticket, name, record[name])
+def _fill(item: Ticket | Finding, record: dict, fields: tuple[str, ...]) -> None:
+    """A ticket's or a finding's own fields from any record that carries them (support_tickets or
+    cve_scans, and the records that copy them: p1_tickets and ticket_triage, critical_cves and
+    patch_decisions). A field already known stays; one a record leaves empty (None or "") waits
+    for a record that carries it."""
+    if item.event_time is None:
+        item.event_time = _to_seconds(record.get("event_time"))
+    for name in fields:
+        if getattr(item, name) is None and record.get(name) not in (None, ""):
+            setattr(item, name, record[name])
+
+
+# ---- the "Code security incidents" row (D-070) -----------------------------------------
+
+SECURITY_ROW = "security"  # the row kind; the services' rows are "releases", "tickets" and "windows"
+SECURITY_NAME = "Code security incidents"
+SECURITY_WAIT_SECONDS = 60.0  # our agent's run gives up this long after it started; checkout's 30 s is too short
+SCANNED_SECONDS = 600.0       # "N scanned" and the Issues panel count the findings reported this long ago or since
+FINDINGS_LISTED = 5           # the newest findings the list shows
+# The timeline's lanes, top to bottom: our agent's, and the patch agent's. The patch agent is always
+# "external" on the wall (spec Terms), and the wall hears of its call only when our agent answers (spec
+# decision 24), so its lane never says it is working.
+SECURITY_AGENT_LANE = Lane("security-agent", "Security agent")
+EXTERNAL_LANE = Lane("external", "External · LangGraph · A2A", has_state=False)
+SECURITY_LANES = (SECURITY_AGENT_LANE, EXTERNAL_LANE)
+FINDING_FIELDS = ("repository", "cve_id", "package", "installed_version", "fixed_version", "cvss_score")
+SECURITY_ACTION_WORDS = {PATCH: "Patch", DISMISS: "Dismiss", INVALID: "Invalid"}
+DECIDED_WORDS = {PATCH: "Patched", DISMISS: "Dismissed"}  # our closed bar: "Patched in 12s"
+PATCHED, FAILED = "PATCHED", "FAILED"  # lab 6.4's patch_status, besides N/A
+# How Flink's answer starts when it can't fetch the patch agent's card: the whole agent call
+# fails before the model answers, so lab 6.4 writes INVALID (issue 02's step 5, a stopped patch agent).
+CARD_FAILED_ANSWER = "Exception while initializing A2A client"
+# The answer's Patch line, as lab 6.4 finds it (a markdown bold label allowed): what the patch
+# agent replied, which the security agent copies there.
+PATCH_LINE = re.compile(r"\*{0,2}Patch:\*{0,2}[ \t]*([^\n]+)")
+
+
+def _security_row(findings: list[Finding], now: float) -> dict:
+    """The "Code security incidents" row: its status and Issues numbers, the list of findings,
+    and the timeline with its two lanes. Timeline positions are seconds from its left edge,
+    ``now - CHART_SECONDS``."""
+    left = now - CHART_SECONDS
+    listed = sorted((f for f in findings if f.event_time is not None and f.cvss_score is not None),
+                    key=lambda f: f.event_time, reverse=True)
+    runs = sorted((r for f in findings for r in _finding_runs(f, now) if r.end >= left), key=lambda r: r.start)
+    working = [r for r in runs if r.open]
+    busy = {r.lane for r in working}
+    return {
+        "name": SECURITY_NAME,
+        "row": SECURITY_ROW,  # which kind of row the page builds
+        "status": "working" if working else "healthy",
+        "statusText": "Agent on critical CVE" if working else "Healthy",
+        "issues": _finding_issues(findings, now),
+        "findings": {
+            "scanned": sum(1 for f in listed if now - SCANNED_SECONDS <= f.event_time <= now),
+            "newest": [{"id": f.finding_id, "repository": f.repository, "cveId": f.cve_id, "cvssScore": f.cvss_score,
+                        "critical": f.critical, "eventTime": f.event_time} for f in listed[:FINDINGS_LISTED]],
+        },
+        "marks": [{"id": f.finding_id, "cveId": f.cve_id, "critical": f.critical, "t": f.event_time - left}
+                  for f in reversed(listed) if left <= f.event_time <= now],
+        "runs": [_finding_run_json(r, left) for r in runs],
+        "lanes": _lanes_json(SECURITY_LANES, busy),
+        "openCriticals": len({r.item.finding_id for r in working}),
+    }
+
+
+def _finding_runs(finding: Finding, now: float) -> list[_Run]:
+    """Our agent's run, from lab 6.1's record (the finding's event_time when only the decision
+    has come) to the decision, and the patch agent's, from the patch's start to its finish once
+    the decision has brought both."""
+    runs = []
+    start = finding.critical_at
+    if start is None and finding.decided_at is not None:
+        start = finding.event_time
+    if start is not None:
+        runs.append(_run(SECURITY_AGENT_LANE, finding, start, finding.decided_at, SECURITY_WAIT_SECONDS, now,
+                         lambda took: _security_label(finding, took)))
+    began, ended = finding.patch_started_at, finding.patch_finished_at
+    if began is not None and ended is not None:
+        took = _dur_words(max(began, ended) - began)
+        label = f"{finding.commit_sha} in {took}" if finding.commit_sha else took
+        runs.append(_Run(EXTERNAL_LANE, finding, began, max(began, ended), False, label))
+    return runs
+
+
+def _security_label(finding: Finding, took: float) -> str:
+    """What our closed bar reads: the outcome, and how long it took when it is an answer."""
+    if _unreachable(finding):
+        return "Patch agent unreachable"
+    decided = DECIDED_WORDS.get(finding.action)
+    return f"{decided} in {_dur_words(took)}" if decided else "Invalid answer"
+
+
+def _unreachable(finding: Finding) -> bool:
+    """A PATCH that brought no commit back (FAILED), or an INVALID that is Flink's error for a
+    patch agent it could not reach, which is what a stopped one gives (the user's decision, the
+    code review's S-c1). Our bar reads "Patch agent unreachable", in red, for both."""
+    return finding.patch_status == FAILED or (finding.action == INVALID and finding.card_failed)
+
+
+def _hatch(run: _Run) -> tuple[float, float] | None:
+    """The part of our bar the patch covers, hatched while our agent waited on the patch agent.
+    The patch's times are the laptop's clock and our bar's are Kafka's, so the span is clipped
+    to the bar."""
+    f = run.item
+    if f.patch_started_at is None or f.patch_finished_at is None:
+        return None
+    began, ended = max(run.start, f.patch_started_at), min(run.end, f.patch_finished_at)
+    return (began, ended) if began < ended else None
+
+
+def _finding_run_json(run: _Run, left: float) -> dict:
+    f = run.item
+    about = {"findingId": f.finding_id, "repository": f.repository, "cveId": f.cve_id, "cvssScore": f.cvss_score}
+    tip = _decision_tip(run, left) if run.lane is SECURITY_AGENT_LANE else _patch_tip(run)
+    return _run_json(run, left, f.finding_id, about, tip)
+
+
+def _decision_tip(run: _Run, left: float) -> dict:
+    """Our bar's tooltip: the action, its outcome in the tooltip's words, the reason and the
+    commit, and where the hatch is."""
+    f = run.item
+    hatch = _hatch(run)
+    return {
+        "action": f.action,
+        "outcome": _words(f.action, SECURITY_ACTION_WORDS),
+        "outcomeText": _outcome_text(run),  # the page writes it as it comes (the code review's M5)
+        "reason": f.reason,
+        "commit": f.commit_sha,
+        "patchStatus": f.patch_status,
+        "unreachable": _unreachable(f),  # the page draws these words in red
+        "waitFrom": _axis(hatch[0], left) if hatch else None,
+        "waitTo": _axis(hatch[1], left) if hatch else None,
+    }
+
+
+def _outcome_text(run: _Run) -> str:
+    """What our agent's run came to, as its tooltip says it: the action and the commit, or what
+    a stopped patch agent, an answer with no action, a FAILED patch or no answer at all left."""
+    f = run.item
+    lost = f.action == INVALID and _unreachable(f)  # a stopped patch agent: Flink's agent card error
+    if lost:
+        said = "The patch agent could not be reached, so no decision came back."
+    elif f.action == INVALID:
+        said = "No PATCH or DISMISS came back."
+    elif f.action is not None:
+        said = f"Action: {_words(f.action, SECURITY_ACTION_WORDS)}."
+    else:
+        said = "Waiting for the security agent." if run.open else "The security agent gave no answer."
+    if f.commit_sha:
+        return f"{said} Commit {f.commit_sha}."
+    return f"{said} No commit came back." if _unreachable(f) and not lost else said
+
+
+def _patch_tip(run: _Run) -> dict:
+    """The external bar's tooltip: the patch agent's reply, its times and how long it took."""
+    f = run.item
+    return {
+        "commit": f.commit_sha,
+        "reply": f.reply,
+        "startedAt": f.patch_started_at,
+        "finishedAt": f.patch_finished_at,
+        "duration": run.end - run.start,
+        "durationText": _dur_words(run.end - run.start),
+    }
+
+
+def _finding_issues(findings: list[Finding], now: float) -> dict:
+    """The security row's Issues panel (spec decision 26), over the critical findings reported
+    in the last 10 minutes that have an answer key: injected, all of them; detected, those whose
+    action is the one expected and came within 60 s of lab 6.1's record (of the finding, if lab
+    6.1 never wrote one), when our bar gives up, and not a FAILED patch; missed, those given
+    another action, INVALID or a FAILED patch (a patch agent behind a dead tunnel, issue 12), or
+    no decision within those 60 s, a late right one included; the median finding -> decision,
+    whatever the action and however late, and finding -> the patch's finish, PATCHED only."""
+    scored = [f for f in findings if f.critical and f.expected_action is not None
+              and f.event_time is not None and now - SCANNED_SECONDS <= f.event_time <= now]
+
+    def in_time(f: Finding) -> bool:  # decided, or still waiting, within the 60 s
+        decided = f.decided_at if f.decided_at is not None else now
+        return decided - (f.critical_at or f.event_time) <= SECURITY_WAIT_SECONDS
+
+    def wrong(f: Finding) -> bool:  # an answer that is a miss whenever it came
+        return f.action is not None and (f.action != f.expected_action or f.patch_status == FAILED)
+
+    right = [f for f in scored if f.action is not None and not wrong(f) and in_time(f)]
+    missed = [f for f in scored if wrong(f) or not in_time(f)]
+    return _issues_json(
+        len(scored), len(right), len(missed),
+        [f.decided_at - f.event_time for f in scored if f.decided_at is not None],
+        [f.patch_finished_at - f.event_time for f in scored
+         if f.patch_status == PATCHED and f.patch_finished_at is not None],
+    )
+
+
+def _patch_line(answer) -> str | None:
+    """The answer's Patch line without its label, or None."""
+    m = PATCH_LINE.search(answer) if isinstance(answer, str) else None
+    return (m.group(1).strip() or None) if m else None
 
 
 def _block_json(b: _Block, now: float, rel) -> dict:
@@ -946,6 +1283,12 @@ def _status(blocks: list[_Block], now: float) -> tuple[str, str]:
 
 
 # ---- helpers ------------------------------------------------------------------
+
+def _axis(t: float, left: float) -> float:
+    """Where absolute time ``t`` sits on a chart or a timeline whose left edge is ``left``: the
+    seconds from that edge, clipped to ``[0, CHART_SECONDS]``."""
+    return max(0.0, min(CHART_SECONDS, t - left))
+
 
 def _seeded_services() -> dict[str, ServiceState]:
     """Every service, so the wall shows its rows before the first record arrives."""

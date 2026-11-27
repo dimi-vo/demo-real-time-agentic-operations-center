@@ -19,15 +19,20 @@ AGENT = "INSERT INTO `remediation_decisions` SELECT 1;"
 P1_FILTER = "INSERT INTO `p1_tickets`\nSELECT * FROM `support_tickets` WHERE `priority` = 'P1';"
 CLASSIFIER = "-- 5.2\nINSERT INTO `ticket_triage` SELECT 1;"
 RESPONDER = "-- 5.3\nINSERT INTO `remediation_decisions` SELECT 1;"
+# Section 6 (D-070): the critical filter and the security agent, which writes its own table.
+CRITICAL_FILTER = "INSERT INTO `critical_cves`\nSELECT `event_time` FROM `cve_scans`\nWHERE `cvss_score` >= 9.0;"
+SECURITY = "-- 6.4\nINSERT INTO `patch_decisions`\nSELECT 1;"
 
 
-def test_the_output_topics_are_the_five_the_labs_write():
+def test_the_output_topics_are_the_seven_the_labs_write():
     assert OUTPUT_TOPICS == (
         "service_error_rate",
         "service_health",
         "remediation_decisions",
         "p1_tickets",
         "ticket_triage",
+        "critical_cves",
+        "patch_decisions",
     )
 
 
@@ -55,6 +60,8 @@ def test_the_output_topics_are_the_five_the_labs_write():
         "INSERT INTO remediation_decisions SELECT 1",
         "INSERT INTO `p1_tickets` SELECT * FROM `support_tickets`",
         "-- 5.2\nINSERT INTO my_env.my_cluster.ticket_triage SELECT 1",
+        "INSERT INTO `critical_cves` SELECT * FROM `cve_scans` WHERE `cvss_score` >= 9.0",
+        "-- 6.4\nINSERT INTO my_env.my_cluster.patch_decisions SELECT 1",
     ],
 )
 def test_matches_every_way_of_writing_an_insert_into_an_output_table(sql):
@@ -79,6 +86,10 @@ def test_matches_every_way_of_writing_an_insert_into_an_output_table(sql):
         "SELECT * FROM `p1_tickets`",
         "INSERT INTO support_tickets SELECT 1",  # a source table: the generator's, not a lab's
         "INSERT INTO ticket_answer_key SELECT 1",
+        "SELECT * FROM `critical_cves`",
+        "INSERT INTO cve_scans SELECT 1",  # the generator's, like support_tickets
+        "INSERT INTO cve_answer_key SELECT 1",
+        "INSERT INTO `patch_decisions_backup` SELECT 1",
     ],
 )
 def test_ignores_everything_else(sql):
@@ -136,6 +147,31 @@ def test_deletes_the_three_section_5_inserts_too(run):
     assert {"p1_tickets", "ticket_triage"} <= set(h.admin.emptied)
 
 
+def test_deletes_the_two_section_6_inserts_too(run):
+    # D-070: lab 6.1's critical filter and lab 6.4's security agent write their own tables.
+    h = run(
+        statements=[
+            statement("critical-filter", CRITICAL_FILTER),
+            statement("security", SECURITY),
+            statement("scans-watch", "SELECT * FROM `cve_scans` WHERE `cvss_score` >= 9.0"),
+        ],
+    )
+    deleted = {name for kind, name in h.events if kind == "deleted"}
+    assert deleted == {"critical-filter", "security"}
+    assert set(h.session.statements) == {"scans-watch"}
+    assert sorted(h.admin.emptied) == sorted(OUTPUT_TOPICS)
+    assert {"critical_cves", "patch_decisions"} <= set(h.admin.emptied)
+
+
+def test_names_all_seven_tables_when_it_deletes(run, capsys):
+    run(statements=[statement("security", SECURITY)])
+    out = capsys.readouterr().out
+    assert (
+        "write service_error_rate, service_health, remediation_decisions, p1_tickets, ticket_triage, "
+        "critical_cves or patch_decisions:" in out
+    )
+
+
 def test_ignores_statements_that_have_already_finished(run):
     h = run(
         statements=[
@@ -188,11 +224,16 @@ def test_the_next_steps_name_every_insert_in_lab_order(run, capsys):
     steps = [out.index(s) for s in ("INSERT INTO service_error_rate", "INSERT INTO service_health",
                                       "4.3_insert_release_agent_errors.sql",
                                       "5.1_p1_tickets.sql", "5.2_insert_ticket_classifier.sql",
-                                      "5.3_insert_ticket_responder.sql")]  # fmt: skip
+                                      "5.3_insert_ticket_responder.sql",
+                                      "6.1_critical_cves.sql", "6.4_insert_security_agent.sql")]  # fmt: skip
     assert steps == sorted(steps)
     # 5.2 and 5.3 read from the latest offset: started during 5.1's replay, the classifier
     # would call the model for every replayed P1.
     assert "once 5.1 has caught up" in out
+    # 6.4 too (D-070): started during 6.1's replay, the security agent would call the model,
+    # and the patch agent on the laptop, for every replayed critical finding.
+    assert "once 6.1 has caught up" in out
+    assert "uv run patch-agent" in out
 
 
 def test_a_missing_topic_is_reported_and_exits_nonzero(run, capsys):
@@ -234,4 +275,5 @@ def test_help_explains_the_command_in_two_lines(capsys):
     assert exit_.value.code == 0
     out = capsys.readouterr().out
     assert "service_health" in out and "remediation_decisions" in out
+    assert "critical_cves" in out and "patch_decisions" in out
     assert "Run" in out

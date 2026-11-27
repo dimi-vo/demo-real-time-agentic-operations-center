@@ -6,11 +6,13 @@ import json
 import re
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from opsgen.driver import run_simulate
 from opsgen.engine import BAD_DEPLOY, Config, Decision, Event
+from opsgen.findings import NewFinding
 from opsgen.simulation import Simulation
 from opsgen.sinks import DryRunSink, event_json, format_event
 from opsgen.tickets import NewTicket
@@ -89,10 +91,11 @@ def test_simulate_banner_shows_the_schedule():
         "# ops-sim --simulate 1min  (quiet=150s max=35s gap=20s "
         "rests: BAD_DEPLOY=390s UPSTREAM_DROP=300s; "
         "web-gateway deploys: first=60s every=60-90s; "
-        "checkout tickets: 1/15s P1=30% P2=30% P3=40% P1-HIGH=50%)"  # D-068
+        "checkout tickets: 1/15s P1=30% P2=30% P3=40% P1-HIGH=50%; "  # D-068
+        "findings: 1/15s critical=30% PATCH=50%)"  # D-070
     )
     no_incidents = _simulate(minutes=1, no_incidents=True).splitlines()[0]
-    assert no_incidents == "# ops-sim --simulate 1min  (no incidents, no tickets)"
+    assert no_incidents == "# ops-sim --simulate 1min  (no incidents, no tickets, no findings)"
 
 
 def test_simulate_an_hour_has_overlapping_incidents():
@@ -168,7 +171,9 @@ def test_simulate_gives_payments_bad_deploys_and_drops_and_nobody_a_surge():
     assert shared == {("BAD_DEPLOY", "payments"), ("UPSTREAM_DROP", "payments")}
     assert {itype for itype, svc in starts if svc == "web-gateway"} == {"BAD_DEPLOY_ERRORS"}
     # The schedule's lines: checkout's tickets, and their summary, expect SCALE_OUT (D-068).
-    schedule = "\n".join(ln for ln in text.splitlines() if ln.startswith("[") and " TICKET " not in ln)
+    schedule = "\n".join(
+        ln for ln in text.splitlines() if ln.startswith("[") and " TICKET " not in ln and " FINDING " not in ln
+    )
     assert "SURGE" not in schedule and "TRAFFIC_HIGH" not in schedule and "SCALE_OUT" not in schedule
 
 
@@ -396,7 +401,8 @@ def test_simulate_ends_with_the_tickets_by_priority_and_true_severity_and_the_hi
     drawn = [TICKET_LINE.fullmatch(ln).groups() for ln in lines if " TICKET " in ln]
     by = Counter((prio, sev) for _, prio, sev, _ in drawn)
     actions = Counter(action for _, _, sev, action in drawn if sev == "HIGH")
-    summary = lines[-5:]
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("# tickets: "))
+    summary = lines[start : start + 5]
     assert summary[0] == f"# tickets: {len(drawn)} in 60 min, {len(drawn) / 60:.1f} a minute"
     for prio, line in zip(("P1", "P2", "P3"), summary[1:4], strict=True):
         assert line == f"#   {prio}: {by[prio, 'HIGH']} HIGH, {by[prio, 'LOW']} LOW"
@@ -407,7 +413,112 @@ def test_simulate_ends_with_the_tickets_by_priority_and_true_severity_and_the_hi
     assert by["P2", "HIGH"] == by["P3", "HIGH"] == 0 and min(actions.values()) > 0
 
 
-def test_simulate_without_incidents_says_tickets_are_off():
+def test_simulate_without_incidents_says_tickets_and_findings_are_off():
     text = _simulate(minutes=10, no_incidents=True)
-    assert " TICKET " not in text
-    assert text.splitlines()[-1] == "# tickets: off (--no-incidents)"
+    assert " TICKET " not in text and " FINDING " not in text
+    assert text.splitlines()[-2:] == ["# tickets: off (--no-incidents)", "# findings: off (--no-incidents)"]
+
+
+# --- the scan clock's findings (D-070) -----------------------------------------------------
+
+PATCH_FINDING = NewFinding(
+    {
+        "event_time": 1_800_000_005_000,
+        "finding_id": "SCAN-000001",
+        "repository": "checkout",
+        "cve_id": "CVE-2026-41234",
+        "package": "urllib3",
+        "installed_version": "1.26.4",
+        "fixed_version": "1.26.18",
+        "cvss_score": 9.4,
+        "finding": "urllib3 1.26.4 is a runtime dependency of checkout, which runs in production.",
+    },
+    {"event_time": 1_800_000_005_000, "finding_id": "SCAN-000001", "expected_action": "PATCH"},
+)
+ORDINARY_FINDING = NewFinding(
+    {
+        "event_time": 1_800_000_007_000,
+        "finding_id": "SCAN-000002",
+        "repository": "storefront-legacy",
+        "cve_id": "CVE-2026-40311",
+        "package": "express",
+        "installed_version": "4.17.1",
+        "fixed_version": "4.19.2",
+        "cvss_score": 5.1,
+        "finding": "express 4.17.1 in storefront-legacy can send a user to another site.",
+    },
+    {"event_time": 1_800_000_007_000, "finding_id": "SCAN-000002", "expected_action": None},
+)
+
+
+def test_dry_run_writes_each_finding_and_its_answer_key_and_a_console_line():
+    out, log = io.StringIO(), io.StringIO()
+    DryRunSink(out=out, log=log).emit_findings([PATCH_FINDING, ORDINARY_FINDING])
+    assert [json.loads(line) for line in out.getvalue().splitlines()] == [
+        {"_stream": "cve_scans", **PATCH_FINDING.scan},
+        {"_stream": "cve_answer_key", **PATCH_FINDING.answer_key},
+        {"_stream": "cve_scans", **ORDINARY_FINDING.scan},
+        {"_stream": "cve_answer_key", **ORDINARY_FINDING.answer_key},
+    ]
+    # The answer key is set apart, so nobody takes it for part of the finding.
+    assert log.getvalue().splitlines() == [
+        "[08:00:05] FINDING         SCAN-000001   9.4  checkout           CVE-2026-41234  "
+        "urllib3 1.26.4 -> 1.26.18  [truth: PATCH]",
+        "[08:00:07] FINDING         SCAN-000002   5.1  storefront-legacy  CVE-2026-40311  "
+        "express 4.17.1 -> 4.19.2  [truth: not critical]",
+    ]
+
+
+def _ddl_columns(table):
+    sql = (Path(__file__).resolve().parents[2] / "sql" / f"source_{table}.sql").read_text()
+    body = sql[sql.index("CREATE TABLE") :]
+    return re.findall(r"^\s*`(\w+)` [A-Z]", body, re.MULTILINE)
+
+
+def test_a_live_or_dry_run_tick_sends_its_findings_to_the_sink_with_the_ddls_columns():
+    sent = _ticks(None, seconds=120)
+    scans = [r for r in sent if r.get("_stream") == "cve_scans"]
+    keys = [r for r in sent if r.get("_stream") == "cve_answer_key"]
+    assert len(scans) >= 3
+    assert [r["finding_id"] for r in scans] == [r["finding_id"] for r in keys]
+    for stream, records in (("cve_scans", scans), ("cve_answer_key", keys)):
+        assert all([k for k in r if k != "_stream"] == _ddl_columns(stream) for r in records), stream
+
+
+def test_findings_come_with_or_without_show_records_and_print_nothing_more():
+    # No new flags (D-070): --show-records still takes a service, and the findings go to the
+    # sink either way.
+    plain = _ticks(None, seconds=60)
+    assert _ticks("checkout", seconds=60) == plain
+    assert any(r.get("_stream") == "cve_scans" for r in plain)
+
+
+FINDING_LINE = re.compile(
+    r"\[(\d\d:\d\d)\] FINDING {9}SCAN-\d{6} +(\d{1,2}\.\d)  "
+    r"(?:web-gateway|checkout|payments|ci-tools|storefront-legacy) *  CVE-2026-4\d{4}  "
+    r"\S+ \S+ -> \S+  \[truth: (PATCH|DISMISS|not critical)\]"
+)
+
+
+def test_simulate_prints_every_finding_from_the_first_minute():
+    lines = _simulate(seed=1, minutes=15).splitlines()
+    drawn = [ln for ln in lines if " FINDING " in ln]
+    assert all(FINDING_LINE.fullmatch(ln) for ln in drawn), [ln for ln in drawn if not FINDING_LINE.fullmatch(ln)]
+    assert _clock(drawn[0]) < 60
+    assert 40 <= len(drawn) <= 80  # about 4 a minute
+    for ln in drawn:
+        _, score, truth = FINDING_LINE.fullmatch(ln).groups()
+        assert (float(score) >= 9.0) == (truth != "not critical"), ln
+
+
+def test_simulate_ends_with_the_findings_by_expected_action():
+    lines = _simulate(seed=3, minutes=60).splitlines()
+    truths = Counter(FINDING_LINE.fullmatch(ln).group(3) for ln in lines if " FINDING " in ln)
+    n = sum(truths.values())
+    critical = truths["PATCH"] + truths["DISMISS"]
+    assert lines[-2:] == [
+        f"# findings: {n} in 60 min, {n / 60:.1f} a minute",
+        f"#   critical: {critical} (PATCH {truths['PATCH']}, DISMISS {truths['DISMISS']}), "
+        f"not critical: {truths['not critical']}",
+    ]
+    assert min(truths.values()) > 0

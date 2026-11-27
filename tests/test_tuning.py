@@ -123,7 +123,7 @@ def test_sweep_windows_sum_traffic_and_average_the_samples(monkeypatch):
             count, latency = (9, 100.0) if k % 2 == 0 else (1, 300.0)
             sample = {"event_time": self.tick_ms(now) + 999, "service_name": "payments",
                       "traffic_count": count, "latency_ms": latency, "error_count": 0}  # fmt: skip
-            return [sample], [], [], []  # metrics, deploys, events, tickets
+            return [sample], [], [], [], []  # metrics, deploys, events, tickets, findings
 
     monkeypatch.setattr(sim_mod, "Simulation", FakeSimulation)
     rows, _incidents, start, _end, rate = simulate(DataConfig(aligned=True), seed=0, hours=60 / 3600)

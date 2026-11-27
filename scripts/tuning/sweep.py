@@ -118,7 +118,7 @@ def simulate(data: DataConfig, seed: int, hours: float) -> tuple[list[HealthRow]
     ticks = int(hours * 3600)
     for k in range(ticks):
         now = start + k
-        metrics, _deps, events, _tickets = sim.tick(now)
+        metrics, _deps, events, _tickets, _findings = sim.tick(now)
         for m in metrics:
             total += m["traffic_count"]
             a = agg[(m["service_name"], m["event_time"] // WINDOW_MS)]

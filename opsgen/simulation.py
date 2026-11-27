@@ -1,5 +1,5 @@
-"""Ties the engine, deployment state, metrics generation and the ticket clock into per-second
-ticks.
+"""Ties the engine, deployment state, metrics generation, the ticket clock and the scan clock
+into per-second ticks.
 
 `Simulation` is clock-agnostic: the live driver feeds it `time.time()`, the
 `--simulate` driver feeds it a fast synthetic clock. It never sleeps, never touches
@@ -17,6 +17,7 @@ from typing import NamedTuple
 from opsgen.deployments import DeploymentState, highest
 from opsgen.distributions import binomial, mean_latency_ms, poisson
 from opsgen.engine import Config, Decision, Engine, Event
+from opsgen.findings import FIRST_NUMBER, NewFinding, ScanClock
 from opsgen.services import METRIC_SERVICES
 from opsgen.tickets import SOURCES, NewTicket, TicketClock
 
@@ -36,14 +37,16 @@ class Tick(NamedTuple):
     deployments: list[dict]  # service_deployments records: version changes and the 5 s re-emit
     events: list[Event]  # incident starts and ends, and deploys
     tickets: list[NewTicket]  # each a support_tickets record and its ticket_answer_key record
+    findings: list[NewFinding]  # each a cve_scans record and its cve_answer_key record (D-070)
 
 
 class Simulation:
-    """One generator run. Four independent RNG streams derived from `seed`:
+    """One generator run. Five independent RNG streams derived from `seed`:
     - the scheduler's, `Random(seed)`: payments' incidents;
     - the traffic's, `Random(seed + 1)`: the metric values;
     - web-gateway's deploy clock, `Random(seed + 2)` (D-067);
-    - checkout's ticket clock, `Random(seed + 3)` (D-068).
+    - checkout's ticket clock, `Random(seed + 3)` (D-068);
+    - the scan clock, `Random(seed + 4)`: the CVE scan findings (D-070).
     So each schedule is reproducible, and independent of how much the others draw.
     `seed=None` seeds them all from the OS (not reproducible)."""
 
@@ -87,6 +90,13 @@ class Simulation:
         self.ticket_clock = TicketClock(
             rng=self.ticket_rng,
             next_numbers={s.code: int(saved_numbers.get(s.code, s.first_number)) for s in SOURCES},
+            on=not self.config.no_incidents,
+        )
+        # The scan clock likewise (D-070): its own rng, off with --no-incidents, and one id
+        # counter that continues across restarts; a state file from before D-070 starts it at 1.
+        self.scan_clock = ScanClock(
+            rng=random.Random(None if seed is None else seed + 4),
+            next_number=int((initial_state or {}).get("next_finding_number", FIRST_NUMBER)),
             on=not self.config.no_incidents,
         )
         # Continue incident numbering across restarts: ops-wall pairs each incident's start
@@ -153,7 +163,8 @@ class Simulation:
 
     def tick(self, now: float, decisions: Iterable[Decision] = ()) -> Tick:
         """Advance one tick. Each of the `Tick`'s tickets is its `support_tickets` record and
-        its `ticket_answer_key` record, both stamped with the tick.
+        its `ticket_answer_key` record, and each of its findings its `cve_scans` record and its
+        `cve_answer_key` record, all stamped with the tick.
 
         `decisions` are the agent decisions read since the last tick. They are applied first
         (D-065), so a decision that resolves an incident ends it on this tick: this tick's
@@ -175,12 +186,13 @@ class Simulation:
                     dep_records.append(self._dep_record(name, now))
         metrics = self._gen_metrics(now)
         tickets = self.ticket_clock.tick(self.tick_ms(now))
-        return Tick(metrics, dep_records, events, tickets)
+        findings = self.scan_clock.tick(self.tick_ms(now))
+        return Tick(metrics, dep_records, events, tickets, findings)
 
     def state_snapshot(self) -> dict:
         """The persistable state: each metric service's deployment (versions, the highest
-        version it has run, deployed_at), the last incident number used, and the next ticket
-        number of each source (D-068)."""
+        version it has run, deployed_at), the last incident number used, the next ticket
+        number of each source (D-068) and the next finding number (D-070)."""
         return {
             "services": {
                 name: {
@@ -194,4 +206,5 @@ class Simulation:
             },
             "incident_counter": self.engine.incident_counter,
             "next_ticket_numbers": dict(self.ticket_clock.next_numbers),
+            "next_finding_number": self.scan_clock.next_number,
         }

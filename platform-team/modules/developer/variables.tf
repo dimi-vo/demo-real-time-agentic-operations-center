@@ -23,6 +23,16 @@ variable "csp_hosted_model" {
   type        = string
 }
 
+variable "deploy_labs" {
+  description = "Also run the labs' 17 statements (statements.tf, D-069)"
+  type        = bool
+}
+
+variable "patch_agent_url" {
+  description = "With deploy_labs, lab 6.2's connection endpoint: the tunnel's URL in front of the presenter's patch-agent (D-070)"
+  type        = string
+}
+
 variable "principal_id" {
   description = "Owner of the platform team's Global key; every statement runs as it"
   type        = string

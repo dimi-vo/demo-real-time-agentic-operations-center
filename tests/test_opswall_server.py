@@ -26,7 +26,7 @@ def test_healthz_reports_service_count_and_no_errors(client):
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "ok"
-    assert data["serviceCount"] == 3
+    assert data["serviceCount"] == 3  # services: the "Code security incidents" row is none (D-070)
     assert data["connectionErrors"] == {}
 
 
@@ -59,11 +59,11 @@ def test_websocket_sends_a_snapshot_on_connect(client):
         payload = ws.receive_text()
         snap = json.loads(payload)
         assert snap["chartSeconds"] == 120  # every row's time axis, checkout's timeline included
-        assert isinstance(snap["services"], list) and len(snap["services"]) == 3
+        assert isinstance(snap["services"], list) and len(snap["services"]) == 4  # three services, then security
         assert "summary" not in snap  # each row has its own Issues panel (D-068)
         assert snap["actionWords"]["ROLLBACK"] == "Roll back"
         for s in snap["services"]:
-            assert ("blocks" in s and "groundTruth" in s) == (s["row"] != "tickets")
+            assert ("blocks" in s and "groundTruth" in s) == (s["row"] not in ("tickets", "security"))
             assert s["issues"] == {"injected": 0, "detected": 0, "missed": 0,
                                    "medianTimeToDetect": None, "medianTimeToRemediate": None,
                                    "medianTimeToDetectText": "—", "medianTimeToRemediateText": "—"}
@@ -74,3 +74,9 @@ def test_websocket_sends_a_snapshot_on_connect(client):
         assert (checkout["marks"], checkout["runs"], checkout["openP1"], checkout["agentsWorking"]) == ([], [], 0, 0)
         assert [lane["state"] for lane in checkout["lanes"]] == ["Idle", "Idle"]
         assert checkout["agentsText"] == "Both agents idle"
+        # the "Code security incidents" row (D-070), last, with its list and timeline
+        security = snap["services"][-1]
+        assert (security["name"], security["row"]) == ("Code security incidents", "security")
+        assert security["findings"] == {"scanned": 0, "newest": []}
+        assert (security["marks"], security["runs"], security["openCriticals"]) == ([], [], 0)
+        assert [lane["name"] for lane in security["lanes"]] == ["Security agent", "External · LangGraph · A2A"]

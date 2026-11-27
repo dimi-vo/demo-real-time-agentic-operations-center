@@ -39,7 +39,7 @@ output "handout" {
 output "validation" {
   description = "A numbered Console link per developer to their service_metrics topic schema"
   value = join("", concat(
-    ["Check in the Console that each environment has the ten tables and the model (the registered schema proves the CREATE TABLE ran; the topics stay empty until the developer runs ops-sim):\n"],
+    ["Check in the Console that each environment has the fourteen tables and the model (the registered schema proves the CREATE TABLE ran; the topics stay empty until the developer runs ops-sim):\n"],
     [
       for i, email in sort(keys(module.developer)) : format(
         "\n%d. %s: %s (%s)\n   https://confluent.cloud/environments/%s/clusters/%s/topics/service_metrics/message-viewer?tab=schema\n",

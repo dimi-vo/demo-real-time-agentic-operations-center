@@ -1,0 +1,17 @@
+{
+  "type": "record",
+  "name": "cve_scans_value",
+  "namespace": "io.confluent.aiops",
+  "doc": "Value schema for the cve_scans topic. Repo copy for --dry-run and the schema-vs-DDL drift test (tests/test_schema_vs_ddl.py); live serialization uses the schema Flink registers from sql/source_cve_scans.sql. One record per CVE scan finding, written when it is reported (D-070).",
+  "fields": [
+    {"name": "event_time", "type": ["null", {"type": "long", "logicalType": "local-timestamp-millis"}], "default": null},
+    {"name": "finding_id", "type": ["null", "string"], "default": null},
+    {"name": "repository", "type": ["null", "string"], "default": null},
+    {"name": "cve_id", "type": ["null", "string"], "default": null},
+    {"name": "package", "type": ["null", "string"], "default": null},
+    {"name": "installed_version", "type": ["null", "string"], "default": null},
+    {"name": "fixed_version", "type": ["null", "string"], "default": null},
+    {"name": "cvss_score", "type": ["null", "double"], "default": null},
+    {"name": "finding", "type": ["null", "string"], "default": null}
+  ]
+}

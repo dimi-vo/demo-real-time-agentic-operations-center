@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import pytest
 
 from scripts.opswall.state import CHART_SECONDS, ERROR_RATE_THRESHOLD_PCT, HISTORY_SECONDS, OpsWallState
+from scripts.patchagent.reply import commit_for, format_reply
 
 NOW = 1_800_000_000.0  # fixed epoch so snapshots are deterministic; a multiple of 10
 T0 = NOW - 100         # incidents start here, on a window boundary, on the 2-minute chart
@@ -74,7 +75,8 @@ def _pos(t, now=NOW):
 
 def test_services_are_preseeded():
     snap = OpsWallState().snapshot(now=NOW)
-    assert [s["name"] for s in snap["services"]] == ["web-gateway", "checkout", "payments"]  # the wall's order
+    # the wall's order, then the "Code security incidents" row, which is no service (D-070)
+    assert [s["name"] for s in snap["services"]] == ["web-gateway", "checkout", "payments", "Code security incidents"]
     names = {s["name"]: s for s in snap["services"]}
     assert names["checkout"]["status"] == "healthy"
     assert "maxReplicas" not in names["payments"]  # D-043: no ceiling
@@ -112,7 +114,8 @@ def test_unknown_service_is_silently_ignored():
     st.apply_decision({"service_name": "nope"})
     st.apply_incident({"service_name": "nope", "incident_id": "X"})
     _sample(st, "nope", NOW - 1)
-    assert len(st.snapshot(now=NOW)["services"]) == 3
+    assert [s["name"] for s in st.snapshot(now=NOW)["services"]] == [
+        "web-gateway", "checkout", "payments", "Code security incidents"]
 
 
 # --- service_metrics samples (D-061) -------------------------------------------
@@ -658,7 +661,8 @@ def _deployment(st, service, deployed_at, last_change, version, previous_version
 
 
 def test_each_metric_row_names_its_charts():
-    charts = {s["name"]: s["charts"] for s in OpsWallState().snapshot(now=NOW)["services"] if s["row"] != "tickets"}
+    charts = {s["name"]: s["charts"] for s in OpsWallState().snapshot(now=NOW)["services"]
+              if s["row"] not in ("tickets", "security")}
     assert charts == {"web-gateway": ["errors"], "payments": ["latency", "traffic"]}
 
 
@@ -929,7 +933,8 @@ def _row(st, now=NOW):
 def test_the_snapshot_says_which_kind_of_row_each_service_gets():
     # From opsgen.services' split (issue 02), so the page holds no service names.
     rows = {s["name"]: s["row"] for s in OpsWallState().snapshot(now=NOW)["services"]}
-    assert rows == {"web-gateway": "releases", "checkout": "tickets", "payments": "windows"}
+    assert rows == {"web-gateway": "releases", "checkout": "tickets", "payments": "windows",
+                    "Code security incidents": "security"}  # D-070: beside the services, not one of them
 
 
 def test_the_list_has_the_newest_5_tickets_and_the_count_of_the_last_10_minutes():
@@ -1254,3 +1259,485 @@ def test_time_to_remediate_counts_any_action():
     _story(st, "A", NOW - 100, verdict="HIGH", verdict_after=4)
     _respond(st, "A", at=NOW - 100 + 9, action="INVALID", t=NOW - 100)
     assert _row(st)["issues"]["medianTimeToRemediate"] == pytest.approx(9.0)
+
+
+# --- the "Code security incidents" row: findings and agent runs (D-070) -------------------
+
+
+SECURITY = "Code security incidents"
+FT = NOW - 60  # a finding reported a minute ago
+REQUEST = "PATCH checkout CVE-2026-41234 urllib3 1.26.4 -> 1.26.18"
+COMMIT = commit_for(REQUEST)
+PATCH_REASON = "urllib3 ships in the checkout runtime and the vulnerable code is called."
+# What lab 6.4 writes for a stopped patch agent (issue 02's step 5): the agent card fetch fails
+# before the model runs, so the answer is Flink's error alone, INVALID and N/A (issue 07).
+A2A_ERROR = ("Exception while initializing A2A client for agent: `env-mny3mw`.`lkc-9ko79yv`.`security_agent` "
+             "with URL: https://story-josh-dishes-ontario.trycloudflare.com. ERROR: Failed to obtain agent card: 502")
+
+
+def _scan_fields(fid, t=FT, score=9.8, repository="checkout", cve="CVE-2026-41234"):
+    """The nine columns of a finding, which critical_cves copies from cve_scans."""
+    return {"event_time": _dt(t), "finding_id": fid, "repository": repository, "cve_id": cve,
+            "package": "urllib3", "installed_version": "1.26.4", "fixed_version": "1.26.18",
+            "cvss_score": score, "finding": "urllib3 1.26.4 is a runtime dependency of checkout."}
+
+
+def _scan(st, fid, t=FT, score=9.8, repository="checkout", cve="CVE-2026-41234"):
+    """One cve_scans record, as ops-sim writes it (event_time a TIMESTAMP(3))."""
+    st.apply_finding(_scan_fields(fid, t, score, repository, cve))
+
+
+def _cve_truth(st, fid, action="PATCH", t=FT):
+    """The simulator's cve_answer_key record: null when the finding isn't critical."""
+    st.apply_cve_answer_key({"event_time": _dt(t), "finding_id": fid, "expected_action": action})
+
+
+def _critical(st, fid, at, t=FT, score=9.8):
+    """Lab 6.1's critical_cves record; `at` is its Kafka timestamp."""
+    st.apply_critical_cve(_scan_fields(fid, t, score), kafka_ts=at)
+
+
+def _decision_record(fid, action="PATCH", status="PATCHED", reason=PATCH_REASON, started=None, finished=None,
+                     commit="default", raw=None, t=FT):
+    """Lab 6.4's patch_decisions record. A PATCHED one carries the patch agent's reply in its
+    Patch line, and the commit and times lab 6.4 parsed out of it."""
+    if commit == "default":
+        commit = COMMIT if status == "PATCHED" else None
+    if raw is None:
+        if status == "PATCHED":
+            reply = format_reply(REQUEST, datetime.fromtimestamp(started, tz=timezone.utc),
+                                 datetime.fromtimestamp(finished, tz=timezone.utc))
+            raw = f"Action: PATCH\nReason: {reason}\nPatch: {reply}"
+        else:
+            raw = f"Action: {action}\nReason: {reason}\nPatch: N/A"
+    return {"event_time": _dt(t), "finding_id": fid, "repository": "checkout", "cve_id": "CVE-2026-41234",
+            "cvss_score": 9.8, "action": action, "reason": reason, "patch_status": status, "commit_sha": commit,
+            "patch_started_at": None if started is None else _dt(started),
+            "patch_finished_at": None if finished is None else _dt(finished), "raw_response": raw}
+
+
+def _patch_decision(st, fid, at, **kw):
+    """Lab 6.4's patch_decisions record; `at` is its Kafka timestamp."""
+    st.apply_patch_decision(_decision_record(fid, **kw), kafka_ts=at)
+
+
+def _patched(st, fid, at, started, finished, t=FT):
+    _patch_decision(st, fid, at=at, started=started, finished=finished, t=t)
+
+
+def _dismissed(st, fid, at, reason="Only a dev dependency of the test suite.", t=FT):
+    _patch_decision(st, fid, at=at, action="DISMISS", status="N/A", reason=reason, t=t)
+
+
+def _sec(st, now=NOW):
+    return next(s for s in st.snapshot(now=now)["services"] if s["row"] == "security")
+
+
+def test_the_security_row_comes_after_the_three_services_and_is_no_service():
+    snap = OpsWallState().snapshot(now=NOW)
+    assert [(s["name"], s["row"]) for s in snap["services"]] == [
+        ("web-gateway", "releases"), ("checkout", "tickets"), ("payments", "windows"), (SECURITY, "security")]
+    row = snap["services"][-1]
+    assert set(row) == {"name", "row", "status", "statusText", "issues", "findings", "marks", "runs", "lanes",
+                        "openCriticals"}
+    assert (row["status"], row["statusText"], row["openCriticals"]) == ("healthy", "Healthy", 0)
+    assert (row["findings"], row["marks"], row["runs"]) == ({"scanned": 0, "newest": []}, [], [])
+    assert row["issues"] == {"injected": 0, "detected": 0, "missed": 0, "medianTimeToDetect": None,
+                             "medianTimeToRemediate": None, "medianTimeToDetectText": "—",
+                             "medianTimeToRemediateText": "—"}
+
+
+def test_a_patch_is_our_closed_bar_hatched_while_it_waits_with_the_external_bar_inside_it():
+    st = OpsWallState()
+    _scan(st, "SCAN-000123")
+    _critical(st, "SCAN-000123", at=FT + 0.6)
+    _patched(st, "SCAN-000123", at=FT + 12.6, started=FT + 3.1, finished=FT + 9.1)
+    security, external = _sec(st)["runs"]
+    assert security == {
+        "key": "security-agent@SCAN-000123", "lane": "security-agent", "findingId": "SCAN-000123",
+        "repository": "checkout", "cveId": "CVE-2026-41234", "cvssScore": 9.8, "start": pytest.approx(_tpos(FT + 0.6)),
+        "end": pytest.approx(_tpos(FT + 12.6)), "open": False, "label": "Patched in 12s",
+        "action": "PATCH", "outcome": "Patch",
+        "outcomeText": f"Action: Patch. Commit {COMMIT}.",  # the tooltip's sentence (the code review's M5)
+        "reason": PATCH_REASON, "commit": COMMIT, "patchStatus": "PATCHED", "unreachable": False,
+        # the hatch: the external run's span, on our bar
+        "waitFrom": pytest.approx(_tpos(FT + 3.1)), "waitTo": pytest.approx(_tpos(FT + 9.1)),
+    }
+    reply = format_reply(REQUEST, datetime.fromtimestamp(FT + 3.1, tz=timezone.utc),
+                         datetime.fromtimestamp(FT + 9.1, tz=timezone.utc))
+    assert external == {
+        "key": "external@SCAN-000123", "lane": "external", "findingId": "SCAN-000123", "repository": "checkout",
+        "cveId": "CVE-2026-41234", "cvssScore": 9.8, "start": pytest.approx(_tpos(FT + 3.1)),
+        "end": pytest.approx(_tpos(FT + 9.1)), "open": False, "label": f"{COMMIT} in 6s",
+        "commit": COMMIT, "reply": reply,  # the Patch line: what the patch agent answered
+        "startedAt": pytest.approx(FT + 3.1), "finishedAt": pytest.approx(FT + 9.1),
+        "duration": pytest.approx(6.0), "durationText": "6s",
+    }
+    assert security["start"] < external["start"] < external["end"] < security["end"]
+    assert "outcomeText" not in external  # its tooltip is the reply and the times, which the page writes
+
+
+def test_a_dismiss_is_one_bar_and_no_external_one():
+    st = OpsWallState()
+    _critical(st, "SCAN-000124", at=FT + 1)
+    _dismissed(st, "SCAN-000124", at=FT + 9.4, reason="Only a dev dependency of the test suite.")
+    [run] = _sec(st)["runs"]
+    assert (run["lane"], run["open"], run["label"]) == ("security-agent", False, "Dismissed in 8s")
+    assert (run["action"], run["outcome"], run["reason"]) == (
+        "DISMISS", "Dismiss", "Only a dev dependency of the test suite.")
+    assert run["outcomeText"] == "Action: Dismiss."
+    assert (run["commit"], run["patchStatus"], run["unreachable"]) == (None, "N/A", False)
+    assert (run["waitFrom"], run["waitTo"]) == (None, None)
+
+
+@pytest.mark.parametrize(("action", "status", "raw", "label", "outcome", "unreachable", "text"), [
+    # lab 6.4: a PATCH whose Patch line holds no commit
+    ("PATCH", "FAILED", "Action: PATCH\nReason: r\nPatch: FAILED, the call timed out", "Patch agent unreachable",
+     "Patch", True, "Action: Patch. No commit came back."),
+    ("INVALID", "N/A", "I am not sure.", "Invalid answer", "Invalid", False, "No PATCH or DISMISS came back."),
+    # Flink's error for a patch agent it could not reach, but not the whole answer: the agent answered
+    ("INVALID", "N/A", f"Action: unsure\nPatch: {A2A_ERROR}", "Invalid answer", "Invalid", False,
+     "No PATCH or DISMISS came back."),
+])
+def test_a_failed_patch_and_an_invalid_answer_read_their_words(action, status, raw, label, outcome, unreachable,
+                                                               text):
+    st = OpsWallState()
+    _critical(st, "SCAN-000125", at=FT + 1)
+    _patch_decision(st, "SCAN-000125", at=FT + 31, action=action, status=status, reason=None, raw=raw)
+    [run] = _sec(st)["runs"]
+    assert (run["open"], run["label"], run["outcome"], run["unreachable"]) == (False, label, outcome, unreachable)
+    assert run["outcomeText"] == text
+    assert run["end"] == pytest.approx(_tpos(FT + 31))
+
+
+@pytest.mark.parametrize("truth", ["PATCH", "DISMISS"])
+def test_a_stopped_patch_agent_reads_patch_agent_unreachable_in_red_and_is_a_miss(truth):
+    # Issue 02's step 5: Flink fetches the agent card on every call, so a stopped patch agent
+    # fails the whole agent call before the model answers, and lab 6.4 writes INVALID and N/A,
+    # not FAILED (issue 07), whatever the finding called for. The user's decision (the code
+    # review, S-c1): such an INVALID reads "Patch agent unreachable", red like FAILED, and is
+    # still a miss. It draws no external bar.
+    st = OpsWallState()
+    _scan(st, "SCAN-000126")
+    _cve_truth(st, "SCAN-000126", truth)
+    _critical(st, "SCAN-000126", at=FT + 1)
+    _patch_decision(st, "SCAN-000126", at=FT + 2, action="INVALID", status="N/A", reason=None, raw=A2A_ERROR)
+    row = _sec(st)
+    [run] = row["runs"]
+    assert (run["label"], run["unreachable"], run["action"], run["outcome"]) == (
+        "Patch agent unreachable", True, "INVALID", "Invalid")
+    assert run["outcomeText"] == "The patch agent could not be reached, so no decision came back."
+    assert (run["commit"], run["waitFrom"], run["waitTo"]) == (None, None, None)
+    assert (row["issues"]["injected"], row["issues"]["detected"], row["issues"]["missed"]) == (1, 0, 1)
+
+
+def test_a_patch_agent_behind_a_dead_tunnel_reads_patch_agent_unreachable_and_is_a_miss():
+    # Issue 12's live run (2026-11-27): with the tunnel gone, the running lab 6.4 INSERT did not
+    # fail at the agent card as issue 02's one-off SELECT did. The model got the tool's error and
+    # answered PATCH with no commit, so lab 6.4 wrote PATCH and FAILED. The decision was the one
+    # expected, but nothing was patched: a miss (the user's decision), red like the INVALID above.
+    st = OpsWallState()
+    _scan(st, "SCAN-000121")
+    _cve_truth(st, "SCAN-000121", "PATCH")
+    _critical(st, "SCAN-000121", at=FT + 1)
+    _patch_decision(st, "SCAN-000121", at=FT + 3, action="PATCH", status="FAILED", reason="r",
+                    raw="Action: PATCH\nReason: r\nPatch: FAILED, the patch agent could not be reached")
+    row = _sec(st)
+    [run] = row["runs"]
+    assert (run["label"], run["unreachable"], run["action"]) == ("Patch agent unreachable", True, "PATCH")
+    assert run["outcomeText"] == "Action: Patch. No commit came back."
+    assert (row["issues"]["injected"], row["issues"]["detected"], row["issues"]["missed"]) == (1, 0, 1)
+
+
+def test_with_no_decision_our_bar_works_for_60_s_then_reads_no_answer():
+    st = OpsWallState()
+    _critical(st, "SCAN-000127", at=FT + 1)
+    [run] = _sec(st, now=FT + 4.2)["runs"]
+    assert (run["open"], run["label"], run["outcome"], run["end"]) == (True, "Working 3s", None, 120)
+    assert run["outcomeText"] == "Waiting for the security agent."
+    [run] = _sec(st, now=FT + 61)["runs"]
+    assert (run["open"], run["label"]) == (True, "Working 1m 00s")  # checkout gives up after 30 s; ours after 60
+    [run] = _sec(st, now=FT + 61.5)["runs"]
+    assert (run["open"], run["label"], run["outcome"]) == (False, "No answer", None)
+    assert run["outcomeText"] == "The security agent gave no answer."
+    assert run["end"] == pytest.approx(_tpos(FT + 61, now=FT + 61.5))  # it ends 60 s after it started
+    # A late decision still closes it, as a ticket's does.
+    _dismissed(st, "SCAN-000127", at=FT + 76)
+    [run] = _sec(st, now=FT + 80)["runs"]
+    assert (run["open"], run["label"]) == (False, "Dismissed in 1m 15s")
+
+
+def test_the_external_bar_appears_only_once_our_agent_has_answered():
+    # Spec 24: the patch's times come with the patch decision, so while the patch runs our bar
+    # reads Working and the external lane is empty (D-070, option a).
+    st = OpsWallState()
+    _critical(st, "SCAN-000128", at=FT + 0.6)
+    [run] = _sec(st, now=FT + 6)["runs"]  # the patch agent is patching right now
+    assert (run["lane"], run["open"], run["label"], run["waitFrom"], run["waitTo"]) == (
+        "security-agent", True, "Working 5s", None, None)
+    _patched(st, "SCAN-000128", at=FT + 12.6, started=FT + 3.1, finished=FT + 9.1)
+    assert [(r["lane"], r["open"]) for r in _sec(st, now=FT + 13)["runs"]] == [("security-agent", False),
+                                                                           ("external", False)]
+
+
+def test_an_external_bar_needs_both_times():
+    st = OpsWallState()
+    _critical(st, "SCAN-000129", at=FT + 1)
+    _patch_decision(st, "SCAN-000129", at=FT + 12, started=FT + 3, finished=None, raw="Action: PATCH\nPatch: odd")
+    [run] = _sec(st)["runs"]
+    assert (run["lane"], run["label"], run["waitFrom"]) == ("security-agent", "Patched in 11s", None)
+
+
+def test_the_hatch_is_the_part_of_our_bar_the_patch_covers():
+    # The patch's times are the laptop's clock, our bar's are Kafka's: a laptop running ahead
+    # puts the finish after our answer. The hatch stays on our bar; the external bar is drawn as
+    # it came.
+    st = OpsWallState()
+    _critical(st, "SCAN-000130", at=FT + 1)
+    _patched(st, "SCAN-000130", at=FT + 10, started=FT + 4, finished=FT + 11.5)
+    security, external = _sec(st)["runs"]
+    assert (security["waitFrom"], security["waitTo"]) == (pytest.approx(_tpos(FT + 4)), pytest.approx(_tpos(FT + 10)))
+    assert external["end"] == pytest.approx(_tpos(FT + 11.5))
+
+
+def test_a_decision_without_its_critical_cves_record_starts_our_bar_at_the_finding():
+    # The wall reads each topic from 10 minutes back: the cut can fall between a finding's
+    # critical_cves record and its decision.
+    st = OpsWallState()
+    _dismissed(st, "SCAN-000131", at=FT + 7)
+    [run] = _sec(st)["runs"]
+    assert (run["start"], run["label"]) == (pytest.approx(_tpos(FT)), "Dismissed in 7s")
+    _critical(st, "SCAN-000131", at=FT + 0.5)  # its critical_cves record arrives after all
+    assert _sec(st)["runs"][0]["start"] == pytest.approx(_tpos(FT + 0.5))
+
+
+def test_a_critical_finding_nobody_routed_gets_no_bar():
+    # Like a ticket before lab 5.1: no critical_cves record, no agent working on it.
+    st = OpsWallState()
+    _scan(st, "SCAN-000132", score=9.9)
+    _cve_truth(st, "SCAN-000132", "DISMISS")
+    row = _sec(st)
+    assert (row["runs"], row["status"], row["openCriticals"]) == ([], "healthy", 0)
+
+
+def test_every_finding_of_the_last_2_minutes_is_a_mark_with_its_cve_id():
+    st = OpsWallState()
+    _scan(st, "SCAN-000140", t=NOW - 121, score=9.5)                          # just off the timeline
+    _scan(st, "SCAN-000141", t=NOW - 120, score=6.1, cve="CVE-2026-40007")
+    _scan(st, "SCAN-000142", t=NOW - 30, score=9.0, cve="CVE-2026-46471")     # 9.0 is critical: lab 6.1's >=
+    _scan(st, "SCAN-000143", t=NOW - 5, score=8.9, cve="CVE-2026-40311")
+    assert _sec(st)["marks"] == [
+        {"id": "SCAN-000141", "cveId": "CVE-2026-40007", "critical": False, "t": pytest.approx(0.0)},
+        {"id": "SCAN-000142", "cveId": "CVE-2026-46471", "critical": True, "t": pytest.approx(90.0)},
+        {"id": "SCAN-000143", "cveId": "CVE-2026-40311", "critical": False, "t": pytest.approx(115.0)},
+    ]
+
+
+def test_the_list_has_the_newest_5_findings_and_the_count_of_the_last_10_minutes():
+    st = OpsWallState()
+    _scan(st, "SCAN-000150", t=NOW - 601)                       # 10 minutes and a second ago: not scanned
+    _scan(st, "SCAN-000151", t=NOW - 599, score=5.0)
+    for k, (repo, score) in enumerate([("payments", 9.1), ("ci-tools", 4.3), ("storefront-legacy", 9.7),
+                                       ("web-gateway", 7.2), ("checkout", 10.0)]):
+        _scan(st, f"SCAN-00016{k}", t=NOW - 50 + 10 * k, score=score, repository=repo)
+    findings = _sec(st)["findings"]
+    assert findings["scanned"] == 6
+    assert [f["id"] for f in findings["newest"]] == [
+        "SCAN-000164", "SCAN-000163", "SCAN-000162", "SCAN-000161", "SCAN-000160"]
+    # what a row shows, and what the page's dot rule reads: a new id, at most 10 s old
+    assert findings["newest"][2] == {"id": "SCAN-000162", "repository": "storefront-legacy", "cveId": "CVE-2026-41234",
+                                     "cvssScore": 9.7, "critical": True, "eventTime": pytest.approx(NOW - 30)}
+    assert [f["critical"] for f in findings["newest"]] == [True, False, True, False, True]
+
+
+def test_the_header_counts_the_critical_findings_our_agent_works_on_and_the_lane_says_so():
+    st = OpsWallState()
+    row = _sec(st)
+    assert row["lanes"] == [
+        {"key": "security-agent", "name": "Security agent", "working": False, "state": "Idle"},
+        # the wall learns of the external call only when our agent answers (spec 24): no state
+        {"key": "external", "name": "External · LangGraph · A2A", "working": False, "state": None},
+    ]
+    _critical(st, "SCAN-000170", at=NOW - 20)
+    _critical(st, "SCAN-000171", at=NOW - 10, t=NOW - 11)
+    _critical(st, "SCAN-000172", at=NOW - 70, t=NOW - 71)   # gave up 10 s ago
+    _critical(st, "SCAN-000173", at=NOW - 30, t=NOW - 31)
+    _dismissed(st, "SCAN-000173", at=NOW - 25, t=NOW - 31)  # answered
+    row = _sec(st)
+    assert (row["status"], row["statusText"], row["openCriticals"]) == ("working", "Agent on critical CVE", 2)
+    assert [(lane["working"], lane["state"]) for lane in row["lanes"]] == [(True, "Working"), (False, None)]
+    _patched(st, "SCAN-000170", at=NOW - 1, started=NOW - 15, finished=NOW - 5)
+    _dismissed(st, "SCAN-000171", at=NOW - 2, t=NOW - 11)
+    row = _sec(st)
+    assert (row["status"], row["statusText"], row["openCriticals"]) == ("healthy", "Healthy", 0)
+    assert row["lanes"][0]["state"] == "Idle"
+
+
+def _cve_story(st, fid, t, truth="PATCH", score=9.6, action=None, decided_after=None, status=None,
+               finished_after=None, routed=True):
+    """A finding reported at `t`: its answer key, lab 6.1's record a second later, and lab 6.4's
+    decision that many seconds after the finding."""
+    _scan(st, fid, t=t, score=score)
+    _cve_truth(st, fid, truth, t=t)
+    if routed and score >= 9.0:
+        _critical(st, fid, at=t + 1, t=t, score=score)
+    if action is not None:
+        status = status or ("PATCHED" if action == "PATCH" else "N/A")
+        started = t + finished_after - 5 if finished_after is not None else None
+        finished = t + finished_after if finished_after is not None else None
+        _patch_decision(st, fid, at=t + decided_after, action=action, status=status,
+                        started=started, finished=finished, t=t)
+
+
+def test_the_issues_panel_scores_the_critical_findings_of_the_last_10_minutes_against_the_answer_key():
+    st = OpsWallState()
+    _cve_story(st, "A", NOW - 300, action="PATCH", decided_after=12, finished_after=9)      # right
+    _cve_story(st, "B", NOW - 280, truth="DISMISS", action="DISMISS", decided_after=6)      # right
+    _cve_story(st, "C", NOW - 260, action="DISMISS", decided_after=8)                       # wrong: missed
+    _cve_story(st, "D", NOW - 240, truth="DISMISS", action="INVALID", decided_after=2)      # missed
+    _cve_story(st, "E", NOW - 220, action="PATCH", status="FAILED", decided_after=40)       # not patched: missed
+    _cve_story(st, "J", NOW - 200, action="PATCH", decided_after=20, finished_after=15)     # right
+    # right, and it called the tool anyway: lab 6.4 keeps the times, but it is no patch (N/A)
+    _cve_story(st, "L", NOW - 180, truth="DISMISS", action="DISMISS", decided_after=10, finished_after=7)
+    _cve_story(st, "F", NOW - 62)                       # no decision 60 s after lab 6.1's record: missed
+    _cve_story(st, "G", NOW - 60.5)                     # 59.5 s after its record: still waiting
+    _cve_story(st, "K", NOW - 61, routed=False)         # never routed: missed 60 s after the finding
+    _cve_story(st, "H", NOW - 100, truth=None, score=7.5)                                   # not critical
+    _cve_story(st, "I", NOW - 601, action="PATCH", decided_after=12, finished_after=9)      # before the window
+    assert _sec(st)["issues"] == {
+        "injected": 10, "detected": 4, "missed": 5,
+        "medianTimeToDetect": pytest.approx(10.0),      # 2, 6, 8, 10, 12, 20, 40: the finding -> the decision
+        "medianTimeToRemediate": pytest.approx(12.0),   # 9, 15: the finding -> the patch's finish, PATCHED only
+        "medianTimeToDetectText": "10s", "medianTimeToRemediateText": "12s",
+    }
+
+
+def test_a_right_decision_that_comes_after_60_s_is_a_miss():
+    # Spec 26: missed is wrong, INVALID, or none within 60 s. Our bar gives up 60 s after lab 6.1's
+    # record, so a decision after that is a miss however right it is; checkout's rule would have
+    # counted it as detected (the code review, S-c3).
+    st = OpsWallState()
+    _cve_story(st, "A", NOW - 300, action="PATCH", decided_after=61, finished_after=9)    # 60 s after 6.1: in time
+    _cve_story(st, "B", NOW - 280, truth="DISMISS", action="DISMISS", decided_after=61.5)  # 60.5 s after it: late
+    _cve_story(st, "C", NOW - 260, action="PATCH", decided_after=90, finished_after=9)    # late
+    _cve_story(st, "D", NOW - 240, action="DISMISS", decided_after=70)                    # wrong and late: one miss
+    # never routed: the 60 s run from the finding, as for one never decided
+    _cve_story(st, "E", NOW - 220, truth="DISMISS", action="DISMISS", decided_after=60.5, routed=False)
+    issues = _sec(st)["issues"]
+    assert (issues["injected"], issues["detected"], issues["missed"]) == (5, 1, 4)
+    # The times still count the late decisions: that is how long they took.
+    assert issues["medianTimeToDetect"] == pytest.approx(61.5)     # 60.5, 61, 61.5, 70, 90
+    assert issues["medianTimeToRemediate"] == pytest.approx(9.0)   # A and C, both patched
+
+
+def test_a_finding_fills_in_from_its_four_records_in_any_order():
+    import itertools
+
+    records = [
+        lambda st: _scan(st, "SCAN-000180"),
+        lambda st: _cve_truth(st, "SCAN-000180", "PATCH"),
+        lambda st: _critical(st, "SCAN-000180", at=FT + 1),
+        lambda st: _patched(st, "SCAN-000180", at=FT + 12, started=FT + 3, finished=FT + 9),
+    ]
+    for order in itertools.permutations(records):
+        st = OpsWallState()
+        for apply in order:
+            apply(st)
+        row = _sec(st)
+        assert [f["id"] for f in row["findings"]["newest"]] == ["SCAN-000180"]
+        assert [(r["lane"], r["label"]) for r in row["runs"]] == [("security-agent", "Patched in 11s"),
+                                                                  ("external", f"{COMMIT} in 6s")]
+        assert (row["issues"]["detected"], row["issues"]["medianTimeToDetect"],
+                row["issues"]["medianTimeToRemediate"]) == (1, pytest.approx(12.0), pytest.approx(9.0))
+
+
+def test_a_record_written_twice_keeps_its_first_kafka_timestamp_and_the_scan_its_first_fields():
+    st = OpsWallState()
+    _scan(st, "SCAN-000181", repository="payments")
+    _critical(st, "SCAN-000181", at=FT + 1)
+    _critical(st, "SCAN-000181", at=FT + 30)  # lab 6.1 ran again
+    _dismissed(st, "SCAN-000181", at=FT + 9)
+    _dismissed(st, "SCAN-000181", at=FT + 40, reason="Archived.")  # an aborted transaction's replay
+    [run] = _sec(st)["runs"]
+    assert (run["start"], run["end"]) == (pytest.approx(_tpos(FT + 1)), pytest.approx(_tpos(FT + 9)))
+    assert (run["repository"], run["reason"]) == ("payments", "Archived.")  # the newer decision's words
+
+
+def test_a_field_a_record_leaves_empty_waits_for_a_record_that_carries_it():
+    # One rule for a ticket's fields and a finding's (the code review's M1): None or "" is no
+    # value, so a later record that copies the field fills it in; a CVSS of 0.0 is a score.
+    st = OpsWallState()
+    st.apply_ticket({**_fields("ZD-48216", TK), "subject": ""})
+    _p1(st, "ZD-48216", at=TK + 1)  # p1_tickets copies the subject
+    assert _row(st)["tickets"]["newest"][0]["subject"] == "Subject of ZD-48216"
+    st.apply_finding({**_scan_fields("SCAN-000182"), "repository": ""})
+    _critical(st, "SCAN-000182", at=FT + 1)  # critical_cves copies the repository
+    st.apply_finding({**_scan_fields("SCAN-000183", t=FT + 2), "cvss_score": 0.0})
+    newest = {f["id"]: f for f in _sec(st)["findings"]["newest"]}
+    assert newest["SCAN-000182"]["repository"] == "checkout"
+    assert (newest["SCAN-000183"]["cvssScore"], newest["SCAN-000183"]["critical"]) == (0.0, False)
+
+
+def test_trim_drops_the_findings_older_than_the_history_plus_the_margin():
+    st = OpsWallState()
+    _cve_story(st, "OLD", NOW - 680, action="DISMISS", truth="DISMISS", decided_after=19)  # last at NOW - 661
+    _cve_story(st, "KEPT", NOW - 650)
+    st.trim(NOW)  # keeps the last 600 + 60 s
+    row = _sec(st, now=NOW - 100)
+    assert [f["id"] for f in row["findings"]["newest"]] == ["KEPT"]
+    assert row["findings"]["scanned"] == 1
+
+
+def test_trim_keeps_a_ticket_or_a_finding_while_the_last_thing_that_happened_to_it_is_recent():
+    # Each is 700 s old; trim keeps the last 660 s, and what kept each one happened 659 s ago.
+    st = OpsWallState()
+    _ticket(st, "ROUTED", NOW - 700)
+    _p1(st, "ROUTED", at=NOW - 659, t=NOW - 700)                                         # lab 5.1's record
+    _story(st, "CLASSIFIED", NOW - 700, truth="LOW", verdict="LOW", verdict_after=41)     # the verdict
+    _story(st, "ANSWERED", NOW - 700, verdict="HIGH", verdict_after=4, answer_after=41)   # the responder's action
+    _story(st, "DROPPED", NOW - 700, verdict="HIGH", verdict_after=4, answer_after=39)
+    _scan(st, "ROUTED", t=NOW - 700)
+    _critical(st, "ROUTED", at=NOW - 659, t=NOW - 700)                                   # lab 6.1's record
+    _cve_story(st, "DECIDED", NOW - 700, truth="DISMISS", action="DISMISS", decided_after=41)  # lab 6.4's
+    _cve_story(st, "PATCHED", NOW - 700, action="PATCH", decided_after=30, finished_after=41)  # the patch's finish
+    _cve_story(st, "GONE", NOW - 700, action="PATCH", decided_after=39, finished_after=35)
+    st.trim(NOW)
+    assert {t["id"] for t in _row(st, now=NOW - 100)["tickets"]["newest"]} == {"ROUTED", "CLASSIFIED", "ANSWERED"}
+    assert {f["id"] for f in _sec(st, now=NOW - 100)["findings"]["newest"]} == {"ROUTED", "DECIDED", "PATCHED"}
+
+
+def test_a_run_that_ended_before_the_timeline_is_left_out_and_one_open_since_before_it_starts_at_its_edge():
+    st = OpsWallState()
+    _critical(st, "SCAN-000190", at=NOW - 140, t=NOW - 141)
+    _dismissed(st, "SCAN-000190", at=NOW - 121, t=NOW - 141)
+    _critical(st, "SCAN-000191", at=NOW - 130, t=NOW - 131)
+    _dismissed(st, "SCAN-000191", at=NOW - 100, t=NOW - 131)
+    [run] = _sec(st)["runs"]
+    assert (run["findingId"], run["start"], run["end"]) == ("SCAN-000191", 0.0, pytest.approx(20.0))
+
+
+def test_the_critical_line_is_lab_6_1s_rule():
+    import re
+    from pathlib import Path
+
+    from scripts.opswall.state import CRITICAL_CVSS
+
+    sql = (Path(__file__).resolve().parents[1] / "sql/6.1_critical_cves.sql").read_text()
+    (score,) = re.findall(r"`cvss_score` >= ([\d.]+)", sql)
+    assert CRITICAL_CVSS == float(score)
+
+
+def test_the_security_row_leaves_the_three_service_rows_as_they_were():
+    def services(st):
+        _phase4_payments(st)
+        _story(st, "ZD-48215", NOW - 100, verdict="HIGH", verdict_after=4, answer_after=10)
+        _deployment(st, "web-gateway", T0, "DEPLOY", "3.4.3", "3.4.2")
+        return st
+
+    before = services(OpsWallState()).snapshot(now=NOW)
+    st = services(OpsWallState())
+    _cve_story(st, "SCAN-000200", NOW - 90, action="PATCH", decided_after=12, finished_after=9)
+    _cve_story(st, "SCAN-000201", NOW - 40)
+    after = st.snapshot(now=NOW)
+    assert after["services"][:3] == before["services"][:3]
+    assert {k: v for k, v in after.items() if k != "services"} == {k: v for k, v in before.items() if k != "services"}

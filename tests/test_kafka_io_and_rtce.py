@@ -38,7 +38,7 @@ def _kafka_sink(monkeypatch):
             produced.append((topic, key, value, timestamp))
 
         def poll(self, timeout):
-            pass
+            produced.append("poll")
 
     class FakeSchemaRegistry:
         def __init__(self, conf):
@@ -82,8 +82,55 @@ def test_kafka_sink_produces_a_ticket_and_its_answer_key_keyed_by_raw_strings(mo
     assert produced == [
         ("support_tickets", b"checkout", ("support_tickets-value", ticket), 1_800_000_005_000),
         ("ticket_answer_key", b"INC0041872", ("ticket_answer_key-value", key), 1_800_000_005_000),
+        "poll",
     ]
     assert serializer_conf["auto.register.schemas"] is False
+
+
+def test_kafka_sink_produces_a_finding_and_its_answer_key_keyed_by_raw_strings(monkeypatch):
+    # D-070: no key schemas. A finding is keyed by its repository, as support_tickets is by its
+    # service; an answer-key record by its finding id. Both value schemas are looked up.
+    from opsgen.findings import NewFinding
+
+    sink, produced, serializer_conf = _kafka_sink(monkeypatch)
+    scan = {"event_time": 1_800_000_005_000, "finding_id": "SCAN-000007", "repository": "payments",
+            "cve_id": "CVE-2026-44052", "package": "pyyaml", "installed_version": "5.3.1",
+            "fixed_version": "5.4.1", "cvss_score": 9.7, "finding": "f"}  # fmt: skip
+    key = {"event_time": 1_800_000_005_000, "finding_id": "SCAN-000007", "expected_action": "DISMISS"}
+    sink.emit_findings([NewFinding(scan, key)])
+    assert produced == [
+        ("cve_scans", b"payments", ("cve_scans-value", scan), 1_800_000_005_000),
+        ("cve_answer_key", b"SCAN-000007", ("cve_answer_key-value", key), 1_800_000_005_000),
+        "poll",
+    ]
+    assert serializer_conf["auto.register.schemas"] is False
+
+
+def test_kafka_sink_produces_metrics_deployments_and_incidents_at_their_event_time(monkeypatch):
+    # service_metrics and service_incidents are keyed by the raw service name; service_deployments
+    # by the service name encoded against its registered key subject (a primitive one here).
+    sink, produced, _ = _kafka_sink(monkeypatch)
+    metrics = [{"event_time": 1_800_000_001_000, "service_name": "payments", "traffic_count": 50,
+                "latency_ms": 35.0, "error_count": 0},
+               {"event_time": 1_800_000_001_000, "service_name": "web-gateway", "traffic_count": 80,
+                "latency_ms": 20.0, "error_count": 3}]  # fmt: skip
+    deployment = {"event_time": 1_800_000_002_000, "service_name": "web-gateway", "version": "2.9.5",
+                  "previous_version": "2.9.4", "deployed_at": 1_800_000_002_000, "last_change": "DEPLOY"}  # fmt: skip
+    incident = {"event_time": 1_800_000_003_000, "service_name": "payments", "incident_id": "INC0001",
+                "incident_type": "UPSTREAM_DROP"}  # fmt: skip
+    sink.emit_metrics(metrics)
+    sink.emit_deployments([deployment])
+    sink.emit_incident(incident)
+    assert produced == [
+        ("service_metrics", b"payments", ("service_metrics-value", metrics[0]), 1_800_000_001_000),
+        ("service_metrics", b"web-gateway", ("service_metrics-value", metrics[1]), 1_800_000_001_000),
+        "poll",
+        ("service_deployments", ("service_deployments-key", "web-gateway"),
+         ("service_deployments-value", deployment), 1_800_000_002_000),
+        "poll",
+        ("service_incidents", b"payments", ("service_incidents-value", incident), 1_800_000_003_000),
+        "poll",
+    ]
 
 
 def _card():
@@ -140,3 +187,19 @@ def test_the_decisions_example_answers_the_walkthrough_question():
 def test_lightning_command_can_target_the_decisions_table():
     cmd = lightning_command(_card(), "remediation_decisions")
     assert "remediation_decisions" in cmd and "/query/v1" in cmd
+
+
+def test_the_patch_decisions_example_lists_the_latest_patches_with_their_commits():
+    """D-070: Terraform turns RTCE on for patch_decisions, so it gets an example too: the
+    latest PATCHED decisions, each with its commit, in plain SELECT/WHERE/ORDER BY/LIMIT."""
+    query = LIGHTNING_QUERIES["patch_decisions"]
+    lowered = query.lower()
+    assert lowered.startswith("select ")
+    assert "where patch_status = 'patched'" in lowered
+    assert "commit_sha" in query and "repository" in query and "cve_id" in query
+    assert "order by event_time desc limit " in lowered
+
+
+def test_lightning_command_can_target_patch_decisions():
+    cmd = lightning_command(_card(), "patch_decisions")
+    assert "FROM patch_decisions" in cmd and "/query/v1" in cmd

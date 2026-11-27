@@ -22,25 +22,37 @@ def test_source_topics_include_service_incidents():
 
 
 def test_source_topics_are_exactly_the_generator_streams():
-    # Mirror of opsgen/kafka_io.py: the five topics the KafkaSink writes to, checkout's tickets
-    # and their answer key included (D-068).
+    # Mirror of opsgen/kafka_io.py: the seven topics the KafkaSink writes to, checkout's tickets
+    # and their answer key (D-068) and the scanner's findings and theirs (D-070) included.
     assert set(SOURCE_TOPICS) == {
         "service_metrics",
         "service_deployments",
         "service_incidents",
         "support_tickets",
         "ticket_answer_key",
+        "cve_scans",
+        "cve_answer_key",
     }
 
 
-def test_output_topics_are_exactly_the_five_lab_tables():
-    # D-067's error rate; D-068's P1 tickets (lab 5.1) and the classifier's verdicts (lab 5.2).
+def test_the_source_topics_are_every_topic_the_generator_writes():
+    from opsgen import kafka_io
+
+    written = {value for name, value in vars(kafka_io).items() if name.endswith("_TOPIC")}
+    assert written == set(SOURCE_TOPICS)
+
+
+def test_output_topics_are_exactly_the_seven_lab_tables():
+    # D-067's error rate; D-068's P1 tickets (lab 5.1) and the classifier's verdicts (lab 5.2);
+    # D-070's critical findings (lab 6.1) and the security agent's decisions (lab 6.4).
     assert set(OUTPUT_TOPICS) == {
         "service_error_rate",
         "service_health",
         "remediation_decisions",
         "p1_tickets",
         "ticket_triage",
+        "critical_cves",
+        "patch_decisions",
     }
 
 
@@ -54,7 +66,8 @@ def run_reset(install_fakes):
     return run
 
 
-def test_empties_all_ten_topics(run_reset):
+def test_empties_all_fourteen_topics(run_reset):
+    assert len(ALL_TOPICS) == 14
     h = run_reset()
     assert sorted(h.admin.emptied) == sorted(ALL_TOPICS)
 
@@ -64,25 +77,62 @@ def test_keep_source_empties_only_the_output_topics(run_reset):
     assert sorted(h.admin.emptied) == sorted(OUTPUT_TOPICS)
 
 
-def test_drops_the_agents_and_never_a_table(run_reset):
-    # CREATE AGENT has no IF NOT EXISTS: labs 4.2, 5.2 and 5.3 could not run again otherwise.
+def test_drops_the_agents_then_the_tool_then_the_connection_and_never_a_table(run_reset):
+    # CREATE AGENT, TOOL and CONNECTION have no IF NOT EXISTS: labs 4.2, 5.2, 5.3, 6.2 and 6.3
+    # could not run again otherwise. security_agent uses patch_agent_tool, which uses
+    # patch_agent_connection, so each goes before what it uses (D-070).
     h = run_reset()
     assert h.session.submitted == [
         "DROP AGENT IF EXISTS `release_agent`;",
         "DROP AGENT IF EXISTS `capacity_agent`;",
         "DROP AGENT IF EXISTS `ticket_classifier`;",
         "DROP AGENT IF EXISTS `ticket_responder`;",
+        "DROP AGENT IF EXISTS `security_agent`;",
+        "DROP TOOL IF EXISTS `patch_agent_tool`;",
+        "DROP CONNECTION IF EXISTS `patch_agent_connection`;",
     ]
     assert not any("TABLE" in sql for sql in h.session.submitted)
+
+
+def test_the_tool_and_the_connection_are_reported_like_the_agents(run_reset, capsys):
+    run_reset()
+    out = capsys.readouterr().out
+    positions = [
+        out.index(f"Dropping the {len(reset.LAB_AGENTS)} agents..."),
+        out.index("  security_agent: dropped"),
+        out.index("Dropping lab 6.2's tool and connection..."),
+        out.index("  patch_agent_tool: dropped"),
+        out.index("  patch_agent_connection: dropped"),
+    ]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize("failing", ["security_agent", "patch_agent_tool"])
+def test_a_drop_that_fails_is_a_problem_and_the_rest_are_still_dropped(install_fakes, monkeypatch, capsys, failing):
+    h = install_fakes(reset, topics=ALL_TOPICS)
+
+    def wait(name, timeout=180):  # that one DROP fails, every other one completes
+        sql = h.session.submitted[int(name.rsplit("-", 1)[1]) - 1]
+        return {"status": {"phase": "FAILED" if f"`{failing}`" in sql else "COMPLETED"}}
+
+    monkeypatch.setattr(h.session, "wait", wait)
+    with pytest.raises(SystemExit) as exit_:
+        reset.main(["--creds", h.card])
+    assert exit_.value.code == 1
+    out = capsys.readouterr().out
+    assert len(h.session.submitted) == 7
+    assert f"  {failing}: FAILED" in out
+    assert out.count(": dropped") == 6
+    assert f"Reset finished with problems: drop {failing}" in out
+    assert sorted(h.admin.emptied) == sorted(ALL_TOPICS)
 
 
 def test_the_next_steps_name_every_insert_and_agent_lab_in_order(run_reset, capsys):
     run_reset()
     out = capsys.readouterr().out
     tail = out[out.index("Reset complete.") :]
-    assert "Dropping the four agents..." in out
-    assert "INSERTs (2.2, 2.5, 4.3, 5.1, 5.2 and 5.3)" in tail
-    assert "create the agents again in labs 4.2, 5.2 and 5.3" in tail
+    assert "INSERTs (2.2, 2.5, 4.3, 5.1, 5.2, 5.3, 6.1 and 6.4)" in tail
+    assert "create the agents again in labs 4.2, 5.2, 5.3, 6.2 (the patch agent's connection and tool) and 6.3" in tail
 
 
 def test_stops_running_statements_before_emptying_any_topic(run_reset):
@@ -121,7 +171,10 @@ def test_a_missing_topic_is_reported_and_exits_nonzero(run_reset, capsys):
 def _state_file(root):
     path = state_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('{"incident_counter": 7, "next_ticket_numbers": {"ZENDESK": 48231, "SERVICENOW": 41889}}')
+    path.write_text(
+        '{"incident_counter": 7, "next_ticket_numbers": {"ZENDESK": 48231, "SERVICENOW": 41889}, '
+        '"next_finding_number": 124}'
+    )
     return path
 
 
@@ -132,8 +185,9 @@ def test_deletes_the_generator_state_file(run_reset, tmp_path):
 
 
 def test_keep_source_keeps_the_generator_state_file(run_reset, tmp_path, capsys):
-    # The kept source topics hold the incidents, versions and tickets the file counts past, so
-    # deleting it would make the next ops-sim reuse their ids next to them (D-046, D-067, D-068).
+    # The kept source topics hold the incidents, versions, tickets and findings the file counts
+    # past, so deleting it would make the next ops-sim reuse their ids next to them (D-046,
+    # D-067, D-068, D-070).
     path = _state_file(tmp_path)
     before = path.read_text()
     run_reset("--keep-source")

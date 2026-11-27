@@ -9,8 +9,12 @@ As registered by Confluent Cloud (checked in Phase 3): TIMESTAMP(3) maps to
 `local-timestamp-millis`, and an upsert table's PRIMARY KEY columns are in the key
 subject only, not in the value.
 
+The two CVE source tables (D-070) copy support_tickets' options, checked here too.
+
 The two ticket output tables (D-068) have no .avsc (Flink writes them), but they copy
-support_tickets' columns and options, so their DDL is checked against it here too.
+support_tickets' columns and options, so their DDL is checked against it here too. So do
+section 6's two (D-070): critical_cves copies cve_scans, and patch_decisions carries the
+finding, the security agent's decision and the patch agent's answer.
 """
 
 import json
@@ -28,6 +32,8 @@ PAIRS = [
     ("sql/source_service_incidents.sql", "schemas/service_incidents.avsc", None),
     ("sql/source_support_tickets.sql", "schemas/support_tickets.avsc", None),  # D-068
     ("sql/source_ticket_answer_key.sql", "schemas/ticket_answer_key.avsc", None),
+    ("sql/source_cve_scans.sql", "schemas/cve_scans.avsc", None),  # D-070
+    ("sql/source_cve_answer_key.sql", "schemas/cve_answer_key.avsc", None),
 ]
 _PRIMARY_KEY = re.compile(r"PRIMARY KEY \(([^)]*)\)")
 
@@ -141,6 +147,50 @@ def test_the_ticket_tables_take_service_incidents_options(table):
     assert tail(table) == tail("service_incidents")
 
 
+def test_the_cve_tables_have_the_specs_columns_in_order():
+    # D-070, spec decisions 8 and 9.
+    scans = _ddl_columns((ROOT / "sql/source_cve_scans.sql").read_text())
+    assert list(scans.items()) == [
+        ("event_time", "local-timestamp-millis"),
+        ("finding_id", "string"),
+        ("repository", "string"),
+        ("cve_id", "string"),
+        ("package", "string"),
+        ("installed_version", "string"),
+        ("fixed_version", "string"),
+        ("cvss_score", "double"),
+        ("finding", "string"),
+    ]
+    answer_key = _ddl_columns((ROOT / "sql/source_cve_answer_key.sql").read_text())
+    assert list(answer_key.items()) == [
+        ("event_time", "local-timestamp-millis"),
+        ("finding_id", "string"),
+        ("expected_action", "string"),
+    ]
+
+
+@pytest.mark.parametrize("table", ["cve_scans", "cve_answer_key"])
+def test_the_cve_tables_take_support_tickets_options(table):
+    # The same WITH options, bucket and 5 s watermark as support_tickets; no key columns.
+    def tail(name):
+        sql = (ROOT / f"sql/source_{name}.sql").read_text()
+        return sql[sql.index("  WATERMARK") :]
+
+    assert tail(table) == tail("support_tickets")
+
+
+def test_every_cve_column_has_a_comment_and_the_answer_key_says_who_reads_it():
+    for table in ("cve_scans", "cve_answer_key"):
+        sql = (ROOT / f"sql/source_{table}.sql").read_text()
+        columns = [ln for ln in sql.splitlines() if _COLUMN.match(ln)]
+        assert columns and all(" COMMENT '" in ln for ln in columns), table
+    answer_key = (ROOT / "sql/source_cve_answer_key.sql").read_text()
+    assert "FOR THE WALL AND EVALUATE ONLY" in answer_key
+    action = re.search(r"^\s+`expected_action` (.+)$", answer_key, re.MULTILINE).group(1)
+    for word in ("PATCH", "DISMISS", "NULL"):
+        assert word in action, word
+
+
 TICKET_COLUMNS = [
     ("event_time", "local-timestamp-millis"),
     ("ticket_id", "string"),
@@ -183,3 +233,87 @@ def test_the_verdict_is_never_null_and_names_its_three_values():
     assert line.startswith("STRING NOT NULL COMMENT ")
     for value in ("HIGH", "LOW", "INVALID"):
         assert value in line, value
+
+
+# Section 6 (D-070, spec decisions 10 and 11): lab 6.1 copies the critical findings, lab 6.4
+# writes the security agent's decision with what the patch agent answered.
+FINDING_COLUMNS = [
+    ("event_time", "local-timestamp-millis"),
+    ("finding_id", "string"),
+    ("repository", "string"),
+    ("cve_id", "string"),
+    ("package", "string"),
+    ("installed_version", "string"),
+    ("fixed_version", "string"),
+    ("cvss_score", "double"),
+    ("finding", "string"),
+]
+
+
+def _not_null_columns(sql: str) -> list[str]:
+    return [m.group(1) for ln in sql.splitlines() if (m := _COLUMN.match(ln)) and " NOT NULL" in ln]
+
+
+def test_critical_cves_is_the_finding_as_it_came_in():
+    sql = (ROOT / "sql/sink_critical_cves.sql").read_text()
+    assert list(_ddl_columns(sql).items()) == FINDING_COLUMNS
+    assert _not_null_columns(sql) == []
+    # The column comments say only lab 6.1's critical findings belong here.
+    score = re.search(r"^\s+`cvss_score` (.+)$", sql, re.MULTILINE).group(1)
+    assert "9.0" in score and "6.1" in score
+
+
+def test_patch_decisions_carries_the_finding_then_the_decision_then_the_patch():
+    sql = (ROOT / "sql/sink_patch_decisions.sql").read_text()
+    assert list(_ddl_columns(sql).items()) == [
+        ("event_time", "local-timestamp-millis"),
+        ("finding_id", "string"),
+        ("repository", "string"),
+        ("cve_id", "string"),
+        ("cvss_score", "double"),
+        ("action", "string"),
+        ("reason", "string"),
+        ("patch_status", "string"),
+        ("commit_sha", "string"),
+        ("patch_started_at", "local-timestamp-millis"),
+        ("patch_finished_at", "local-timestamp-millis"),
+        ("raw_response", "string"),
+    ]
+    # Lab 6.4 always writes an action and a patch status; everything it parses can be null.
+    assert _not_null_columns(sql) == ["action", "patch_status"]
+    for column in ("patch_started_at", "patch_finished_at"):
+        assert re.search(rf"^\s+`{column}` TIMESTAMP\(3\) COMMENT ", sql, re.MULTILINE), column
+
+
+@pytest.mark.parametrize(
+    ("column", "values"),
+    [("action", ("PATCH", "DISMISS", "INVALID")), ("patch_status", ("PATCHED", "FAILED", "N/A"))],
+)
+def test_the_decision_and_the_patch_status_name_their_three_values(column, values):
+    sql = (ROOT / "sql/sink_patch_decisions.sql").read_text()
+    line = re.search(rf"^\s+`{column}` (.+)$", sql, re.MULTILINE).group(1)
+    assert line.startswith("STRING NOT NULL COMMENT ")
+    for value in values:
+        assert value in line, value
+
+
+@pytest.mark.parametrize("table", ["critical_cves", "patch_decisions"])
+def test_the_cve_output_tables_take_support_tickets_options(table):
+    # The WITH block of p1_tickets, which is support_tickets': append-only, read-uncommitted
+    # so the security agent never waits about a minute for a commit (D-063), delete cleanup,
+    # 24 h, one bucket, and a 5 s watermark on event_time.
+    def tail(path):
+        sql = (ROOT / path).read_text()
+        return sql[sql.index("  WATERMARK") :]
+
+    assert tail(f"sql/sink_{table}.sql") == tail("sql/sink_p1_tickets.sql")
+
+
+@pytest.mark.parametrize("table", ["critical_cves", "patch_decisions"])
+def test_every_cve_output_column_has_a_comment_without_an_apostrophe(table):
+    sql = (ROOT / f"sql/sink_{table}.sql").read_text()
+    body = sql[sql.index("CREATE TABLE") :]
+    columns = [ln for ln in body.splitlines() if _COLUMN.match(ln)]
+    assert columns and all(" COMMENT '" in ln for ln in columns)
+    for ln in columns:  # a COMMENT is a quoted string: one apostrophe inside would end it
+        assert ln.count("'") == 2, ln
