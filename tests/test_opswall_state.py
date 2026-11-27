@@ -1431,6 +1431,24 @@ def test_a_stopped_patch_agent_reads_patch_agent_unreachable_in_red_and_is_a_mis
     assert (row["issues"]["injected"], row["issues"]["detected"], row["issues"]["missed"]) == (1, 0, 1)
 
 
+def test_a_patch_agent_behind_a_dead_tunnel_reads_patch_agent_unreachable_and_is_a_miss():
+    # Issue 12's live run (2026-11-27): with the tunnel gone, the running lab 6.4 INSERT did not
+    # fail at the agent card as issue 02's one-off SELECT did. The model got the tool's error and
+    # answered PATCH with no commit, so lab 6.4 wrote PATCH and FAILED. The decision was the one
+    # expected, but nothing was patched: a miss (the user's decision), red like the INVALID above.
+    st = OpsWallState()
+    _scan(st, "SCAN-000121")
+    _cve_truth(st, "SCAN-000121", "PATCH")
+    _critical(st, "SCAN-000121", at=FT + 1)
+    _patch_decision(st, "SCAN-000121", at=FT + 3, action="PATCH", status="FAILED", reason="r",
+                    raw="Action: PATCH\nReason: r\nPatch: FAILED, the patch agent could not be reached")
+    row = _sec(st)
+    [run] = row["runs"]
+    assert (run["label"], run["unreachable"], run["action"]) == ("Patch agent unreachable", True, "PATCH")
+    assert run["outcomeText"] == "Action: Patch. No commit came back."
+    assert (row["issues"]["injected"], row["issues"]["detected"], row["issues"]["missed"]) == (1, 0, 1)
+
+
 def test_with_no_decision_our_bar_works_for_60_s_then_reads_no_answer():
     st = OpsWallState()
     _critical(st, "SCAN-000127", at=FT + 1)
@@ -1577,7 +1595,7 @@ def test_the_issues_panel_scores_the_critical_findings_of_the_last_10_minutes_ag
     _cve_story(st, "B", NOW - 280, truth="DISMISS", action="DISMISS", decided_after=6)      # right
     _cve_story(st, "C", NOW - 260, action="DISMISS", decided_after=8)                       # wrong: missed
     _cve_story(st, "D", NOW - 240, truth="DISMISS", action="INVALID", decided_after=2)      # missed
-    _cve_story(st, "E", NOW - 220, action="PATCH", status="FAILED", decided_after=40)       # right, not patched
+    _cve_story(st, "E", NOW - 220, action="PATCH", status="FAILED", decided_after=40)       # not patched: missed
     _cve_story(st, "J", NOW - 200, action="PATCH", decided_after=20, finished_after=15)     # right
     # right, and it called the tool anyway: lab 6.4 keeps the times, but it is no patch (N/A)
     _cve_story(st, "L", NOW - 180, truth="DISMISS", action="DISMISS", decided_after=10, finished_after=7)
@@ -1587,7 +1605,7 @@ def test_the_issues_panel_scores_the_critical_findings_of_the_last_10_minutes_ag
     _cve_story(st, "H", NOW - 100, truth=None, score=7.5)                                   # not critical
     _cve_story(st, "I", NOW - 601, action="PATCH", decided_after=12, finished_after=9)      # before the window
     assert _sec(st)["issues"] == {
-        "injected": 10, "detected": 5, "missed": 4,
+        "injected": 10, "detected": 4, "missed": 5,
         "medianTimeToDetect": pytest.approx(10.0),      # 2, 6, 8, 10, 12, 20, 40: the finding -> the decision
         "medianTimeToRemediate": pytest.approx(12.0),   # 9, 15: the finding -> the patch's finish, PATCHED only
         "medianTimeToDetectText": "10s", "medianTimeToRemediateText": "12s",

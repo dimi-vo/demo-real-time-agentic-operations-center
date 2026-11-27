@@ -102,8 +102,9 @@ transaction wrote comes again when the statement replays, D-063).
   part of its bar that span covers, the hatch. The row is "Agent on critical CVE" while a run
   of ours is open, and ``openCriticals`` counts their findings. Its
   **Issues panel** scores the critical findings reported in the last 10 minutes that have an
-  answer key: right (the action expected, within 60 s of lab 6.1's record), missed (another
-  action, ``INVALID``, or no decision within those 60 s, a late right one included), the median
+  answer key: right (the action expected, within 60 s of lab 6.1's record, and no ``FAILED``
+  patch), missed (another action, ``INVALID``, a ``FAILED`` patch, or no decision within those
+  60 s, a late right one included), the median
   finding -> decision, and finding -> the patch's finish for the ``PATCHED`` ones. Its list is
   the newest 5 findings and the count of the last 10 minutes; its marks are the findings of the
   last 2 minutes, critical or not.
@@ -1212,8 +1213,9 @@ def _finding_issues(findings: list[Finding], now: float) -> dict:
     """The security row's Issues panel (spec decision 26), over the critical findings reported
     in the last 10 minutes that have an answer key: injected, all of them; detected, those whose
     action is the one expected and came within 60 s of lab 6.1's record (of the finding, if lab
-    6.1 never wrote one), when our bar gives up; missed, those given another action or INVALID,
-    or no decision within those 60 s, a late right one included; the median finding -> decision,
+    6.1 never wrote one), when our bar gives up, and not a FAILED patch; missed, those given
+    another action, INVALID or a FAILED patch (a patch agent behind a dead tunnel, issue 12), or
+    no decision within those 60 s, a late right one included; the median finding -> decision,
     whatever the action and however late, and finding -> the patch's finish, PATCHED only."""
     scored = [f for f in findings if f.critical and f.expected_action is not None
               and f.event_time is not None and now - SCANNED_SECONDS <= f.event_time <= now]
@@ -1222,8 +1224,11 @@ def _finding_issues(findings: list[Finding], now: float) -> dict:
         decided = f.decided_at if f.decided_at is not None else now
         return decided - (f.critical_at or f.event_time) <= SECURITY_WAIT_SECONDS
 
-    right = [f for f in scored if f.action == f.expected_action and in_time(f)]
-    missed = [f for f in scored if (f.action is not None and f.action != f.expected_action) or not in_time(f)]
+    def wrong(f: Finding) -> bool:  # an answer that is a miss whenever it came
+        return f.action is not None and (f.action != f.expected_action or f.patch_status == FAILED)
+
+    right = [f for f in scored if f.action is not None and not wrong(f) and in_time(f)]
+    missed = [f for f in scored if wrong(f) or not in_time(f)]
     return _issues_json(
         len(scored), len(right), len(missed),
         [f.decided_at - f.event_time for f in scored if f.decided_at is not None],
