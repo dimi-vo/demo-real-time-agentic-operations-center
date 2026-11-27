@@ -40,9 +40,9 @@ run "environment_and_direct_binding" {
   assert {
     condition = (
       confluent_environment.main.display_name == "John-Doe-c21e_env" &&
-      confluent_environment.main.stream_governance[0].package == "ADVANCED"
+      confluent_environment.main.stream_governance[0].package == "ESSENTIALS"
     )
-    error_message = "the environment should be named var.environment_name, with Stream Governance ADVANCED"
+    error_message = "the environment should be named var.environment_name, with Stream Governance ESSENTIALS"
   }
 
   assert {

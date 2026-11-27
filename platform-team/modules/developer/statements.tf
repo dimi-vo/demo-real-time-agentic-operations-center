@@ -654,7 +654,7 @@ resource "confluent_flink_statement" "create_patch_decisions_table" {
 resource "confluent_rtce_topic" "patch_decisions" {
   cloud       = confluent_kafka_cluster.main.cloud
   region      = confluent_kafka_cluster.main.region
-  description = "The security agent decisions on critical CVE scan findings in River Shop repositories, one row per finding: PATCH, DISMISS or INVALID with a reason, and for a PATCH the patch_status, the commit the external patch agent answered with, and when the patch started and finished."
+  description = "The security agent decisions on critical CVE scan findings in River Shop repositories."
   topic_name  = "patch_decisions"
 
   environment {
